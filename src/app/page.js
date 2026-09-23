@@ -133,9 +133,8 @@ export default function Home() {
           QTM substrate console
         </h1>
         <p className="mb-6 text-sm text-zinc-600 dark:text-zinc-400">
-          Talking to a real, separate Rust API server (<code>qtm-api</code>,
-          :8080) — its logic is still mocked internally until{" "}
-          <code>qtm-graph</code> is available.
+          Talking to a real, separate Rust API server (<code>qtm-api</code>)
+          running the actual <code>qp_hd</code> wallet engine.
         </p>
 
         <div className="mb-6 flex gap-1 rounded-full bg-zinc-200 p-1 dark:bg-zinc-800">
