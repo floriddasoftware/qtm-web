@@ -248,7 +248,7 @@ function HeritageSections({ heritage, prefix = "" }) {
     <div className="space-y-3">
       <ResultSection
         title={`${prefix}State / QuantPerm`}
-        description="QuantPerm state, coordinates, and accumulated values"
+        description="QuantPerm state, coordinates, and substrate root values"
         value={state}
         defaultOpen
       />
