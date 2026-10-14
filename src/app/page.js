@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
@@ -6,10 +5,10 @@ import { useCallback, useEffect, useState } from "react";
 const API_BASE = "https://qtm-api.onrender.com";
 
 const TABS = [
-  { id: "create", label: "Create" },
-  { id: "open", label: "Open" },
-  { id: "transit", label: "Transit" },
-  { id: "exile", label: "Exile" },
+  { id: "create", label: "create" },
+  { id: "open", label: "open" },
+  { id: "transit", label: "transit" },
+  { id: "exile", label: "exile" },
 ];
 
 const STATE_KEYS = [
@@ -111,11 +110,7 @@ function formatValue(key, value) {
     return text.startsWith("0x") ? text : `0x${text}`;
   }
 
-  if (Array.isArray(value)) {
-    return JSON.stringify(value, null, 2);
-  }
-
-  if (typeof value === "object") {
+  if (Array.isArray(value) || typeof value === "object") {
     return JSON.stringify(value, null, 2);
   }
 
@@ -166,9 +161,9 @@ function ResultSection({
   return (
     <details
       defaultOpen={defaultOpen}
-      className="group overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-900"
+      className="group overflow-hidden rounded-md border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
     >
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3 hover:bg-zinc-50 sm:px-4 dark:hover:bg-zinc-800/60 [&::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3 transition-colors hover:bg-zinc-50 sm:px-4 dark:hover:bg-zinc-800/60 [&::-webkit-details-marker]:hidden">
         <span className="min-w-0">
           <span className="block text-sm font-semibold text-zinc-900 dark:text-zinc-100">
             {title}
@@ -183,7 +178,7 @@ function ResultSection({
 
         <span
           aria-hidden="true"
-          className="flex size-7 shrink-0 items-center justify-center rounded-full border border-zinc-200 text-zinc-500 transition-transform group-open:rotate-180 dark:border-zinc-700 dark:text-zinc-300"
+          className="flex size-7 shrink-0 items-center justify-center rounded-md border border-zinc-200 text-zinc-500 transition-transform group-open:rotate-180 dark:border-zinc-700 dark:text-zinc-300"
         >
           <svg viewBox="0 0 20 20" fill="none" className="size-4">
             <path
@@ -197,7 +192,7 @@ function ResultSection({
         </span>
       </summary>
 
-      <div className="border-t border-zinc-200 px-3 py-3 sm:px-4 dark:border-zinc-700">
+      <div className="border-t border-zinc-200 px-3 py-3 sm:px-4 dark:border-zinc-800">
         {!populated ? (
           <p className="text-sm text-zinc-500 dark:text-zinc-400">
             No data was returned for this section.
@@ -283,22 +278,17 @@ function OpenResults({ result }) {
 }
 
 function TransitResults({ result }) {
-  // Direction owns EventMap.
-  const direction =
-    getObject(result, ["direction"]) ?? result;
+  const direction = getObject(result, ["direction"]) ?? result;
 
-  // EventMap owns both event and runtime.
   const eventMap =
     getObject(direction, ["event_map", "eventMap"]) ??
     getObject(result, ["event_map", "eventMap"]);
 
-  // Support responses that expose event directly.
   const event =
     getObject(eventMap, ["event"]) ??
     getObject(direction, ["event"]) ??
     getObject(result, ["event"]);
 
-  // The event owns QTM and Heritage.
   const qtm =
     getValue(event, ["qtm", "Qtm"]) ??
     getValue(eventMap, ["qtm", "Qtm"]) ??
@@ -339,12 +329,13 @@ function TransitResults({ result }) {
           defaultOpen
         />
 
-        <details className="group rounded-xl border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-900">
-          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3 hover:bg-zinc-50 sm:px-4 dark:hover:bg-zinc-800/60 [&::-webkit-details-marker]:hidden">
-            <span>
+        <details className="group overflow-hidden rounded-md border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3 transition-colors hover:bg-zinc-50 sm:px-4 dark:hover:bg-zinc-800/60 [&::-webkit-details-marker]:hidden">
+            <span className="min-w-0">
               <span className="block text-sm font-semibold text-zinc-900 dark:text-zinc-100">
                 Event / Heritage
               </span>
+
               <span className="mt-1 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">
                 Heritage contains state and transition as distinct objects
               </span>
@@ -352,7 +343,7 @@ function TransitResults({ result }) {
 
             <span
               aria-hidden="true"
-              className="flex size-7 shrink-0 items-center justify-center rounded-full border border-zinc-200 text-zinc-500 transition-transform group-open:rotate-180 dark:border-zinc-700 dark:text-zinc-300"
+              className="flex size-7 shrink-0 items-center justify-center rounded-md border border-zinc-200 text-zinc-500 transition-transform group-open:rotate-180 dark:border-zinc-700 dark:text-zinc-300"
             >
               <svg viewBox="0 0 20 20" fill="none" className="size-4">
                 <path
@@ -366,7 +357,7 @@ function TransitResults({ result }) {
             </span>
           </summary>
 
-          <div className="space-y-3 border-t border-zinc-200 p-3 sm:p-4 dark:border-zinc-700">
+          <div className="space-y-3 border-t border-zinc-200 p-3 sm:p-4 dark:border-zinc-800">
             {heritage ? (
               <HeritageSections heritage={heritage} />
             ) : (
@@ -432,7 +423,7 @@ function Field({
       </span>
 
       <input
-        className={`h-9 w-full min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800 ${
+        className={`h-9 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800 ${
           mono ? "font-mono" : ""
         }`}
         value={value}
@@ -455,11 +446,45 @@ function NumberField({ label, value, onChange }) {
         type="number"
         min="0"
         step="1"
-        className="h-9 w-full min-w-0 rounded-lg border border-zinc-300 bg-white px-2.5 font-mono text-sm text-zinc-900 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800"
+        className="h-9 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-2.5 font-mono text-sm text-zinc-900 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800"
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
         required
       />
+    </label>
+  );
+}
+
+function NetworkSelect({
+  networks,
+  value,
+  onChange,
+  loading,
+}) {
+  return (
+    <label className="flex min-w-0 flex-col gap-1">
+      <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+        Network
+      </span>
+
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={loading || networks.length === 0}
+        className="h-9 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800"
+      >
+        {networks.length === 0 && (
+          <option value="">
+            {loading ? "Loading networks..." : "No networks available"}
+          </option>
+        )}
+
+        {networks.map((network) => (
+          <option key={network.id} value={network.id}>
+            {network.name}
+          </option>
+        ))}
+      </select>
     </label>
   );
 }
@@ -472,12 +497,18 @@ export default function Home() {
   const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState("");
 
+  const [networks, setNetworks] = useState([]);
+  const [selectedNetwork, setSelectedNetwork] = useState("");
+  const [networkLoading, setNetworkLoading] = useState(true);
+  const [networkError, setNetworkError] = useState("");
+
   const [name, setName] = useState("");
   const [indices, setIndices] = useState(
     "0,0,0,0,0,0,0,0,0,0,0,0",
   );
   const [entropy, setEntropy] = useState("");
 
+  const [path, setPath] = useState("");
   const [purpose, setPurpose] = useState(44);
   const [coin, setCoin] = useState(0);
   const [account, setAccount] = useState(0);
@@ -529,9 +560,96 @@ export default function Home() {
     }
   }, []);
 
+  const loadNetworks = useCallback(async () => {
+    setNetworkLoading(true);
+    setNetworkError("");
+
+    try {
+      const res = await fetch(`${API_BASE}/networks`, {
+        cache: "no-store",
+      });
+
+      const data = await readResponse(res);
+
+      if (!Array.isArray(data.networks)) {
+        throw new Error("The API returned an invalid network list.");
+      }
+
+      const validNetworks = data.networks.filter(
+        (network) =>
+          network &&
+          typeof network.id === "string" &&
+          typeof network.name === "string",
+      );
+
+      setNetworks(validNetworks);
+
+      setSelectedNetwork((current) => {
+        if (validNetworks.some((network) => network.id === current)) {
+          return current;
+        }
+
+        return validNetworks[0]?.id || "";
+      });
+
+      const firstNetwork = validNetworks[0];
+
+      if (firstNetwork) {
+        setPurpose((current) =>
+          current === 44 && Number.isFinite(firstNetwork.purpose)
+            ? firstNetwork.purpose
+            : current,
+        );
+
+        setCoin((current) =>
+          current === 0 && Number.isFinite(firstNetwork.coin)
+            ? firstNetwork.coin
+            : current,
+        );
+
+        setPath((current) => current || firstNetwork.path || "");
+      }
+    } catch (err) {
+      setNetworkError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load networks.",
+      );
+    } finally {
+      setNetworkLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     loadSubstrates();
   }, [loadSubstrates]);
+
+  useEffect(() => {
+    loadNetworks();
+  }, [loadNetworks]);
+
+  const currentNetwork =
+    networks.find((network) => network.id === selectedNetwork) ?? null;
+
+  function handleNetworkChange(networkId) {
+    const network = networks.find((item) => item.id === networkId);
+
+    setSelectedNetwork(networkId);
+    setResult(null);
+    setError("");
+
+    if (!network) return;
+
+    if (Number.isFinite(network.purpose)) {
+      setPurpose(network.purpose);
+    }
+
+    if (Number.isFinite(network.coin)) {
+      setCoin(network.coin);
+    }
+
+    setPath(network.path || "");
+  }
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -590,6 +708,8 @@ export default function Home() {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
+              network: selectedNetwork || undefined,
+              path: path.trim() || undefined,
               purpose,
               coin,
               account,
@@ -625,7 +745,7 @@ export default function Home() {
   const substrateRequired = tab !== "create";
 
   return (
-    <div className="flex min-h-screen flex-col items-center bg-zinc-50 px-4 py-8 font-sans sm:py-12 dark:bg-black">
+    <div className="flex min-h-screen flex-col items-center bg-[#f7f7f6] px-4 py-8 font-sans sm:py-12 dark:bg-black">
       <main className="w-full max-w-2xl">
         <header className="mb-7">
           <p className="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500 dark:text-zinc-400">
@@ -638,14 +758,14 @@ export default function Home() {
 
           <p className="mt-3 max-w-xl text-sm leading-6 text-zinc-600 dark:text-zinc-400">
             Manage substrates using the Rust API server (
-            <code className="rounded bg-zinc-200 px-1 py-0.5 text-xs dark:bg-zinc-800">
+            <code className="rounded-sm bg-zinc-200/80 px-1 py-0.5 text-xs dark:bg-zinc-800">
               qtm-api
             </code>
             ) and the <code>qp_hd</code> wallet engine.
           </p>
         </header>
 
-        <section className="mb-5 rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm sm:p-5 dark:border-zinc-800 dark:bg-zinc-900">
+        <section className="mb-5 rounded-lg border border-zinc-200/90 bg-white p-4 shadow-[0_2px_12px_rgba(0,0,0,0.025)] sm:p-5 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="mb-2 flex items-center justify-between gap-3">
             <label
               htmlFor="substrate"
@@ -658,7 +778,7 @@ export default function Home() {
               type="button"
               onClick={() => loadSubstrates()}
               disabled={listLoading}
-              className="rounded-md px-2 py-1 text-sm font-medium text-blue-700 hover:bg-blue-50 disabled:opacity-50 dark:text-blue-400 dark:hover:bg-zinc-800"
+              className="rounded-sm px-2 py-1 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               {listLoading ? "Refreshing..." : "Refresh list"}
             </button>
@@ -673,7 +793,7 @@ export default function Home() {
               setError("");
             }}
             disabled={listLoading || substrates.length === 0}
-            className="h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-50 dark:focus:ring-zinc-800"
+            className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-50 dark:focus:ring-zinc-800"
           >
             {substrates.length === 0 && (
               <option value="">
@@ -694,7 +814,7 @@ export default function Home() {
           {listError && (
             <p
               role="alert"
-              className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950 dark:text-red-300"
+              className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
             >
               Unable to load the substrate list: {listError}
             </p>
@@ -702,7 +822,7 @@ export default function Home() {
 
           {!listLoading && !listError && substrates.length === 0 && (
             <p className="mt-3 text-sm text-zinc-600 dark:text-zinc-400">
-              No substrates were found. Create one using the Create tab.
+              No substrates were found. Create one using the create tab.
             </p>
           )}
 
@@ -716,7 +836,7 @@ export default function Home() {
 
         <nav
           aria-label="Substrate operations"
-          className="mb-5 grid grid-cols-4 gap-1 rounded-xl border border-zinc-200 bg-zinc-100 p-1 dark:border-zinc-800 dark:bg-zinc-900"
+          className="mb-5 grid grid-cols-4 gap-1 rounded-md border border-zinc-200 bg-zinc-100/80 p-1 dark:border-zinc-800 dark:bg-zinc-900"
         >
           {TABS.map((t) => (
             <button
@@ -728,9 +848,9 @@ export default function Home() {
                 setResult(null);
                 setError("");
               }}
-              className={`min-w-0 rounded-lg px-1.5 py-2 text-sm font-medium transition-colors sm:px-2 ${
+              className={`min-w-0 rounded-sm px-1.5 py-2 text-sm font-medium transition-colors sm:px-2 ${
                 tab === t.id
-                  ? "bg-white text-zinc-950 shadow-sm dark:bg-zinc-800 dark:text-zinc-50"
+                  ? "bg-white text-zinc-950 shadow-[0_1px_3px_rgba(0,0,0,0.08)] dark:bg-zinc-800 dark:text-zinc-50"
                   : "text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-100"
               }`}
             >
@@ -739,7 +859,7 @@ export default function Home() {
           ))}
         </nav>
 
-        <section className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm sm:p-5 dark:border-zinc-800 dark:bg-zinc-900">
+        <section className="rounded-lg border border-zinc-200/90 bg-white p-4 shadow-[0_2px_12px_rgba(0,0,0,0.025)] sm:p-5 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="mb-4">
             <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
               {TABS.find((t) => t.id === tab).label}
@@ -751,7 +871,7 @@ export default function Home() {
               {tab === "open" &&
                 "Inspect QuantPerm state and transition heritage."}
               {tab === "transit" &&
-                "Derive an event and inspect its QTM and heritage."}
+                "Select a network, customize its path, and inspect the resulting QP44 event."}
               {tab === "exile" &&
                 "Exile the selected substrate using the wallet engine."}
             </p>
@@ -786,7 +906,7 @@ export default function Home() {
             )}
 
             {substrateRequired && selectedSubstrate && (
-              <div className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 dark:border-zinc-700 dark:bg-zinc-950">
+              <div className="rounded-md border border-zinc-200 bg-zinc-50/80 px-3 py-2 dark:border-zinc-700 dark:bg-zinc-950">
                 <span className="text-xs text-zinc-500 dark:text-zinc-400">
                   Operation target
                 </span>
@@ -798,43 +918,93 @@ export default function Home() {
             )}
 
             {tab === "transit" && (
-              <div className="grid grid-cols-2 gap-x-3 gap-y-3 sm:gap-x-4">
-                <NumberField
-                  label="Purpose"
-                  value={purpose}
-                  onChange={setPurpose}
-                />
+              <>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-3 sm:gap-x-4">
+                  <NetworkSelect
+                    networks={networks}
+                    value={selectedNetwork}
+                    onChange={handleNetworkChange}
+                    loading={networkLoading}
+                  />
 
-                <NumberField
-                  label="Coin"
-                  value={coin}
-                  onChange={setCoin}
-                />
+                  <Field
+                    label="Derivation path"
+                    value={path}
+                    onChange={setPath}
+                    placeholder="m/44'/0'/0'/0/0"
+                    mono
+                  />
 
-                <NumberField
-                  label="Account"
-                  value={account}
-                  onChange={setAccount}
-                />
+                  <NumberField
+                    label="Purpose"
+                    value={purpose}
+                    onChange={setPurpose}
+                  />
 
-                <NumberField
-                  label="Change"
-                  value={change}
-                  onChange={setChange}
-                />
+                  <NumberField
+                    label="Coin"
+                    value={coin}
+                    onChange={setCoin}
+                  />
 
-                <NumberField
-                  label="External"
-                  value={external}
-                  onChange={setExternal}
-                />
+                  <NumberField
+                    label="Account"
+                    value={account}
+                    onChange={setAccount}
+                  />
 
-                <NumberField
-                  label="Activation"
-                  value={activation}
-                  onChange={setActivation}
-                />
-              </div>
+                  <NumberField
+                    label="Change"
+                    value={change}
+                    onChange={setChange}
+                  />
+
+                  <NumberField
+                    label="External"
+                    value={external}
+                    onChange={setExternal}
+                  />
+
+                  <NumberField
+                    label="Activation"
+                    value={activation}
+                    onChange={setActivation}
+                  />
+                </div>
+
+                {networkError && (
+                  <div
+                    role="alert"
+                    className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
+                  >
+                    Network presets could not be loaded: {networkError}
+                    <button
+                      type="button"
+                      onClick={loadNetworks}
+                      disabled={networkLoading}
+                      className="ml-2 font-semibold underline underline-offset-2 disabled:opacity-50"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
+
+                {currentNetwork && (
+                  <div className="rounded-md border border-zinc-200/80 bg-zinc-50/70 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/70">
+                    <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                      Selected network
+                    </p>
+
+                    <p className="mt-0.5 text-sm font-medium text-zinc-800 dark:text-zinc-200">
+                      {currentNetwork.name}
+                    </p>
+
+                    <p className="mt-1 break-all font-mono text-xs text-zinc-500 dark:text-zinc-400">
+                      {path || "No derivation path specified"}
+                    </p>
+                  </div>
+                )}
+              </>
             )}
 
             <button
@@ -845,7 +1015,7 @@ export default function Home() {
                 listLoading ||
                 (substrateRequired && !selectedSubstrate)
               }
-              className="mt-2 inline-flex h-10 items-center justify-center gap-2 rounded-full bg-zinc-950 px-5 text-sm font-semibold text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
+              className="mt-2 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-zinc-950 px-5 text-sm font-semibold text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
             >
               {loading && (
                 <span
@@ -862,7 +1032,7 @@ export default function Home() {
         {error && (
           <p
             role="alert"
-            className="mt-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
+            className="mt-5 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
           >
             {error}
           </p>
