@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
@@ -12,46 +11,6 @@ const TABS = [
   { id: "exile", label: "exile" },
 ];
 
-// Mirrors qtm-api/src/main.rs and QTM/src/pathsregistry.rs.
-// Native SegWit is the additional BIP-84 preset registered by the API.
-const FALLBACK_NETWORKS = [
-  {
-    id: "bitcoin-legacy",
-    name: "Bitcoin",
-    coin: 0,
-    purpose: 44,
-    path: "m/44'/0'/0'/0/0",
-  },
-  {
-    id: "bitcoin-native-segwit",
-    name: "Bitcoin · Native SegWit (BIP 84)",
-    coin: 0,
-    purpose: 84,
-    path: "m/84'/0'/0'/0/0",
-  },
-  {
-    id: "ethereum",
-    name: "Ethereum",
-    coin: 60,
-    purpose: 44,
-    path: "m/44'/60'/0'/0/0",
-  },
-  {
-    id: "solana",
-    name: "Solana",
-    coin: 501,
-    purpose: 44,
-    path: "m/44'/501'/0'/0'",
-  },
-  {
-    id: "tron",
-    name: "Tron",
-    coin: 195,
-    purpose: 44,
-    path: "m/44'/195'/0'/0/0",
-  },
-];
-
 const STATE_KEYS = [
   "perm",
   "indices",
@@ -61,7 +20,6 @@ const STATE_KEYS = [
   "structuralValue",
   "activation_count",
   "activationCount",
-  "activations",
   "retained_mass",
   "retainedMass",
   "commitment",
@@ -169,35 +127,6 @@ async function readResponse(res) {
   }
 
   return data;
-}
-
-function normalizeNetworks(networks) {
-  if (!Array.isArray(networks)) {
-    throw new Error("The API returned an invalid network list.");
-  }
-
-  const validNetworks = networks.filter(
-    (network) =>
-      network &&
-      typeof network.id === "string" &&
-      network.id.length > 0 &&
-      typeof network.name === "string" &&
-      network.name.length > 0 &&
-      Number.isFinite(Number(network.coin)) &&
-      Number.isFinite(Number(network.purpose)) &&
-      typeof network.path === "string" &&
-      network.path.length > 0,
-  );
-
-  if (validNetworks.length === 0) {
-    throw new Error("The API returned no valid network presets.");
-  }
-
-  return validNetworks.map((network) => ({
-    ...network,
-    coin: Number(network.coin),
-    purpose: Number(network.purpose),
-  }));
 }
 
 function FragmentRow({ k, v }) {
@@ -314,7 +243,7 @@ function HeritageSections({ heritage, prefix = "" }) {
     <div className="space-y-3">
       <ResultSection
         title={`${prefix}State / QuantPerm`}
-        description="QuantPerm state and retained structural values"
+        description="QuantPerm state, coordinates, and substrate root values"
         value={state}
         defaultOpen
       />
@@ -349,20 +278,37 @@ function OpenResults({ result }) {
 }
 
 function TransitResults({ result }) {
-  // Current qtm-api response:
-  // {
-  //   event: {
-  //     activation, scale, runtime,
-  //     heritage: { state, transition }
-  //   },
-  //   selection: { network, path, activation, purpose, coin, ... }
-  // }
-  const event = getObject(result, ["event"]) ?? result;
-  const heritage = getObject(event, ["heritage"]);
-  const runtime = getValue(event, ["runtime"]);
-  const selection = getObject(result, ["selection"]);
+  const direction = getObject(result, ["direction"]) ?? result;
 
-  const eventMetadata = pickFields(event, ["activation", "scale"]);
+  const eventMap =
+    getObject(direction, ["event_map", "eventMap"]) ??
+    getObject(result, ["event_map", "eventMap"]);
+
+  const event =
+    getObject(eventMap, ["event"]) ??
+    getObject(direction, ["event"]) ??
+    getObject(result, ["event"]);
+
+  const qtm =
+    getValue(event, ["qtm", "Qtm"]) ??
+    getValue(eventMap, ["qtm", "Qtm"]) ??
+    getValue(result, ["event_qtm", "eventQtm"]);
+
+  const heritage =
+    getObject(event, [
+      "heritage",
+      "transition_heritage",
+      "transitionHeritage",
+    ]) ??
+    getObject(eventMap, ["heritage"]) ??
+    getObject(result, ["event_heritage", "eventHeritage"]);
+
+  const runtime =
+    getValue(eventMap, ["runtime"]) ??
+    getValue(direction, ["runtime"]) ??
+    getValue(result, ["runtime"]);
+
+  const fallbackEvent = event ?? result;
 
   return (
     <section className="mt-7" aria-label="Transit results">
@@ -374,31 +320,16 @@ function TransitResults({ result }) {
       <div className="space-y-3">
         <ResultSection
           title="Event Map"
-          description="Event activation and scale"
-          value={eventMetadata}
+          description="The QTM object owned by the event"
+          value={
+            qtm !== undefined
+              ? qtm
+              : getObject(fallbackEvent, ["qtm", "Qtm"]) ?? fallbackEvent
+          }
           defaultOpen
         />
 
-        {selection && (
-          <ResultSection
-            title="Transit Selection"
-            description="Network preset and QP44 transit parameters"
-            value={selection}
-          />
-        )}
-
-        {runtime !== undefined && (
-          <ResultSection
-            title="EventMap / Runtime"
-            description="Runtime timestamp returned by the API"
-            value={runtime}
-          />
-        )}
-
-        <details
-          open
-          className="group overflow-hidden rounded-md border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
-        >
+        <details className="group overflow-hidden rounded-md border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
           <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3 transition-colors hover:bg-zinc-50 sm:px-4 dark:hover:bg-zinc-800/60 [&::-webkit-details-marker]:hidden">
             <span className="min-w-0">
               <span className="block text-sm font-semibold text-zinc-900 dark:text-zinc-100">
@@ -406,7 +337,7 @@ function TransitResults({ result }) {
               </span>
 
               <span className="mt-1 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                State and transition are displayed as distinct objects
+                Heritage contains state and transition as distinct objects
               </span>
             </span>
 
@@ -436,6 +367,14 @@ function TransitResults({ result }) {
             )}
           </div>
         </details>
+
+        {runtime !== undefined && (
+          <ResultSection
+            title="EventMap / Runtime"
+            description="Runtime data owned by EventMap"
+            value={runtime}
+          />
+        )}
       </div>
     </section>
   );
@@ -516,7 +455,12 @@ function NumberField({ label, value, onChange }) {
   );
 }
 
-function NetworkSelect({ networks, value, onChange, loading }) {
+function NetworkSelect({
+  networks,
+  value,
+  onChange,
+  loading,
+}) {
   return (
     <label className="flex min-w-0 flex-col gap-1">
       <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
@@ -626,29 +570,50 @@ export default function Home() {
       });
 
       const data = await readResponse(res);
-      const validNetworks = normalizeNetworks(data.networks);
+
+      if (!Array.isArray(data.networks)) {
+        throw new Error("The API returned an invalid network list.");
+      }
+
+      const validNetworks = data.networks.filter(
+        (network) =>
+          network &&
+          typeof network.id === "string" &&
+          typeof network.name === "string",
+      );
 
       setNetworks(validNetworks);
 
-      setSelectedNetwork((current) =>
-        validNetworks.some((network) => network.id === current)
-          ? current
-          : validNetworks[0].id,
-      );
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Unable to load networks.";
+      setSelectedNetwork((current) => {
+        if (validNetworks.some((network) => network.id === current)) {
+          return current;
+        }
 
-      // The frontend remains usable if the deployed API is behind
-      // the repository or the network-preset endpoint is unavailable.
-      setNetworks(FALLBACK_NETWORKS);
-      setSelectedNetwork((current) =>
-        FALLBACK_NETWORKS.some((network) => network.id === current)
-          ? current
-          : FALLBACK_NETWORKS[0].id,
-      );
+        return validNetworks[0]?.id || "";
+      });
+
+      const firstNetwork = validNetworks[0];
+
+      if (firstNetwork) {
+        setPurpose((current) =>
+          current === 44 && Number.isFinite(firstNetwork.purpose)
+            ? firstNetwork.purpose
+            : current,
+        );
+
+        setCoin((current) =>
+          current === 0 && Number.isFinite(firstNetwork.coin)
+            ? firstNetwork.coin
+            : current,
+        );
+
+        setPath((current) => current || firstNetwork.path || "");
+      }
+    } catch (err) {
       setNetworkError(
-        `${message} Using the local network registry until the API is available.`,
+        err instanceof Error
+          ? err.message
+          : "Unable to load networks.",
       );
     } finally {
       setNetworkLoading(false);
@@ -666,21 +631,24 @@ export default function Home() {
   const currentNetwork =
     networks.find((network) => network.id === selectedNetwork) ?? null;
 
-  // Apply a preset's defaults when the selected network changes.
-  // Manual edits to path/purpose/coin are preserved until the user
-  // selects another network.
-  useEffect(() => {
-    if (!currentNetwork) return;
-
-    setPurpose(currentNetwork.purpose);
-    setCoin(currentNetwork.coin);
-    setPath(currentNetwork.path);
-  }, [currentNetwork?.id]);
-
   function handleNetworkChange(networkId) {
+    const network = networks.find((item) => item.id === networkId);
+
     setSelectedNetwork(networkId);
     setResult(null);
     setError("");
+
+    if (!network) return;
+
+    if (Number.isFinite(network.purpose)) {
+      setPurpose(network.purpose);
+    }
+
+    if (Number.isFinite(network.coin)) {
+      setCoin(network.coin);
+    }
+
+    setPath(network.path || "");
   }
 
   async function handleSubmit(e) {
@@ -696,6 +664,8 @@ export default function Home() {
     setLoading(true);
 
     try {
+      let res;
+
       if (tab === "create") {
         const substrateName = name.trim();
 
@@ -703,7 +673,7 @@ export default function Home() {
           throw new Error("Enter a substrate name.");
         }
 
-        const res = await fetch(`${API_BASE}/wallets`, {
+        res = await fetch(`${API_BASE}/wallets`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -723,18 +693,14 @@ export default function Home() {
 
         await loadSubstrates(substrateName);
       } else if (tab === "open") {
-        const res = await fetch(
+        res = await fetch(
           `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}`,
           { cache: "no-store" },
         );
 
         setResult(await readResponse(res));
       } else if (tab === "transit") {
-        if (!currentNetwork) {
-          throw new Error("Select a valid network before transiting.");
-        }
-
-        const res = await fetch(
+        res = await fetch(
           `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}/transit`,
           {
             method: "POST",
@@ -742,7 +708,7 @@ export default function Home() {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              network: selectedNetwork,
+              network: selectedNetwork || undefined,
               path: path.trim() || undefined,
               purpose,
               coin,
@@ -757,7 +723,7 @@ export default function Home() {
         setResult(await readResponse(res));
         await loadSubstrates(selectedSubstrate);
       } else if (tab === "exile") {
-        const res = await fetch(
+        res = await fetch(
           `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}/exile`,
           { method: "POST" },
         );
@@ -767,7 +733,9 @@ export default function Home() {
       }
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Something went wrong.",
+        err instanceof Error
+          ? err.message
+          : "Something went wrong.",
       );
     } finally {
       setLoading(false);
@@ -901,9 +869,9 @@ export default function Home() {
               {tab === "create" &&
                 "Initialize a substrate with its indices and entropy."}
               {tab === "open" &&
-                "Inspect the substrate's current stored state."}
+                "Inspect QuantPerm state and transition heritage."}
               {tab === "transit" &&
-                "Select a registered network and inspect the resulting QP44 event."}
+                "Select a network, customize its path, and inspect the resulting QP44 event."}
               {tab === "exile" &&
                 "Exile the selected substrate using the wallet engine."}
             </p>
@@ -998,7 +966,7 @@ export default function Home() {
                   />
 
                   <NumberField
-                    label="Activation (indexer)"
+                    label="Activation"
                     value={activation}
                     onChange={setActivation}
                   />
@@ -1006,17 +974,17 @@ export default function Home() {
 
                 {networkError && (
                   <div
-                    role="status"
+                    role="alert"
                     className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
                   >
-                    {networkError}
+                    Network presets could not be loaded: {networkError}
                     <button
                       type="button"
                       onClick={loadNetworks}
                       disabled={networkLoading}
                       className="ml-2 font-semibold underline underline-offset-2 disabled:opacity-50"
                     >
-                      {networkLoading ? "Retrying..." : "Retry"}
+                      Retry
                     </button>
                   </div>
                 )}
@@ -1034,12 +1002,6 @@ export default function Home() {
                     <p className="mt-1 break-all font-mono text-xs text-zinc-500 dark:text-zinc-400">
                       {path || "No derivation path specified"}
                     </p>
-
-                    <p className="mt-2 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                      The path is submitted as transit metadata. The current
-                      API records it in the selection response; it does not
-                      derive a key or address from this path.
-                    </p>
                   </div>
                 )}
               </>
@@ -1051,8 +1013,7 @@ export default function Home() {
               disabled={
                 loading ||
                 listLoading ||
-                (substrateRequired && !selectedSubstrate) ||
-                (tab === "transit" && (!selectedNetwork || !currentNetwork))
+                (substrateRequired && !selectedSubstrate)
               }
               className="mt-2 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-zinc-950 px-5 text-sm font-semibold text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
             >
