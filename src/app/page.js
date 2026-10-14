@@ -329,7 +329,7 @@ function TransitResults({ result }) {
 
       <div className="space-y-3">
         <ResultSection
-          title="Event / QTM"
+          title="Event Map"
           description="The QTM object owned by the event"
           value={
             qtm !== undefined
