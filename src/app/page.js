@@ -277,38 +277,21 @@ function OpenResults({ result }) {
   );
 }
 
+
 function TransitResults({ result }) {
-  const direction = getObject(result, ["direction"]) ?? result;
-
-  const eventMap =
-    getObject(direction, ["event_map", "eventMap"]) ??
-    getObject(result, ["event_map", "eventMap"]);
-
-  const event =
-    getObject(eventMap, ["event"]) ??
-    getObject(direction, ["event"]) ??
-    getObject(result, ["event"]);
-
-  const qtm =
-    getValue(event, ["qtm", "Qtm"]) ??
-    getValue(eventMap, ["qtm", "Qtm"]) ??
-    getValue(result, ["event_qtm", "eventQtm"]);
-
-  const heritage =
-    getObject(event, [
-      "heritage",
-      "transition_heritage",
-      "transitionHeritage",
-    ]) ??
-    getObject(eventMap, ["heritage"]) ??
-    getObject(result, ["event_heritage", "eventHeritage"]);
-
-  const runtime =
-    getValue(eventMap, ["runtime"]) ??
-    getValue(direction, ["runtime"]) ??
-    getValue(result, ["runtime"]);
-
-  const fallbackEvent = event ?? result;
+  const event = getObject(result, ["event"]) ?? result;
+  const qtm = getObject(result, ["qtm", "Qtm"]);
+  const heritage = getObject(event, [
+    "heritage",
+    "transition_heritage",
+    "transitionHeritage",
+  ]);
+  const runtime = getValue(event, ["runtime"]);
+  const metadata = pickFields(event, [
+    "activation",
+    "scale",
+    "runtime",
+  ]);
 
   return (
     <section className="mt-7" aria-label="Transit results">
@@ -319,59 +302,61 @@ function TransitResults({ result }) {
 
       <div className="space-y-3">
         <ResultSection
-          title="Event Map"
-          description="The QTM object owned by the event"
-          value={
-            qtm !== undefined
-              ? qtm
-              : getObject(fallbackEvent, ["qtm", "Qtm"]) ?? fallbackEvent
-          }
+          title="QTM"
+          description="QTM values returned by the transit operation"
+          value={qtm ?? {}}
           defaultOpen
         />
 
-        <details className="group overflow-hidden rounded-md border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3 transition-colors hover:bg-zinc-50 sm:px-4 dark:hover:bg-zinc-800/60 [&::-webkit-details-marker]:hidden">
-            <span className="min-w-0">
-              <span className="block text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                Event / Heritage
+        <ResultSection
+          title="Event Map"
+          description="Activation, scale, and runtime metadata"
+          value={metadata}
+        />
+
+        {heritage ? (
+          <details className="group overflow-hidden rounded-md border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3 transition-colors hover:bg-zinc-50 sm:px-4 dark:hover:bg-zinc-800/60 [&::-webkit-details-marker]:hidden">
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                  Event / Heritage
+                </span>
+                <span className="mt-1 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                  Authentic event state and transition measurements
+                </span>
               </span>
 
-              <span className="mt-1 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                Heritage contains state and transition as distinct objects
+              <span
+                aria-hidden="true"
+                className="flex size-7 shrink-0 items-center justify-center rounded-md border border-zinc-200 text-zinc-500 transition-transform group-open:rotate-180 dark:border-zinc-700 dark:text-zinc-300"
+              >
+                <svg viewBox="0 0 20 20" fill="none" className="size-4">
+                  <path
+                    d="m5 7.5 5 5 5-5"
+                    stroke="currentColor"
+                    strokeWidth="1.7"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
               </span>
-            </span>
+            </summary>
 
-            <span
-              aria-hidden="true"
-              className="flex size-7 shrink-0 items-center justify-center rounded-md border border-zinc-200 text-zinc-500 transition-transform group-open:rotate-180 dark:border-zinc-700 dark:text-zinc-300"
-            >
-              <svg viewBox="0 0 20 20" fill="none" className="size-4">
-                <path
-                  d="m5 7.5 5 5 5-5"
-                  stroke="currentColor"
-                  strokeWidth="1.7"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </span>
-          </summary>
-
-          <div className="space-y-3 border-t border-zinc-200 p-3 sm:p-4 dark:border-zinc-800">
-            {heritage ? (
+            <div className="border-t border-zinc-200 p-3 sm:p-4 dark:border-zinc-800">
               <HeritageSections heritage={heritage} />
-            ) : (
-              <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                No heritage object was returned by the event.
-              </p>
-            )}
-          </div>
-        </details>
+            </div>
+          </details>
+        ) : (
+          <ResultSection
+            title="Event / Heritage"
+            value={{}}
+          />
+        )}
 
         {runtime !== undefined && (
           <ResultSection
-            title="EventMap / Runtime"
-            description="Runtime data owned by EventMap"
+            title="Runtime"
+            description="Runtime data owned by the event"
             value={runtime}
           />
         )}
@@ -379,6 +364,60 @@ function TransitResults({ result }) {
     </section>
   );
 }
+
+function ExileResults({ result }) {
+  const event = getObject(result, ["event"]) ?? result;
+  const qtm = getObject(result, ["qtm", "Qtm"]);
+
+  const heritage = getObject(event, [
+    "heritage",
+    "transition_heritage",
+    "transitionHeritage",
+  ]);
+
+  const metadata = pickFields(event, [
+    "activation",
+    "scale",
+    "runtime",
+  ]);
+
+  return (
+    <section className="mt-7" aria-label="Exile results">
+      <ResultHeading
+        eyebrow="Exile results"
+        title="PQ44 event"
+      />
+
+      <div className="space-y-3">
+        <ResultSection
+          title="Stored QTM"
+          description="QTM values returned by the Exile operation"
+          value={qtm ?? {}}
+          defaultOpen
+        />
+
+        <ResultSection
+          title="Exile Event"
+          description="Activation, scale, and runtime metadata"
+          value={metadata}
+        />
+
+        {heritage ? (
+          <HeritageSections
+            heritage={heritage}
+            prefix="Exile "
+          />
+        ) : (
+          <ResultSection
+            title="Exile Heritage"
+            value={{}}
+          />
+        )}
+      </div>
+    </section>
+  );
+}
+
 
 function ResultCard({ result, tab }) {
   if (result === null || result === undefined) return null;
@@ -391,11 +430,15 @@ function ResultCard({ result, tab }) {
     return <TransitResults result={result} />;
   }
 
+  if (tab === "exile") {
+    return <ExileResults result={result} />;
+  }
+
   return (
     <section className="mt-7">
       <ResultHeading
         eyebrow="Operation result"
-        title={tab === "create" ? "Created substrate" : "Exile result"}
+        title="Created substrate"
       />
 
       <ResultSection
@@ -405,33 +448,6 @@ function ResultCard({ result, tab }) {
         defaultOpen
       />
     </section>
-  );
-}
-
-function Field({
-  label,
-  value,
-  onChange,
-  required = false,
-  placeholder = "",
-  mono = false,
-}) {
-  return (
-    <label className="flex min-w-0 flex-col gap-1">
-      <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-        {label}
-      </span>
-
-      <input
-        className={`h-9 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800 ${
-          mono ? "font-mono" : ""
-        }`}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        required={required}
-      />
-    </label>
   );
 }
 
