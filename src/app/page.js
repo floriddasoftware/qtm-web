@@ -545,10 +545,16 @@ export default function Home() {
   const [networkError, setNetworkError] = useState("");
 
   const [name, setName] = useState("");
+  const [seedSource, setSeedSource] = useState("persistent");
+
   const [indices, setIndices] = useState(
-    "0,0,0,0,0,0,0,0,0,0,0,0",
+  "0,0,0,0,0,0,0,0,0,0,0,0",
   );
   const [entropy, setEntropy] = useState("");
+
+  const [phrase, setPhrase] = useState("");
+  const [language, setLanguage] = useState("");
+  const [passphrase, setPassphrase] = useState("");
 
   const [path, setPath] = useState("");
   const [purpose, setPurpose] = useState(44);
@@ -708,33 +714,58 @@ export default function Home() {
     try {
       let res;
 
-      if (tab === "create") {
-        const substrateName = name.trim();
+if (tab === "create") {
+  const substrateName = name.trim();
 
-        if (!substrateName) {
-          throw new Error("Enter a substrate name.");
-        }
+  if (!substrateName) {
+    throw new Error("Enter a substrate name.");
+  }
 
-        res = await fetch(`${API_BASE}/wallets`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            name: substrateName,
-            indices,
-            entropy: entropy.trim() || substrateName,
-          }),
-        });
+  let createPayload;
 
-        const data = await readResponse(res);
+  if (seedSource === "bip39") {
+    if (!phrase.trim()) {
+      throw new Error("Enter a BIP39 mnemonic phrase.");
+    }
 
-        setResult(data);
-        setName("");
-        setEntropy("");
+    if (!language) {
+      throw new Error("Select a BIP39 language.");
+    }
 
-        await loadSubstrates(substrateName);
-      } else if (tab === "open") {
+    createPayload = {
+      name: substrateName,
+      seed_source: "bip39",
+      phrase: phrase.trim(),
+      language,
+      passphrase,
+    };
+  } else {
+    createPayload = {
+      name: substrateName,
+      seed_source: "persistent",
+      indices,
+      entropy: entropy.trim() || substrateName,
+    };
+  }
+
+  res = await fetch(`${API_BASE}/wallets`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(createPayload),
+  });
+
+  const data = await readResponse(res);
+
+  setResult(data);
+  setName("");
+  setEntropy("");
+  setPhrase("");
+  setPassphrase("");
+
+  await loadSubstrates(substrateName);
+} else if (tab === "open") {
         res = await fetch(
           `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}`,
           { cache: "no-store" },
@@ -909,7 +940,7 @@ export default function Home() {
 
             <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
               {tab === "create" &&
-                "Initialize a substrate with its indices and entropy."}
+           "Initialize a substrate using persistent indices or a BIP39 mnemonic."}
               {tab === "open" &&
                 "Inspect QuantPerm state and transition heritage."}
               {tab === "transit" &&
@@ -920,44 +951,139 @@ export default function Home() {
           </div>
 
           <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-            {tab === "create" && (
-              <>
-                <Field
-                  label="Substrate name"
-                  value={name}
-                  onChange={setName}
-                  required
-                  placeholder="mars-lab"
-                />
+           
+{tab === "create" && (
+  <>
+    <Field
+      label="Substrate name"
+      value={name}
+      onChange={setName}
+      required
+      placeholder="mars-lab"
+    />
 
-                <Field
-                  label="12 indices (comma-separated, 0–2047 each)"
-                  value={indices}
-                  onChange={setIndices}
-                  required
-                  mono
-                />
+    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      <button
+        type="button"
+        aria-pressed={seedSource === "persistent"}
+        onClick={() => {
+          setSeedSource("persistent");
+          setError("");
+        }}
+        className={`rounded-md border px-3 py-3 text-left transition-colors ${
+          seedSource === "persistent"
+            ? "border-zinc-500 bg-zinc-50 dark:border-zinc-500 dark:bg-zinc-800/70"
+            : "border-zinc-200 bg-white hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:bg-zinc-800/50"
+        }`}
+      >
+        <span className="block text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+          Persistent indices
+        </span>
+        <span className="mt-1 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+          Enter the 12 PERM indices and conditioning entropy.
+        </span>
+      </button>
 
-                <Field
-                  label="Entropy text (optional)"
-                  value={entropy}
-                  onChange={setEntropy}
-                  placeholder="Defaults to the substrate name"
-                />
-              </>
-            )}
+      <button
+        type="button"
+        aria-pressed={seedSource === "bip39"}
+        onClick={() => {
+          setSeedSource("bip39");
+          setError("");
+        }}
+        className={`rounded-md border px-3 py-3 text-left transition-colors ${
+          seedSource === "bip39"
+            ? "border-zinc-500 bg-zinc-50 dark:border-zinc-500 dark:bg-zinc-800/70"
+            : "border-zinc-200 bg-white hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:bg-zinc-800/50"
+        }`}
+      >
+        <span className="block text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+          BIP39 mnemonic
+        </span>
+        <span className="mt-1 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+          Derive the indices and conditioning entropy from a mnemonic.
+        </span>
+      </button>
+    </div>
 
-            {substrateRequired && selectedSubstrate && (
-              <div className="rounded-md border border-zinc-200 bg-zinc-50/80 px-3 py-2 dark:border-zinc-700 dark:bg-zinc-950">
-                <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                  Operation target
-                </span>
+    {seedSource === "persistent" ? (
+      <>
+        <Field
+          label="12 indices (comma-separated, 0–2047 each)"
+          value={indices}
+          onChange={setIndices}
+          required
+          mono
+        />
 
-                <p className="mt-0.5 break-all font-mono text-sm text-zinc-900 dark:text-zinc-50">
-                  {selectedSubstrate}
-                </p>
-              </div>
-            )}
+        <Field
+          label="Conditioning entropy"
+          value={entropy}
+          onChange={setEntropy}
+          required
+          placeholder="Defaults to the substrate name"
+        />
+      </>
+    ) : (
+      <div className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+        <label className="flex min-w-0 flex-col gap-1">
+          <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+            BIP39 language
+          </span>
+          <select
+            value={language}
+            onChange={(e) => setLanguage(e.target.value)}
+            required
+            className="h-9 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800"
+          >
+            <option value="">Select language</option>
+            <option value="english">English</option>
+            <option value="chinese_simplified">Chinese (Simplified)</option>
+            <option value="chinese_traditional">Chinese (Traditional)</option>
+            <option value="french">French</option>
+            <option value="italian">Italian</option>
+            <option value="japanese">Japanese</option>
+            <option value="korean">Korean</option>
+            <option value="spanish">Spanish</option>
+            <option value="czech">Czech</option>
+            <option value="portuguese">Portuguese</option>
+          </select>
+        </label>
+
+        <label className="flex min-w-0 flex-col gap-1">
+          <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+            Mnemonic phrase
+          </span>
+          <textarea
+            value={phrase}
+            onChange={(e) => setPhrase(e.target.value)}
+            required
+            rows={3}
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            placeholder="Enter the words in the selected language"
+            className="w-full resize-y rounded-md border border-zinc-300 bg-white px-3 py-2 font-mono text-sm leading-6 text-zinc-900 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800"
+          />
+        </label>
+
+        <Field
+          label="BIP39 passphrase (optional)"
+          value={passphrase}
+          onChange={setPassphrase}
+          placeholder="Leave empty if not used"
+        />
+
+        <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+          The API validates the mnemonic and derives the 12 indices
+          and conditioning entropy. The phrase and passphrase are
+          sent with this creation request.
+        </p>
+      </div>
+    )}
+  </>
+)}
+
 
             {tab === "transit" && (
               <>
