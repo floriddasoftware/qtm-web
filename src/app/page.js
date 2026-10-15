@@ -391,9 +391,18 @@ function Field({
   );
 }
 
-function TransitResults({ result }) {
+function TransitResults({ result, network, path }) {
   const event = getObject(result, ["event"]) ?? result;
-  const qtm = getObject(result, ["qtm", "Qtm"]);
+
+  const frame =
+    getObject(result, ["frame"]) ??
+    getObject(event, ["frame"]) ??
+    result;
+
+  const qtm =
+    getObject(frame, ["qtm", "Qtm"]) ??
+    getObject(event, ["qtm", "Qtm"]) ??
+    getObject(result, ["qtm", "Qtm"]);
 
   const heritage = getObject(event, [
     "heritage",
@@ -401,13 +410,17 @@ function TransitResults({ result }) {
     "transitionHeritage",
   ]);
 
-  const runtime = getValue(event, ["runtime"]);
-
   const metadata = pickFields(event, [
     "activation",
     "scale",
     "runtime",
   ]);
+
+  const networkDepth = {
+    network: network?.name ?? network?.id ?? "Not specified",
+    network_identifier: network?.id ?? "Not returned",
+    path: path || network?.path || "Not specified",
+  };
 
   return (
     <section className="mt-5 space-y-4">
@@ -418,10 +431,16 @@ function TransitResults({ result }) {
 
       <div className="space-y-3">
         <ResultSection
-          title="QTM"
-          description="QTM values returned by the transit operation"
+          title="QTM | Network Depth"
+          description="Authoritative QTM frame associated with the selected network and registered path."
           value={qtm ?? {}}
           defaultOpen
+        />
+
+        <ResultSection
+          title="Network Depth Registry"
+          description="Network identifier and selected path context for resolving object positions."
+          value={networkDepth}
         />
 
         <ResultSection
@@ -463,24 +482,13 @@ function TransitResults({ result }) {
             </div>
           </details>
         ) : (
-          <ResultSection
-            title="Event / Heritage"
-            value={{}}
-          />
+          <ResultSection title="Event / Heritage" value={{}} />
         )}
 
-        {runtime !== undefined && (
-          <ResultSection
-            title="Runtime"
-            description="Runtime data owned by the event"
-            value={runtime}
-          />
-        )}
-
-        {!qtm && !heritage && (
+        {!qtm && (
           <ResultSection
             title="Raw API Response"
-            description="The response did not match the expected transit structure."
+            description="The API response did not expose a QTM object at the expected frame locations."
             value={result}
             defaultOpen
           />
@@ -552,7 +560,7 @@ function ExileResults({ result }) {
   );
 }
 
-function ResultCard({ result, tab }) {
+function ResultCard({ result, tab, network, path }) {
   if (result === null || result === undefined) return null;
 
   if (tab === "open") {
@@ -560,7 +568,13 @@ function ResultCard({ result, tab }) {
   }
 
   if (tab === "transit") {
-    return <TransitResults result={result} />;
+    return (
+      <TransitResults
+        result={result}
+        network={network}
+        path={path}
+      />
+    );
   }
 
   if (tab === "exile") {
@@ -1413,7 +1427,12 @@ export default function Home() {
           </p>
         )}
 
-        <ResultCard result={result} tab={tab} />
+        <ResultCard
+          result={result}
+          tab={tab}
+          network={currentNetwork}
+          path={path}
+        />
 
         <footer className="mt-9 border-t border-zinc-200 pt-4 text-xs leading-5 text-zinc-500 dark:border-zinc-800 dark:text-zinc-500">
           QTM substrate console
