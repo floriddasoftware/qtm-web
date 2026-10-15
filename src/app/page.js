@@ -303,52 +303,6 @@ function Field({
   );
 }
 
-function NumberField({ label, value, onChange }) {
-  return (
-    <label className="flex min-w-0 flex-col gap-1">
-      <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-        {label}
-      </span>
-      <input
-        type="number"
-        min="0"
-        step="1"
-        className="h-9 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-2.5 font-mono text-sm text-zinc-900 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800"
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        required
-      />
-    </label>
-  );
-}
-
-function NetworkSelect({ networks, value, onChange, loading }) {
-  return (
-    <label className="flex min-w-0 flex-col gap-1">
-      <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-        Network
-      </span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={loading || networks.length === 0}
-        className="h-9 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800"
-      >
-        {networks.length === 0 && (
-          <option value="">
-            {loading ? "Loading networks..." : "No networks available"}
-          </option>
-        )}
-        {networks.map((network) => (
-          <option key={network.id} value={network.id}>
-            {network.name}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
 
 function TransitResults({ result }) {
   const event = getObject(result, ["event"]) ?? result;
