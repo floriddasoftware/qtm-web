@@ -1,10 +1,3 @@
-Updated the complete page.js below with the requested compact layout:
-
-* Transit: two inputs per row on phones and tablets; three per row on wider desktop screens.
-* Network notice: compact, subtle text instead of a large notice panel.
-* Responsive sizing: retains comfortable touch targets on iPhones, with better spacing on iPads and desktop monitors.
-* Behavior preserved: API requests, state management, and Create/Open/Transit/Exile operations remain unchanged.
-
 "use client";
 import { useCallback, useEffect, useId, useState } from "react";
 const API_BASE = "https://qtm-api.onrender.com";
