@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
@@ -39,24 +40,43 @@ const TRANSITION_KEYS = [
   "mirrorBytes",
 ];
 
+const EVENT_KEYS = [
+  "activation",
+  "scale",
+  "runtime",
+  "dimension",
+  "structural_value",
+  "structuralValue",
+  "activation_count",
+  "activationCount",
+  "retained_mass",
+  "retainedMass",
+  "commitment",
+  "coordinate",
+  "sigma",
+  "network",
+];
+
+function isRecord(value) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value)
+  );
+}
+
 function getObject(source, keys) {
-  if (!source || typeof source !== "object" || Array.isArray(source)) {
-    return undefined;
-  }
+  if (!isRecord(source)) return undefined;
 
   for (const key of keys) {
-    const value = source[key];
-
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-      return value;
-    }
+    if (isRecord(source[key])) return source[key];
   }
 
   return undefined;
 }
 
 function getValue(source, keys) {
-  if (!source || typeof source !== "object") return undefined;
+  if (!isRecord(source)) return undefined;
 
   for (const key of keys) {
     if (
@@ -72,9 +92,7 @@ function getValue(source, keys) {
 }
 
 function pickFields(source, keys) {
-  if (!source || typeof source !== "object" || Array.isArray(source)) {
-    return {};
-  }
+  if (!isRecord(source)) return {};
 
   return Object.fromEntries(
     Object.entries(source).filter(([key]) => keys.includes(key)),
@@ -92,39 +110,52 @@ function hasContent(value) {
 }
 
 function formatKey(key) {
-  return key
+  return String(key)
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .replaceAll("_", " ");
 }
 
-function formatValue(key, value) {
-  if (value === null || value === undefined) {
+function formatValue(value) {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+
+  if (typeof value === "string") return value;
+
+  if (
+    typeof value === "number" ||
+    typeof value === "bigint" ||
+    typeof value === "boolean"
+  ) {
     return String(value);
   }
 
-  if (key === "commitment") {
-    const text = String(value);
-    return text.startsWith("qp") ? text : `qp${text}`;
-  }
-
-  if (key === "coordinate") {
-    const text = String(value);
-    return text.startsWith("0x") ? text : `0x${text}`;
-  }
-
-  if (Array.isArray(value) || typeof value === "object") {
+  try {
     return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
   }
-
-  return String(value);
 }
 
 async function readResponse(res) {
-  const data = await res.json().catch(() => ({}));
+  const text = await res.text();
+
+  let data = {};
+
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { response_text: text };
+    }
+  }
 
   if (!res.ok) {
+    const message =
+      getValue(data, ["error", "message", "detail"]) ??
+      `Request failed with status ${res.status}`;
+
     throw new Error(
-      data.error || `Request failed with status ${res.status}`,
+      `${formatValue(message)}${res.statusText ? ` (${res.statusText})` : ""}`,
     );
   }
 
@@ -134,11 +165,11 @@ async function readResponse(res) {
 function FragmentRow({ k, v }) {
   return (
     <>
-      <dt className="text-zinc-500 dark:text-zinc-400">
+      <dt className="min-w-0 break-words text-zinc-500 dark:text-zinc-400">
         {formatKey(k)}
       </dt>
-      <dd className="min-w-0 break-all whitespace-pre-wrap font-mono text-zinc-800 dark:text-zinc-200">
-        {formatValue(k, v)}
+      <dd className="min-w-0 whitespace-pre-wrap break-all font-mono text-zinc-800 dark:text-zinc-200">
+        {formatValue(v)}
       </dd>
     </>
   );
@@ -152,12 +183,9 @@ function ResultSection({
 }) {
   const populated = hasContent(value);
 
-  const entries =
-    value !== null &&
-    typeof value === "object" &&
-    !Array.isArray(value)
-      ? Object.entries(value)
-      : null;
+  const entries = isRecord(value)
+    ? Object.entries(value)
+    : null;
 
   return (
     <details
@@ -166,7 +194,7 @@ function ResultSection({
     >
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3 transition-colors hover:bg-zinc-50 sm:px-4 dark:hover:bg-zinc-800/60 [&::-webkit-details-marker]:hidden">
         <span className="min-w-0">
-          <span className="block text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+          <span className="block break-words text-sm font-semibold text-zinc-900 dark:text-zinc-100">
             {title}
           </span>
           {description && (
@@ -175,6 +203,7 @@ function ResultSection({
             </span>
           )}
         </span>
+
         <span
           aria-hidden="true"
           className="flex size-7 shrink-0 items-center justify-center rounded-md border border-zinc-200 text-zinc-500 transition-transform group-open:rotate-180 dark:border-zinc-700 dark:text-zinc-300"
@@ -204,7 +233,7 @@ function ResultSection({
           </dl>
         ) : (
           <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs leading-5 text-zinc-700 dark:text-zinc-300">
-            {JSON.stringify(value, null, 2)}
+            {formatValue(value)}
           </pre>
         )}
       </div>
@@ -255,6 +284,12 @@ function HeritageSections({ heritage, prefix = "" }) {
         description="Transition measurements and mirror bytes"
         value={transition}
       />
+
+      <ResultSection
+        title={`${prefix}Complete Heritage`}
+        description="All fields contained in the heritage object"
+        value={heritage}
+      />
     </div>
   );
 }
@@ -299,11 +334,7 @@ function OpenResults({ result }) {
 
   const eventQtm = getObject(event, ["qtm", "Qtm"]);
 
-  const metadata = pickFields(event, [
-    "activation",
-    "scale",
-    "runtime",
-  ]);
+  const metadata = pickFields(event, EVENT_KEYS);
 
   return (
     <section className="mt-5 space-y-4">
@@ -334,10 +365,18 @@ function OpenResults({ result }) {
           />
         )}
 
+        {event && (
+          <ResultSection
+            title="Complete Receive Event"
+            description="Every field in the returned event"
+            value={event}
+          />
+        )}
+
         {hasContent(metadata) && (
           <ResultSection
             title="Receive Event Map"
-            description="Activation, scale, and runtime metadata"
+            description="Event activation and other recognized metadata"
             value={metadata}
           />
         )}
@@ -347,17 +386,8 @@ function OpenResults({ result }) {
         ) : (
           <ResultSection
             title="Received Event Heritage"
-            description="The API did not include a heritage object in the response."
+            description="No separate heritage object was found at the expected response locations."
             value={{}}
-          />
-        )}
-
-        {!transaction && !event && (
-          <ResultSection
-            title="Raw API Response"
-            description="The response did not match the expected QuantumTransaction frame structure."
-            value={result}
-            defaultOpen
           />
         )}
       </div>
@@ -372,6 +402,8 @@ function Field({
   required = false,
   placeholder = "",
   mono = false,
+  type = "text",
+  autoComplete,
 }) {
   return (
     <label className="flex min-w-0 flex-col gap-1">
@@ -379,6 +411,8 @@ function Field({
         {label}
       </span>
       <input
+        type={type}
+        autoComplete={autoComplete}
         className={`h-9 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800 ${
           mono ? "font-mono" : ""
         }`}
@@ -406,15 +440,17 @@ function TransitResults({ result, network, path }) {
 
   const heritage = getObject(event, [
     "heritage",
+    "state_heritage",
+    "stateHeritage",
+  ]);
+
+  const transition = getObject(event, [
+    "transition",
     "transition_heritage",
     "transitionHeritage",
   ]);
 
-  const metadata = pickFields(event, [
-    "activation",
-    "scale",
-    "runtime",
-  ]);
+  const metadata = pickFields(event, EVENT_KEYS);
 
   const networkDepth = {
     network: network?.name ?? network?.id ?? "Not specified",
@@ -432,65 +468,46 @@ function TransitResults({ result, network, path }) {
       <div className="space-y-3">
         <ResultSection
           title="QTM | Network Depth"
-          description="Authoritative QTM frame associated with the selected network and registered path."
+          description="QTM frame associated with the selected network and path"
           value={qtm ?? {}}
           defaultOpen
         />
 
         <ResultSection
           title="Network Depth Registry"
-          description="Network identifier and selected path context for resolving object positions."
+          description="Selected network and path context"
           value={networkDepth}
         />
 
         <ResultSection
           title="Event Map"
-          description="Activation, scale, and runtime metadata"
+          description="Recognized event metadata"
           value={metadata}
         />
 
-        {heritage ? (
-          <details className="group overflow-hidden rounded-md border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3 transition-colors hover:bg-zinc-50 sm:px-4 dark:hover:bg-zinc-800/60 [&::-webkit-details-marker]:hidden">
-              <span className="min-w-0">
-                <span className="block text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                  Event / Heritage
-                </span>
-                <span className="mt-1 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                  Event state and transition measurements
-                </span>
-              </span>
-
-              <span
-                aria-hidden="true"
-                className="flex size-7 shrink-0 items-center justify-center rounded-md border border-zinc-200 text-zinc-500 transition-transform group-open:rotate-180 dark:border-zinc-700 dark:text-zinc-300"
-              >
-                <svg viewBox="0 0 20 20" fill="none" className="size-4">
-                  <path
-                    d="m5 7.5 5 5 5-5"
-                    stroke="currentColor"
-                    strokeWidth="1.7"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </span>
-            </summary>
-
-            <div className="border-t border-zinc-200 p-3 sm:p-4 dark:border-zinc-800">
-              <HeritageSections heritage={heritage} />
-            </div>
-          </details>
-        ) : (
-          <ResultSection title="Event / Heritage" value={{}} />
+        {heritage && (
+          <HeritageSections heritage={heritage} />
         )}
+
+        {transition && (
+          <ResultSection
+            title="Event Transition"
+            description="Transition fields returned with the event"
+            value={transition}
+          />
+        )}
+
+        <ResultSection
+          title="Complete Transit Event"
+          description="All fields in the event object, including fields not recognized by the specialized sections"
+          value={event}
+        />
 
         {!qtm && (
           <ResultSection
-            title="Raw API Response"
-            description="The API response did not expose a QTM object at the expected frame locations."
+            title="QTM not found at expected location"
+            description="The complete event and API response below preserve the returned values for inspection."
             value={result}
-            defaultOpen
           />
         )}
       </div>
@@ -500,19 +517,18 @@ function TransitResults({ result, network, path }) {
 
 function ExileResults({ result }) {
   const event = getObject(result, ["event"]) ?? result;
-  const qtm = getObject(result, ["qtm", "Qtm"]);
+
+  const qtm =
+    getObject(result, ["qtm", "Qtm"]) ??
+    getObject(event, ["qtm", "Qtm"]);
 
   const heritage = getObject(event, [
     "heritage",
-    "transition_heritage",
-    "transitionHeritage",
+    "state_heritage",
+    "stateHeritage",
   ]);
 
-  const metadata = pickFields(event, [
-    "activation",
-    "scale",
-    "runtime",
-  ]);
+  const metadata = pickFields(event, EVENT_KEYS);
 
   return (
     <section className="mt-5 space-y-4">
@@ -530,16 +546,13 @@ function ExileResults({ result }) {
         />
 
         <ResultSection
-          title="Exile Event"
-          description="Activation, scale, and runtime metadata"
+          title="Exile Event Map"
+          description="Recognized exile metadata"
           value={metadata}
         />
 
         {heritage ? (
-          <HeritageSections
-            heritage={heritage}
-            prefix="Exile "
-          />
+          <HeritageSections heritage={heritage} prefix="Exile " />
         ) : (
           <ResultSection
             title="Exile Heritage"
@@ -547,12 +560,17 @@ function ExileResults({ result }) {
           />
         )}
 
+        <ResultSection
+          title="Complete Exile Event"
+          description="All fields in the returned event"
+          value={event}
+        />
+
         {!qtm && !heritage && (
           <ResultSection
-            title="Raw API Response"
-            description="The response did not match the expected exile structure."
+            title="Exile Response Structure"
+            description="Inspect the full response to see the fields actually returned by the API."
             value={result}
-            defaultOpen
           />
         )}
       </div>
@@ -563,38 +581,36 @@ function ExileResults({ result }) {
 function ResultCard({ result, tab, network, path }) {
   if (result === null || result === undefined) return null;
 
-  if (tab === "open") {
-    return <OpenResults result={result} />;
-  }
-
-  if (tab === "transit") {
-    return (
-      <TransitResults
-        result={result}
-        network={network}
-        path={path}
-      />
-    );
-  }
-
-  if (tab === "exile") {
-    return <ExileResults result={result} />;
-  }
-
   return (
-    <section className="mt-5 space-y-3">
-      <ResultHeading
-        eyebrow="API response"
-        title="Result"
-      />
+    <div className="mt-5 space-y-4">
+      {tab === "open" && <OpenResults result={result} />}
+
+      {tab === "transit" && (
+        <TransitResults
+          result={result}
+          network={network}
+          path={path}
+        />
+      )}
+
+      {tab === "exile" && <ExileResults result={result} />}
+
+      {tab === "create" && (
+        <section className="space-y-3">
+          <ResultHeading
+            eyebrow="Create result"
+            title="Substrate creation"
+          />
+        </section>
+      )}
 
       <ResultSection
-        title="Result"
-        description="Response returned by the QTM API"
+        title="Complete API response"
+        description="The entire response returned by the server. No response fields are filtered out here."
         value={result}
         defaultOpen
       />
-    </section>
+    </div>
   );
 }
 
@@ -646,9 +662,12 @@ function NetworkSelect({
           </option>
         )}
 
-        {networks.map((network) => (
-          <option key={network.id} value={network.id}>
-            {network.name}
+        {networks.map((network, index) => (
+          <option
+            key={`${network.id}-${index}`}
+            value={network.id}
+          >
+            {network.name} — {network.id}
           </option>
         ))}
       </select>
@@ -672,7 +691,9 @@ export default function Home() {
   const [name, setName] = useState("");
   const [seedSource, setSeedSource] = useState("persistent");
 
-  const [indices, setIndices] = useState("0,0,0,0,0,0,0,0,0,0,0,0");
+  const [indices, setIndices] = useState(
+    "0,0,0,0,0,0,0,0,0,0,0,0",
+  );
   const [entropy, setEntropy] = useState("");
 
   const [phrase, setPhrase] = useState("");
@@ -706,22 +727,28 @@ export default function Home() {
       const data = await readResponse(res);
 
       if (!Array.isArray(data.substrates)) {
-        throw new Error("The API returned an invalid substrate list.");
+        throw new Error(
+          "The API response did not contain a substrates array.",
+        );
       }
 
-      setSubstrates(data.substrates);
+      const validSubstrates = data.substrates.filter(
+        (item) => item && typeof item.name === "string",
+      );
+
+      setSubstrates(validSubstrates);
 
       setSelectedSubstrate((current) => {
         const preferred = preferredName || current;
 
         if (
           preferred &&
-          data.substrates.some((item) => item.name === preferred)
+          validSubstrates.some((item) => item.name === preferred)
         ) {
           return preferred;
         }
 
-        return data.substrates[0]?.name || "";
+        return validSubstrates[0]?.name || "";
       });
     } catch (err) {
       setListError(
@@ -746,7 +773,9 @@ export default function Home() {
       const data = await readResponse(res);
 
       if (!Array.isArray(data.networks)) {
-        throw new Error("The API returned an invalid network list.");
+        throw new Error(
+          "The API response did not contain a networks array.",
+        );
       }
 
       const validNetworks = data.networks.filter(
@@ -769,17 +798,21 @@ export default function Home() {
       const firstNetwork = validNetworks[0];
 
       if (firstNetwork) {
-        setPurpose((current) =>
-          current === "44" && Number.isFinite(firstNetwork.purpose)
-            ? String(firstNetwork.purpose)
-            : current,
-        );
+        if (Number.isFinite(firstNetwork.purpose)) {
+          setPurpose((current) =>
+            current === "44"
+              ? String(firstNetwork.purpose)
+              : current,
+          );
+        }
 
-        setCoin((current) =>
-          current === "0" && Number.isFinite(firstNetwork.coin)
-            ? String(firstNetwork.coin)
-            : current,
-        );
+        if (Number.isFinite(firstNetwork.coin)) {
+          setCoin((current) =>
+            current === "0"
+              ? String(firstNetwork.coin)
+              : current,
+          );
+        }
 
         setPath((current) => current || firstNetwork.path || "");
       }
@@ -941,6 +974,10 @@ export default function Home() {
 
         setResult(await readResponse(res));
       } else if (tab === "transit") {
+        if (!selectedNetwork) {
+          throw new Error("Select a network before transit.");
+        }
+
         const numericFields = {
           purpose: Number(purpose),
           coin: Number(coin),
@@ -950,7 +987,9 @@ export default function Home() {
           activation: Number(activation),
         };
 
-        for (const [fieldName, fieldValue] of Object.entries(numericFields)) {
+        for (const [fieldName, fieldValue] of Object.entries(
+          numericFields,
+        )) {
           if (!Number.isSafeInteger(fieldValue) || fieldValue < 0) {
             throw new Error(
               `${fieldName} must be a non-negative safe integer.`,
@@ -966,7 +1005,7 @@ export default function Home() {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              network: selectedNetwork || undefined,
+              network: selectedNetwork,
               path: path.trim() || undefined,
               ...numericFields,
             }),
@@ -978,7 +1017,12 @@ export default function Home() {
       } else if (tab === "exile") {
         res = await fetch(
           `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}/exile`,
-          { method: "POST" },
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+          },
         );
 
         setResult(await readResponse(res));
@@ -1056,13 +1100,38 @@ export default function Home() {
               </option>
             )}
 
-            {substrates.map((substrate) => (
-              <option key={substrate.name} value={substrate.name}>
-                {substrate.name} — dimension {substrate.dimension}
-                {" · "}activations {substrate.activations}
+            {substrates.map((substrate, index) => (
+              <option
+                key={`${substrate.name}-${index}`}
+                value={substrate.name}
+              >
+                {substrate.name}
+                {" — dimension "}
+                {substrate.dimension ?? "not returned"}
+                {" · activations "}
+                {substrate.activations ?? "not returned"}
               </option>
             ))}
           </select>
+
+          {selectedSubstrate && (
+            <div className="mt-3 space-y-2">
+              <p className="break-all text-xs text-zinc-500 dark:text-zinc-400">
+                Selected:{" "}
+                <span className="font-mono">{selectedSubstrate}</span>
+              </p>
+
+              <ResultSection
+                title="Selected substrate details"
+                description="All fields returned for the selected substrate in the substrate-list response"
+                value={
+                  substrates.find(
+                    (item) => item.name === selectedSubstrate,
+                  ) ?? {}
+                }
+              />
+            </div>
+          )}
 
           {listError && (
             <p
@@ -1076,13 +1145,6 @@ export default function Home() {
           {!listLoading && !listError && substrates.length === 0 && (
             <p className="mt-3 text-sm text-zinc-600 dark:text-zinc-400">
               No substrates were found. Create one using the create tab.
-            </p>
-          )}
-
-          {selectedSubstrate && (
-            <p className="mt-2 break-all text-xs text-zinc-500 dark:text-zinc-400">
-              Selected:{" "}
-              <span className="font-mono">{selectedSubstrate}</span>
             </p>
           )}
         </section>
@@ -1122,7 +1184,7 @@ export default function Home() {
               {tab === "create" &&
                 "Initialize a substrate using persistent indices or a BIP39 mnemonic."}
               {tab === "open" &&
-                "Receive a QuantumTransaction and inspect its QTM projection and event heritage."}
+                "Receive a QuantumTransaction and inspect its QTM projection, event heritage, and complete API response."}
               {tab === "transit" &&
                 "Select a network, customize its path, and inspect the resulting QP44 event."}
               {tab === "exile" &&
@@ -1254,6 +1316,8 @@ export default function Home() {
                       value={passphrase}
                       onChange={setPassphrase}
                       placeholder="Leave empty if not used"
+                      type="password"
+                      autoComplete="off"
                     />
 
                     <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
@@ -1374,18 +1438,24 @@ export default function Home() {
                 )}
 
                 {currentNetwork && (
-                  <div className="rounded-md border border-zinc-200/80 bg-zinc-50/70 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/70">
+                  <div className="space-y-2 rounded-md border border-zinc-200/80 bg-zinc-50/70 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/70">
                     <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
                       Selected network
                     </p>
 
-                    <p className="mt-0.5 text-sm font-medium text-zinc-800 dark:text-zinc-200">
+                    <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
                       {currentNetwork.name}
                     </p>
 
-                    <p className="mt-1 break-all font-mono text-xs text-zinc-500 dark:text-zinc-400">
+                    <p className="break-all font-mono text-xs text-zinc-500 dark:text-zinc-400">
                       {path || "No derivation path specified"}
                     </p>
+
+                    <ResultSection
+                      title="Complete network definition"
+                      description="All network fields returned by the API"
+                      value={currentNetwork}
+                    />
                   </div>
                 )}
               </>
@@ -1398,7 +1468,8 @@ export default function Home() {
                 loading ||
                 listLoading ||
                 (substrateRequired && !selectedSubstrate) ||
-                (tab === "transit" && networkLoading)
+                (tab === "transit" &&
+                  (networkLoading || !selectedNetwork))
               }
               className="mt-2 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-zinc-950 px-5 text-sm font-semibold text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
             >
