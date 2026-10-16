@@ -5,10 +5,10 @@ import { useCallback, useEffect, useState } from "react";
 const API_BASE = "https://qtm-api.onrender.com";
 
 const TABS = [
-  { id: "create", label: "create" },
-  { id: "open", label: "open" },
-  { id: "transit", label: "transit" },
-  { id: "exile", label: "exile" },
+  { id: "create", label: "Create" },
+  { id: "open", label: "Open" },
+  { id: "transit", label: "Transit" },
+  { id: "exile", label: "Exile" },
 ];
 
 const STATE_KEYS = [
@@ -83,7 +83,7 @@ function formatKey(key) {
 
 function formatValue(value) {
   if (value === null) return "null";
-  if (value === undefined) return "undefined";
+  if (value === undefined) return "Not provided";
   if (typeof value === "string") return value;
 
   if (
@@ -101,26 +101,14 @@ function formatValue(value) {
   }
 }
 
-/*
- * DirectionResponse from qtm-api:
- * {
- *   frame: {
- *     qtm: { identifier, qtm: {...} },
- *     event: { scale, runtime, depth: { path, objects } }
- *   },
- *   selection?: {...}
- * }
- *
- * ReceiveResponse:
- * {
- *   frame: {
- *     quantum_transaction: {...},
- *     event: { scale, runtime, depth: {...} }
- *   }
- * }
- *
- * The Event Map is frame.event. Keep the original object intact.
- */
+function displayText(value, fallback = "Not provided by the API") {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (Array.isArray(value)) return value.length ? value.join(", ") : "None";
+  if (typeof value === "object") return "Details available";
+  return String(value);
+}
+
 function getEventMap(source) {
   if (!isRecord(source)) return undefined;
 
@@ -136,13 +124,7 @@ function getEventMap(source) {
     "quantumTransaction",
   ]);
 
-  const transactionEvent = getObject(transaction, [
-    "event",
-    "event_map",
-    "eventMap",
-  ]);
-
-  return transactionEvent;
+  return getObject(transaction, ["event", "event_map", "eventMap"]);
 }
 
 async function readResponse(res) {
@@ -308,7 +290,7 @@ function EventMapSections({ eventMap, metadata, prefix = "" }) {
     <div className="space-y-3">
       <ResultSection
         title={`${prefix}Event Map`}
-        description="The complete universal event instance from Direction.frame.event; all returned fields are preserved."
+        description="The complete event instance returned by the API. Original fields are preserved."
         value={eventMap}
         defaultOpen
         raw
@@ -316,30 +298,165 @@ function EventMapSections({ eventMap, metadata, prefix = "" }) {
 
       <ResultSection
         title={`${prefix}Recognized event metadata`}
-        description="A supplementary view of event fields recognized by the frontend. This is not a replacement for the complete Event Map."
+        description="A supplementary view of recognized event fields."
         value={metadata}
       />
     </div>
   );
 }
 
+function getUnitIdentifier(object) {
+  return getValue(object, [
+    "identifier",
+    "id",
+    "unit_id",
+    "unitId",
+    "object_id",
+    "objectId",
+  ]);
+}
 
-function displayText(value, fallback = "Not provided by the API") {
-  if (value === null || value === undefined || value === "") return fallback;
-  if (typeof value === "boolean") return value ? "Yes" : "No";
-  if (Array.isArray(value)) return value.length ? value.join(", ") : "None";
-  if (typeof value === "object") return "Details available";
-  return String(value);
+function getUnitPosition(object) {
+  return getValue(object, [
+    "position",
+    "index",
+    "slot",
+    "ordinal",
+    "unit_number",
+    "unitNumber",
+  ]);
+}
+
+function ReceivedUnits({ amount, objects }) {
+  const actualObjects = Array.isArray(objects) ? objects : [];
+  const requestedCount = Number(amount);
+  const validCount =
+    Number.isSafeInteger(requestedCount) && requestedCount > 0;
+
+  // Avoid creating an unbounded DOM if an unexpectedly large amount is returned.
+  const displayCount = validCount ? Math.min(requestedCount, 500) : 0;
+  const canEnumerate = validCount && requestedCount <= 500;
+
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+      <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+        Received units
+      </h3>
+
+      <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-300">
+        {validCount
+          ? `The receive request specified ${requestedCount} unit${requestedCount === 1 ? "" : "s"}. Each displayed number is a UI position. A persistent identifier is shown only when the API returned one.`
+          : "The response does not contain a valid positive unit amount."}
+      </p>
+
+      {validCount && requestedCount > 500 && (
+        <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
+          The requested amount is larger than the 500-unit display limit.
+          Showing the first 500 display positions to keep the page responsive.
+        </p>
+      )}
+
+      {validCount && (
+        <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {Array.from({ length: displayCount }, (_, index) => {
+            const object = actualObjects[index];
+            const identifier = getUnitIdentifier(object);
+            const position = getUnitPosition(object);
+            const hasActualObject = isRecord(object);
+
+            return (
+              <div
+                key={`received-unit-${index + 1}`}
+                className="min-w-0 rounded-md border border-zinc-200 p-3 dark:border-zinc-800"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                    Unit {index + 1}
+                  </p>
+                  <span className="rounded bg-zinc-100 px-2 py-1 text-xs font-mono text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                    {hasActualObject ? "API object" : "Display position"}
+                  </span>
+                </div>
+
+                <dl className="mt-3 grid grid-cols-[minmax(75px,0.7fr)_minmax(0,1.3fr)] gap-x-3 gap-y-2 text-xs">
+                  <FragmentRow
+                    k="Display number"
+                    v={index + 1}
+                  />
+                  <FragmentRow
+                    k="Identifier"
+                    v={
+                      identifier === undefined
+                        ? "No identifier returned"
+                        : identifier
+                    }
+                  />
+                  <FragmentRow
+                    k="API position"
+                    v={
+                      position === undefined
+                        ? "Not returned"
+                        : position
+                    }
+                  />
+                  {hasActualObject && (
+                    <FragmentRow
+                      k="Object details"
+                      v={object}
+                    />
+                  )}
+                </dl>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {validCount && actualObjects.length < requestedCount && (
+        <p className="mt-4 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+          The API returned {actualObjects.length} object
+          {actualObjects.length === 1 ? "" : "s"} in event depth, while the
+          requested amount was {requestedCount}. The additional numbered
+          positions above are display positions only; they are not evidence
+          that corresponding objects or persistent identifiers were created.
+        </p>
+      )}
+
+      {validCount && actualObjects.length > requestedCount && (
+        <p className="mt-4 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+          The event depth contains {actualObjects.length} objects, more than
+          the requested amount. Only the first {requestedCount} are associated
+          with the requested unit display.
+        </p>
+      )}
+
+      {!validCount && (
+        <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">
+          No unit positions can be enumerated until the API returns a valid
+          amount.
+        </p>
+      )}
+
+      {validCount && !canEnumerate && (
+        <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
+          The full requested amount is recorded above. The unit list is
+          intentionally capped for display.
+        </p>
+      )}
+    </div>
+  );
 }
 
 function OpenResults({ result }) {
   const directory = result?.directory;
   const receive = result?.receive;
   const frame = getObject(receive, ["frame"]) ?? receive;
+
   const transaction = getObject(frame, [
     "quantum_transaction",
     "quantumTransaction",
   ]);
+
   const event = getEventMap(receive);
   const depth = getObject(event, ["depth"]);
   const objects = Array.isArray(depth?.objects) ? depth.objects : [];
@@ -350,8 +467,15 @@ function OpenResults({ result }) {
 
   const transactionConstant = getValue(transaction, ["constant"]);
   const transactionAmount = getValue(transaction, ["amount"]);
-
   const validated = Boolean(transaction);
+
+  const amount =
+    transactionAmount ??
+    getValue(receive, ["amount"]) ??
+    getValue(event, ["amount"]);
+
+  const runtime = getValue(event, ["runtime"]);
+  const eventScale = getValue(event, ["scale"]);
 
   return (
     <section className="mt-5 space-y-4">
@@ -361,11 +485,16 @@ function OpenResults({ result }) {
       />
 
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-        <h3 className="text-sm font-semibold">Substrate directory</h3>
+        <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+          Substrate directory
+        </h3>
+
         <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-300">
-          This is the directory information returned by the API for the
-          selected substrate.
+          This information describes the selected substrate as reported by
+          the API. The displayed path is not independently verified by the
+          browser.
         </p>
+
         <p className="mt-3 break-all rounded-md bg-zinc-50 p-3 font-mono text-xs leading-5 dark:bg-zinc-950">
           {displayText(namespace)}
         </p>
@@ -373,12 +502,12 @@ function OpenResults({ result }) {
         <dl className="mt-4 grid grid-cols-[minmax(100px,0.7fr)_minmax(0,1.3fr)] gap-x-4 gap-y-3 text-sm">
           <FragmentRow
             k="Substrate"
-            v={displayText(directory?.name, selectedDirectoryName(result))}
+            v={displayText(
+              directory?.name,
+              result?.substrate ?? "Selected substrate",
+            )}
           />
-          <FragmentRow
-            k="Dimension"
-            v={displayText(directory?.dimension)}
-          />
+          <FragmentRow k="Dimension" v={displayText(directory?.dimension)} />
           <FragmentRow
             k="Activations"
             v={displayText(directory?.activations)}
@@ -395,68 +524,34 @@ function OpenResults({ result }) {
       </div>
 
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-        <h3 className="text-sm font-semibold">Event depth</h3>
+        <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+          Event depth
+        </h3>
+
         <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-300">
-          Depth describes the retained objects supplied by the receive
-          operation. Opening the directory does not itself create a transit.
+          Event depth describes the objects returned by the receive operation.
+          Opening a directory does not itself create a transit.
         </p>
 
         <dl className="mt-4 grid grid-cols-[minmax(100px,0.7fr)_minmax(0,1.3fr)] gap-x-4 gap-y-3 text-sm">
-          <FragmentRow
-            k="Depth path"
-            v={displayText(depth?.path)}
-          />
-          <FragmentRow
-            k="Retained objects"
-            v={String(objects.length)}
-          />
-          <FragmentRow
-            k="Event scale"
-            v={displayText(event?.scale)}
-          />
+          <FragmentRow k="Depth path" v={displayText(depth?.path)} />
+          <FragmentRow k="Objects returned" v={String(objects.length)} />
+          <FragmentRow k="Event scale" v={displayText(eventScale)} />
+          <FragmentRow k="Runtime" v={displayText(runtime)} />
         </dl>
-
-        {objects.length > 0 ? (
-          <div className="mt-4 space-y-2">
-            {objects.map((object, index) => (
-              <div
-                key={`${object.identifier ?? "object"}-${object.position ?? index}`}
-                className="rounded-md border border-zinc-200 p-3 dark:border-zinc-800"
-              >
-                <p className="text-sm font-medium">
-                  Retained object {object.position ?? index + 1}
-                </p>
-                <dl className="mt-2 grid grid-cols-[minmax(80px,0.6fr)_minmax(0,1.4fr)] gap-x-3 gap-y-2 text-xs">
-                  <FragmentRow
-                    k="Identifier"
-                    v={displayText(object.identifier)}
-                  />
-                  <FragmentRow
-                    k="Mass"
-                    v={displayText(object.mass)}
-                  />
-                  <FragmentRow
-                    k="From"
-                    v={displayText(object.from)}
-                  />
-                </dl>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">
-            No retained objects were returned in the event depth.
-          </p>
-        )}
       </div>
 
+      <ReceivedUnits amount={amount} objects={objects} />
+
       <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-        <h3 className="text-sm font-semibold">QuantumTransaction validation</h3>
+        <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+          QuantumTransaction validation
+        </h3>
 
         <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-300">
           {validated
-            ? "The API returned a QuantumTransaction from the receive operation."
-            : "The response did not contain the expected QuantumTransaction. Check the API response and server logs."}
+            ? "The response contains a QuantumTransaction object."
+            : "The response did not contain the expected QuantumTransaction object. Check the API response and server logs."}
         </p>
 
         <dl className="mt-4 grid grid-cols-[minmax(100px,0.7fr)_minmax(0,1.3fr)] gap-x-4 gap-y-3 text-sm">
@@ -464,24 +559,205 @@ function OpenResults({ result }) {
             k="Transaction returned"
             v={validated ? "Yes" : "Not confirmed"}
           />
-          <FragmentRow
-            k="Amount"
-            v={displayText(transactionAmount)}
-          />
+          <FragmentRow k="Amount" v={displayText(transactionAmount ?? amount)} />
           <FragmentRow
             k="Persisted constant"
             v={displayText(transactionConstant)}
           />
         </dl>
       </div>
+
+      {event && (
+        <ResultSection
+          title="Complete Event Map"
+          description="The original event returned by the receive operation"
+          value={event}
+          raw
+        />
+      )}
+
+      <ResultSection
+        title="Complete receive response"
+        description="Expanded for diagnostics if you need to inspect the exact API fields"
+        value={receive}
+        raw
+      />
+
+      <ResultSection
+        title="Directory response"
+        description="Metadata returned when the selected substrate directory was inspected"
+        value={directory}
+        raw
+      />
     </section>
   );
 }
 
-function selectedDirectoryName(result) {
-  return result?.directory?.name ?? "Selected substrate";
+function TransitResults({ result, network, path }) {
+  const frame = getObject(result, ["frame"]);
+  const eventMap = getEventMap(result);
+  const qtm =
+    getObject(frame, ["qtm", "Qtm"]) ??
+    getObject(result, ["qtm", "Qtm"]);
+
+  const heritage = getObject(eventMap, [
+    "heritage",
+    "state_heritage",
+    "stateHeritage",
+  ]);
+
+  const transition = getObject(eventMap, [
+    "transition",
+    "transition_heritage",
+    "transitionHeritage",
+  ]);
+
+  const metadata = pickFields(eventMap, EVENT_KEYS);
+
+  const networkDepth = {
+    network: network?.name ?? network?.id ?? "Not specified",
+    network_identifier: network?.id ?? "Not returned",
+    path: path || network?.path || "Not specified",
+  };
+
+  return (
+    <section className="mt-5 space-y-4">
+      <ResultHeading eyebrow="Transit result" title="QP44 event" />
+
+      <div className="space-y-3">
+        <ResultSection
+          title="QTM | Network Depth"
+          description="The QTM frame returned by the API, associated with the selected network and path"
+          value={qtm}
+          defaultOpen
+          raw
+        />
+
+        <ResultSection
+          title="Network Depth Registry"
+          description="Selected network and path context. These fields are not a substitute for a persisted registry returned by the API."
+          value={networkDepth}
+        />
+
+        {eventMap ? (
+          <EventMapSections eventMap={eventMap} metadata={metadata} />
+        ) : (
+          <ResultSection
+            title="Event Map"
+            description="The API response did not contain frame.event at the expected location."
+            value={undefined}
+          />
+        )}
+
+        {heritage && <HeritageSections heritage={heritage} />}
+
+        {transition && (
+          <ResultSection
+            title="Event Transition"
+            description="Transition fields returned with the event"
+            value={transition}
+            raw
+          />
+        )}
+
+        <ResultSection
+          title="Complete Transit Response"
+          description="The full response returned by the transit endpoint"
+          value={result}
+          raw
+        />
+      </div>
+    </section>
+  );
 }
 
+function ExileResults({ result }) {
+  const frame = getObject(result, ["frame"]);
+  const eventMap = getEventMap(result);
+  const qtm =
+    getObject(frame, ["qtm", "Qtm"]) ??
+    getObject(result, ["qtm", "Qtm"]);
+
+  const heritage = getObject(eventMap, [
+    "heritage",
+    "state_heritage",
+    "stateHeritage",
+  ]);
+
+  const metadata = pickFields(eventMap, EVENT_KEYS);
+
+  return (
+    <section className="mt-5 space-y-4">
+      <ResultHeading eyebrow="Exile result" title="Exile event" />
+
+      <div className="space-y-3">
+        <ResultSection
+          title="Stored QTM"
+          description="QTM values returned by the exile operation"
+          value={qtm}
+          defaultOpen
+          raw
+        />
+
+        {eventMap ? (
+          <EventMapSections
+            eventMap={eventMap}
+            metadata={metadata}
+            prefix="Exile "
+          />
+        ) : (
+          <ResultSection
+            title="Exile Event Map"
+            description="The API response did not contain frame.event at the expected location."
+            value={undefined}
+          />
+        )}
+
+        {heritage ? (
+          <HeritageSections heritage={heritage} prefix="Exile " />
+        ) : (
+          <ResultSection title="Exile Heritage" value={undefined} />
+        )}
+
+        <ResultSection
+          title="Complete Exile Response"
+          description="The complete response returned by the API"
+          value={result}
+          raw
+        />
+      </div>
+    </section>
+  );
+}
+
+function ResultCard({ result, tab, network, path }) {
+  if (result === null || result === undefined) return null;
+
+  return (
+    <div className="mt-5 space-y-4">
+      {tab === "open" && <OpenResults result={result} />}
+
+      {tab === "transit" && (
+        <TransitResults result={result} network={network} path={path} />
+      )}
+
+      {tab === "exile" && <ExileResults result={result} />}
+
+      {tab === "create" && (
+        <section className="space-y-3">
+          <ResultHeading eyebrow="Create result" title="Substrate creation" />
+          <ResultSection
+            title="Creation details"
+            description="The substrate creation response"
+            value={result}
+            raw
+            defaultOpen
+          />
+        </section>
+      )}
+    </div>
+  );
+}
 
 function Field({
   label,
@@ -512,162 +788,6 @@ function Field({
     </label>
   );
 }
-
-function TransitResults({ result, network, path }) {
-  const frame = getObject(result, ["frame"]);
-  const eventMap = getEventMap(result);
-  const qtm = getObject(frame, ["qtm", "Qtm"]);
-
-  const heritage = getObject(eventMap, [
-    "heritage",
-    "state_heritage",
-    "stateHeritage",
-  ]);
-
-  const transition = getObject(eventMap, [
-    "transition",
-    "transition_heritage",
-    "transitionHeritage",
-  ]);
-
-  const metadata = pickFields(eventMap, EVENT_KEYS);
-
-  const networkDepth = {
-    network: network?.name ?? network?.id ?? "Not specified",
-    network_identifier: network?.id ?? "Not returned",
-    path: path || network?.path || "Not specified",
-  };
-
-  return (
-    <section className="mt-5 space-y-4">
-      <ResultHeading eyebrow="Transit result" title="QP44 event" />
-
-      <div className="space-y-3">
-        <ResultSection
-          title="QTM | Network Depth"
-          description="QTM frame associated with the selected network and path"
-          value={qtm}
-          defaultOpen
-          raw
-        />
-
-        <ResultSection
-          title="Network Depth Registry"
-          description="Selected network and path context"
-          value={networkDepth}
-        />
-
-        {eventMap ? (
-          <EventMapSections eventMap={eventMap} metadata={metadata} />
-        ) : (
-          <ResultSection
-            title="Event Map"
-            description="The API response did not contain frame.event at the expected location."
-            value={undefined}
-          />
-        )}
-
-        {heritage && <HeritageSections heritage={heritage} />}
-
-        {transition && (
-          <ResultSection
-            title="Event Transition"
-            description="Transition fields returned with the event"
-            value={transition}
-            raw
-          />
-        )}
-
-        <ResultSection
-          title="Complete Transit Response"
-          description="The full DirectionResponse, including frame, QTM, Event Map, and selection"
-          value={result}
-          raw
-        />
-      </div>
-    </section>
-  );
-}
-
-function ExileResults({ result }) {
-  const frame = getObject(result, ["frame"]);
-  const eventMap = getEventMap(result);
-  const qtm = getObject(frame, ["qtm", "Qtm"]);
-
-  const heritage = getObject(eventMap, [
-    "heritage",
-    "state_heritage",
-    "stateHeritage",
-  ]);
-
-  const metadata = pickFields(eventMap, EVENT_KEYS);
-
-  return (
-    <section className="mt-5 space-y-4">
-      <ResultHeading eyebrow="Exile result" title="Exile event" />
-
-      <div className="space-y-3">
-        <ResultSection
-          title="Stored QTM"
-          description="QTM values returned by the exile operation"
-          value={qtm}
-          defaultOpen
-          raw
-        />
-
-        {eventMap ? (
-          <EventMapSections eventMap={eventMap} metadata={metadata} prefix="Exile " />
-        ) : (
-          <ResultSection
-            title="Exile Event Map"
-            description="The API response did not contain frame.event at the expected location."
-            value={undefined}
-          />
-        )}
-
-        {heritage ? (
-          <HeritageSections heritage={heritage} prefix="Exile " />
-        ) : (
-          <ResultSection title="Exile Heritage" value={undefined} />
-        )}
-
-        <ResultSection
-          title="Complete Exile Response"
-          description="The complete DirectionResponse returned by the API"
-          value={result}
-          raw
-        />
-      </div>
-    </section>
-  );
-}
-
-
-function ResultCard({ result, tab, network, path }) {
-  if (result === null || result === undefined) return null;
-
-  return (
-    <div className="mt-5 space-y-4">
-      {tab === "open" && <OpenResults result={result} />}
-
-      {tab === "transit" && (
-        <TransitResults result={result} network={network} path={path} />
-      )}
-
-      {tab === "exile" && <ExileResults result={result} />}
-
-      {tab === "create" && (
-        <section className="space-y-3">
-          <ResultHeading
-            eyebrow="Create result"
-            title="Substrate creation"
-          />
-        </section>
-      )}
-    </div>
-  );
-}
-
 
 function NumberField({ label, value, onChange, min = 0 }) {
   return (
@@ -899,8 +1019,6 @@ export default function Home() {
     setLoading(true);
 
     try {
-      let res;
-
       if (tab === "create") {
         const substrateName = name.trim();
 
@@ -953,7 +1071,7 @@ export default function Home() {
           };
         }
 
-        res = await fetch(`${API_BASE}/wallets`, {
+        const res = await fetch(`${API_BASE}/wallets`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(createPayload),
@@ -968,48 +1086,47 @@ export default function Home() {
         setPassphrase("");
 
         await loadSubstrates(substrateName);
-       
-} else if (tab === "open") {
-  const amount = Number(receiveAmount);
+      } else if (tab === "open") {
+        const amount = Number(receiveAmount);
 
-  if (!Number.isSafeInteger(amount) || amount <= 0) {
-    throw new Error("Receive amount must be a positive safe integer.");
-  }
+        if (!Number.isSafeInteger(amount) || amount <= 0) {
+          throw new Error("Receive amount must be a positive safe integer.");
+        }
 
-  if (!["receive", "change"].includes(receiveFlow)) {
-    throw new Error("Select a valid receive flow.");
-  }
+        if (!["receive", "change"].includes(receiveFlow)) {
+          throw new Error("Select a valid receive flow.");
+        }
 
-  const walletUrl =
-    `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}`;
+        const walletUrl =
+          `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}`;
 
-  // Inspect the selected substrate and its directory metadata first.
-  const directoryRes = await fetch(walletUrl, {
-    method: "GET",
-    cache: "no-store",
-  });
+        const directoryRes = await fetch(walletUrl, {
+          method: "GET",
+          cache: "no-store",
+        });
 
-  const directory = await readResponse(directoryRes);
+        const directory = await readResponse(directoryRes);
 
-  // Receive only to validate the QuantumTransaction::send() flow
-  // and inspect the event depth returned by the API.
-  const receiveRes = await fetch(`${walletUrl}/receive`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    cache: "no-store",
-    body: JSON.stringify({
-      amount,
-      flow: receiveFlow,
-    }),
-  });
+        const receiveRes = await fetch(`${walletUrl}/receive`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          cache: "no-store",
+          body: JSON.stringify({
+            amount,
+            flow: receiveFlow,
+          }),
+        });
 
-  const receive = await readResponse(receiveRes);
+        const receive = await readResponse(receiveRes);
 
-  setResult({
-    directory,
-    receive,
-  });
-}     else if (tab === "transit") {
+        setResult({
+          substrate: selectedSubstrate,
+          directory,
+          receive,
+          requested_amount: amount,
+          flow: receiveFlow,
+        });
+      } else if (tab === "transit") {
         if (!selectedNetwork) {
           throw new Error("Select a network before transit.");
         }
@@ -1031,7 +1148,7 @@ export default function Home() {
           }
         }
 
-        res = await fetch(
+        const res = await fetch(
           `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}/transit`,
           {
             method: "POST",
@@ -1047,7 +1164,7 @@ export default function Home() {
         setResult(await readResponse(res));
         await loadSubstrates(selectedSubstrate);
       } else if (tab === "exile") {
-        res = await fetch(
+        const res = await fetch(
           `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}/exile`,
           {
             method: "POST",
@@ -1143,7 +1260,7 @@ export default function Home() {
 
               <ResultSection
                 title="Selected substrate details"
-                description="All fields returned for the selected substrate in the substrate-list response"
+                description="Fields returned for the selected substrate"
                 value={
                   substrates.find((item) => item.name === selectedSubstrate) ?? {}
                 }
@@ -1163,7 +1280,7 @@ export default function Home() {
 
           {!listLoading && !listError && substrates.length === 0 && (
             <p className="mt-3 text-sm text-zinc-600 dark:text-zinc-400">
-              No substrates were found. Create one using the create tab.
+              No substrates were found. Create one using the Create tab.
             </p>
           )}
         </section>
@@ -1203,11 +1320,11 @@ export default function Home() {
               {tab === "create" &&
                 "Initialize a substrate using persistent indices or a BIP39 mnemonic."}
               {tab === "open" &&
-                "Receive a QuantumTransaction and inspect its QTM projection, Event Map, and complete API response."}
+                "Inspect the selected substrate directory and receive event depth, with numbered unit positions."}
               {tab === "transit" &&
-                "Select a network, customize its path, and inspect the resulting QP44 event and complete Event Map."}
+                "Select a network, customize its path, and inspect the QP44 event and QTM network depth."}
               {tab === "exile" &&
-                "Exile the selected substrate using the wallet engine and inspect its complete Event Map."}
+                "Exile the selected substrate and inspect the returned event and heritage."}
             </p>
           </div>
 
@@ -1336,7 +1453,7 @@ export default function Home() {
                     />
 
                     <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                      The API validates the mnemonic and derives the 12 indices
+                      The API validates the mnemonic and derives the indices
                       and conditioning entropy. The phrase and passphrase are
                       sent with this creation request.
                     </p>
@@ -1345,63 +1462,62 @@ export default function Home() {
               </>
             )}
 
-           
-{tab === "open" && (
-  <div className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
-    <div>
-      <h3 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">
-        Substrate directory and depth
-      </h3>
-      <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-        Inspect the selected substrate directory and its retained event depth.
-        Open uses the receive operation to validate the QuantumTransaction
-        send flow.
-      </p>
-    </div>
+            {tab === "open" && (
+              <div className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+                <div>
+                  <h3 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">
+                    Substrate directory and depth
+                  </h3>
+                  <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                    Inspect the selected directory and receive event depth.
+                    The unit list numbers requested positions and displays
+                    server-provided identifiers when available.
+                  </p>
+                </div>
 
-    <div className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-      <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-        Selected substrate
-      </p>
-      <p className="mt-1 break-all font-mono text-sm text-zinc-900 dark:text-zinc-100">
-        {selectedSubstrate || "No substrate selected"}
-      </p>
-      <p className="mt-2 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-        The directory is determined by the API. This name identifies the
-        selected substrate; it is not itself a verified filesystem path.
-      </p>
-    </div>
+                <div className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                  <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                    Selected substrate
+                  </p>
+                  <p className="mt-1 break-all font-mono text-sm text-zinc-900 dark:text-zinc-100">
+                    {selectedSubstrate || "No substrate selected"}
+                  </p>
+                  <p className="mt-2 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                    The directory path and retained objects are taken from the
+                    API response, not inferred from the substrate name.
+                  </p>
+                </div>
 
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-      <NumberField
-        label="Transaction amount"
-        value={receiveAmount}
-        onChange={setReceiveAmount}
-        min={1}
-      />
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <NumberField
+                    label="Transaction amount"
+                    value={receiveAmount}
+                    onChange={setReceiveAmount}
+                    min={1}
+                  />
 
-      <label className="flex min-w-0 flex-col gap-1">
-        <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-          Receive flow
-        </span>
-        <select
-          value={receiveFlow}
-          onChange={(e) => setReceiveFlow(e.target.value)}
-          className="h-9 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800"
-        >
-          <option value="receive">Receive</option>
-          <option value="change">Change</option>
-        </select>
-      </label>
-    </div>
+                  <label className="flex min-w-0 flex-col gap-1">
+                    <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                      Receive flow
+                    </span>
+                    <select
+                      value={receiveFlow}
+                      onChange={(e) => setReceiveFlow(e.target.value)}
+                      className="h-9 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800"
+                    >
+                      <option value="receive">Receive</option>
+                      <option value="change">Change</option>
+                    </select>
+                  </label>
+                </div>
 
-    <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-      The amount is passed to the API's QuantumTransaction receive operation.
-      It is not a wallet balance or an activation count. The returned event
-      depth is displayed in the results.
-    </p>
-  </div>
-)}
+                <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                  The amount is sent to the API receive operation. Display
+                  numbers do not become persistent identifiers unless the
+                  backend creates and returns those identifiers.
+                </p>
+              </div>
+            )}
 
             {tab === "transit" && (
               <>
@@ -1489,7 +1605,7 @@ export default function Home() {
               {loading
                 ? "Processing..."
                 : tab === "open"
-                  ? "Receive QuantumTransaction"
+                  ? "Inspect directory and receive units"
                   : TABS.find((t) => t.id === tab)?.label}
             </button>
           </form>
@@ -1504,15 +1620,12 @@ export default function Home() {
           </p>
         )}
 
-        
-<ResultCard
-  result={result}
-  tab={tab}
-  network={currentNetwork}
-  path={path}
-  displayMode="key-value"
-/>
-
+        <ResultCard
+          result={result}
+          tab={tab}
+          network={currentNetwork}
+          path={path}
+        />
 
         <footer className="mt-9 border-t border-zinc-200 pt-4 text-xs leading-5 text-zinc-500 dark:border-zinc-800 dark:text-zinc-500">
           QTM substrate console
