@@ -17,90 +17,128 @@ const geistMono = Geist_Mono({
 export const metadata = {
   title: {
     default: "QTM Substrate Console",
-    template: "%s | QTM Substrate Console",
+    template: "%s | QTM",
   },
   description:
-    "Manage QuantPerm substrates and inspect QTM state, transition heritage, and transit events.",
-  applicationName: "QTM Substrate Console",
+    "Create and explore QuantPerm substrates, inspect state, and follow transitions and events.",
+  applicationName: "QTM",
 };
+
+function QTMMark() {
+  return (
+    <svg
+      viewBox="0 0 36 36"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      className="h-8 w-8"
+      aria-hidden="true"
+    >
+      <rect
+        x="1"
+        y="1"
+        width="34"
+        height="34"
+        rx="5"
+        stroke="currentColor"
+        strokeOpacity="0.18"
+      />
+      <path
+        d="M18 5.5L29 12V24L18 30.5L7 24V12L18 5.5Z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+      />
+      <path
+        d="M18 5.5V18M7 12L18 18L29 12M18 18V30.5"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeOpacity="0.65"
+      />
+      <circle cx="18" cy="18" r="2.5" fill="currentColor" />
+    </svg>
+  );
+}
 
 export default function RootLayout({ children }) {
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} min-h-full antialiased`}
     >
-      <body className="min-h-full bg-zinc-50 font-sans text-zinc-950 dark:bg-black dark:text-zinc-50">
+      <body className="min-h-screen bg-[#f8f8f6] font-sans text-zinc-900 selection:bg-indigo-100 selection:text-indigo-950 dark:bg-[#111110] dark:text-zinc-100 dark:selection:bg-indigo-900 dark:selection:text-white">
         <a
           href="#main-content"
-          className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-white focus:px-4 focus:py-3 focus:text-zinc-950 focus:shadow-lg"
+          className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:border focus:border-zinc-300 focus:bg-white focus:px-4 focus:py-2 focus:text-sm focus:shadow-sm dark:focus:border-zinc-700 dark:focus:bg-zinc-900"
         >
           Skip to content
         </a>
 
-        <div className="pointer-events-none fixed inset-x-0 top-0 -z-10 h-80 bg-gradient-to-b from-indigo-100/70 via-violet-50/40 to-transparent dark:from-indigo-950/30 dark:via-violet-950/10" />
+        <div
+          aria-hidden="true"
+          className="pointer-events-none fixed inset-x-0 top-0 -z-10 h-64 bg-[radial-gradient(ellipse_at_top,_rgba(99,102,241,0.07),_transparent_68%)]"
+        />
 
-        <header className="border-b border-zinc-200/80 bg-white/75 backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-950/70">
-          <div className="mx-auto flex w-full max-w-6xl items-center justify-between gap-4 px-4 py-4 sm:px-6 lg:px-8">
-            <a href="/" className="flex min-w-0 items-center gap-3">
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-zinc-950 text-white shadow-sm dark:bg-white dark:text-zinc-950">
-                <svg
-                  viewBox="0 0 40 40"
-                  fill="none"
-                  xmlns="http://www.w3.org/2000/svg"
-                  className="h-7 w-7"
+        <div className="flex min-h-screen flex-col">
+          <header className="shrink-0 border-b border-zinc-200/80 bg-[#fdfdfb]/90 dark:border-zinc-800 dark:bg-[#151514]/90">
+            <div className="mx-auto flex w-full max-w-7xl items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8">
+              <a
+                href="/"
+                className="group flex min-w-0 items-center gap-3"
+                aria-label="QTM home"
+              >
+                <span className="text-zinc-800 dark:text-zinc-100">
+                  <QTMMark />
+                </span>
+
+                <span className="min-w-0">
+                  <span className="block text-[15px] font-semibold tracking-[-0.035em]">
+                    QTM
+                  </span>
+                  <span className="mt-0.5 block text-xs text-zinc-500 dark:text-zinc-400">
+                    Substrate workspace
+                  </span>
+                </span>
+              </a>
+
+              <div className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+                <span className="hidden sm:inline">
+                  Create, explore, and transition
+                </span>
+                <span
                   aria-hidden="true"
+                  className="h-1.5 w-1.5 rounded-full bg-indigo-500"
+                />
+                <span>QTM</span>
+              </div>
+            </div>
+          </header>
+
+          <main
+            id="main-content"
+            className="mx-auto w-full max-w-7xl flex-1 px-4 py-5 sm:px-6 sm:py-7 lg:px-8"
+          >
+            <div className="mx-auto w-full max-w-6xl">{children}</div>
+          </main>
+
+          <footer className="mt-auto shrink-0">
+            <div className="mx-auto w-full max-w-7xl px-4 pb-4 sm:px-6 lg:px-8">
+              <div className="flex flex-col gap-2 border-t border-zinc-200/80 pt-3 text-xs text-zinc-500 sm:flex-row sm:items-center sm:justify-between dark:border-zinc-800">
+                <span>QTM Substrate Workspace</span>
+                <nav
+                  aria-label="Workspace sections"
+                  className="flex flex-wrap items-center gap-x-2"
                 >
-                  <path
-                    d="M20 4L35 12.5V27.5L20 36L5 27.5V12.5L20 4Z"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                  />
-                  <path
-                    d="M20 4V20M5 12.5L20 20L35 12.5M20 20V36"
-                    stroke="currentColor"
-                    strokeWidth="1.4"
-                  />
-                  <circle cx="20" cy="20" r="3" fill="currentColor" />
-                </svg>
-              </span>
-
-              <span className="min-w-0">
-                <span className="block truncate text-sm font-semibold tracking-tight">
-                  QTM Substrate Console
-                </span>
-                <span className="mt-0.5 block text-xs text-zinc-500 dark:text-zinc-400">
-                  QuantPerm · State · Transition · Events
-                </span>
-              </span>
-            </a>
-
-            <span className="hidden rounded-full border border-zinc-200 bg-white/80 px-3 py-1.5 text-xs font-medium text-zinc-600 sm:inline-flex dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
-              Substrate interface
-            </span>
-          </div>
-        </header>
-
-        <main
-          id="main-content"
-          className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 sm:py-8 lg:px-8"
-        >
-          {children}
-        </main>
-
-        <footer className="mx-auto w-full max-w-6xl px-4 pb-6 sm:px-6 lg:px-8">
-          <div className="border-t border-zinc-200/80 pt-4 text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-            QTM Substrate Console
-            <span className="mx-2 text-zinc-300 dark:text-zinc-700">·</span>
-            Create
-            <span className="mx-1.5">/</span>
-            Open
-            <span className="mx-1.5">/</span>
-            Transit
-            <span className="mx-1.5">/</span>
-            Exile
-          </div>
-        </footer>
+                  <span>Create</span>
+                  <span className="text-zinc-300 dark:text-zinc-700">·</span>
+                  <span>Open</span>
+                  <span className="text-zinc-300 dark:text-zinc-700">·</span>
+                  <span>Transit</span>
+                  <span className="text-zinc-300 dark:text-zinc-700">·</span>
+                  <span>Exile</span>
+                </nav>
+              </div>
+            </div>
+          </footer>
+        </div>
       </body>
     </html>
   );
