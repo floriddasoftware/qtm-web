@@ -323,81 +323,165 @@ function EventMapSections({ eventMap, metadata, prefix = "" }) {
   );
 }
 
+
+function displayText(value, fallback = "Not provided by the API") {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (Array.isArray(value)) return value.length ? value.join(", ") : "None";
+  if (typeof value === "object") return "Details available";
+  return String(value);
+}
+
 function OpenResults({ result }) {
-  const frame = getObject(result, ["frame"]) ?? result;
+  const directory = result?.directory;
+  const receive = result?.receive;
+  const frame = getObject(receive, ["frame"]) ?? receive;
+  const transaction = getObject(frame, [
+    "quantum_transaction",
+    "quantumTransaction",
+  ]);
+  const event = getEventMap(receive);
+  const depth = getObject(event, ["depth"]);
+  const objects = Array.isArray(depth?.objects) ? depth.objects : [];
 
-  const transaction =
-    getObject(frame, ["quantum_transaction", "quantumTransaction"]) ??
-    getObject(result, ["quantum_transaction", "quantumTransaction"]);
+  const namespace =
+    getValue(directory, ["namespace", "directory", "path"]) ??
+    "The API did not return a directory path.";
 
-  const eventMap = getEventMap(result);
+  const transactionConstant = getValue(transaction, ["constant"]);
+  const transactionAmount = getValue(transaction, ["amount"]);
 
-  const heritage =
-    getObject(eventMap, ["heritage", "state_heritage", "stateHeritage"]) ??
-    getObject(transaction, ["heritage", "state_heritage", "stateHeritage"]) ??
-    getObject(frame, ["heritage", "state_heritage", "stateHeritage"]) ??
-    getObject(result, ["heritage", "state_heritage", "stateHeritage"]);
-
-  const transactionQtm =
-    getObject(transaction, ["qtm", "Qtm"]) ??
-    getObject(frame, ["qtm", "Qtm"]);
-
-  const eventQtm = getObject(eventMap, ["qtm", "Qtm"]);
-
-  const metadata = pickFields(eventMap, EVENT_KEYS);
+  const validated = Boolean(transaction);
 
   return (
     <section className="mt-5 space-y-4">
-      <ResultHeading eyebrow="Receive result" title="QuantumTransaction" />
+      <ResultHeading
+        eyebrow="Open result"
+        title="Substrate directory and depth"
+      />
 
-      <div className="space-y-3">
-        <ResultSection
-          title="QuantumTransaction"
-          description="Transaction amount, persisted constant, and receive frame"
-          value={transaction}
-          defaultOpen
-          raw
-        />
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <h3 className="text-sm font-semibold">Substrate directory</h3>
+        <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-300">
+          This is the directory information returned by the API for the
+          selected substrate.
+        </p>
+        <p className="mt-3 break-all rounded-md bg-zinc-50 p-3 font-mono text-xs leading-5 dark:bg-zinc-950">
+          {displayText(namespace)}
+        </p>
 
-        <ResultSection
-          title="Transaction QTM"
-          description="QTM values associated with the outer transaction"
-          value={transactionQtm}
-          raw
-        />
-
-        {eventQtm && (
-          <ResultSection
-            title="Received Event QTM"
-            description="QTM projection returned by the receive operation"
-            value={eventQtm}
-            raw
+        <dl className="mt-4 grid grid-cols-[minmax(100px,0.7fr)_minmax(0,1.3fr)] gap-x-4 gap-y-3 text-sm">
+          <FragmentRow
+            k="Substrate"
+            v={displayText(directory?.name, selectedDirectoryName(result))}
           />
-        )}
+          <FragmentRow
+            k="Dimension"
+            v={displayText(directory?.dimension)}
+          />
+          <FragmentRow
+            k="Activations"
+            v={displayText(directory?.activations)}
+          />
+          <FragmentRow
+            k="Commitment"
+            v={displayText(directory?.commitment)}
+          />
+          <FragmentRow
+            k="Coordinate"
+            v={displayText(directory?.coordinate)}
+          />
+        </dl>
+      </div>
 
-        {eventMap ? (
-          <EventMapSections eventMap={eventMap} metadata={metadata} prefix="Receive " />
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <h3 className="text-sm font-semibold">Event depth</h3>
+        <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-300">
+          Depth describes the retained objects supplied by the receive
+          operation. Opening the directory does not itself create a transit.
+        </p>
+
+        <dl className="mt-4 grid grid-cols-[minmax(100px,0.7fr)_minmax(0,1.3fr)] gap-x-4 gap-y-3 text-sm">
+          <FragmentRow
+            k="Depth path"
+            v={displayText(depth?.path)}
+          />
+          <FragmentRow
+            k="Retained objects"
+            v={String(objects.length)}
+          />
+          <FragmentRow
+            k="Event scale"
+            v={displayText(event?.scale)}
+          />
+        </dl>
+
+        {objects.length > 0 ? (
+          <div className="mt-4 space-y-2">
+            {objects.map((object, index) => (
+              <div
+                key={`${object.identifier ?? "object"}-${object.position ?? index}`}
+                className="rounded-md border border-zinc-200 p-3 dark:border-zinc-800"
+              >
+                <p className="text-sm font-medium">
+                  Retained object {object.position ?? index + 1}
+                </p>
+                <dl className="mt-2 grid grid-cols-[minmax(80px,0.6fr)_minmax(0,1.4fr)] gap-x-3 gap-y-2 text-xs">
+                  <FragmentRow
+                    k="Identifier"
+                    v={displayText(object.identifier)}
+                  />
+                  <FragmentRow
+                    k="Mass"
+                    v={displayText(object.mass)}
+                  />
+                  <FragmentRow
+                    k="From"
+                    v={displayText(object.from)}
+                  />
+                </dl>
+              </div>
+            ))}
+          </div>
         ) : (
-          <ResultSection
-            title="Receive Event Map"
-            description="The expected frame.event object was not present in this response."
-            value={undefined}
-          />
+          <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">
+            No retained objects were returned in the event depth.
+          </p>
         )}
+      </div>
 
-        {heritage ? (
-          <HeritageSections heritage={heritage} />
-        ) : (
-          <ResultSection
-            title="Received Event Heritage"
-            description="No separate heritage object was found at the expected response locations."
-            value={undefined}
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <h3 className="text-sm font-semibold">QuantumTransaction validation</h3>
+
+        <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-300">
+          {validated
+            ? "The API returned a QuantumTransaction from the receive operation."
+            : "The response did not contain the expected QuantumTransaction. Check the API response and server logs."}
+        </p>
+
+        <dl className="mt-4 grid grid-cols-[minmax(100px,0.7fr)_minmax(0,1.3fr)] gap-x-4 gap-y-3 text-sm">
+          <FragmentRow
+            k="Transaction returned"
+            v={validated ? "Yes" : "Not confirmed"}
           />
-        )}
+          <FragmentRow
+            k="Amount"
+            v={displayText(transactionAmount)}
+          />
+          <FragmentRow
+            k="Persisted constant"
+            v={displayText(transactionConstant)}
+          />
+        </dl>
       </div>
     </section>
   );
 }
+
+function selectedDirectoryName(result) {
+  return result?.directory?.name ?? "Selected substrate";
+}
+
 
 function Field({
   label,
@@ -558,6 +642,7 @@ function ExileResults({ result }) {
   );
 }
 
+
 function ResultCard({ result, tab, network, path }) {
   if (result === null || result === undefined) return null;
 
@@ -573,20 +658,16 @@ function ResultCard({ result, tab, network, path }) {
 
       {tab === "create" && (
         <section className="space-y-3">
-          <ResultHeading eyebrow="Create result" title="Substrate creation" />
+          <ResultHeading
+            eyebrow="Create result"
+            title="Substrate creation"
+          />
         </section>
       )}
-
-      <ResultSection
-        title="Complete API response"
-        description="The entire JSON response returned by the server, without filtering or renaming any fields."
-        value={result}
-        defaultOpen
-        raw
-      />
     </div>
   );
 }
+
 
 function NumberField({ label, value, onChange, min = 0 }) {
   return (
@@ -887,29 +968,48 @@ export default function Home() {
         setPassphrase("");
 
         await loadSubstrates(substrateName);
-      } else if (tab === "open") {
-        const amount = Number(receiveAmount);
+       
+} else if (tab === "open") {
+  const amount = Number(receiveAmount);
 
-        if (!Number.isSafeInteger(amount) || amount <= 0) {
-          throw new Error("Receive amount must be a positive safe integer.");
-        }
+  if (!Number.isSafeInteger(amount) || amount <= 0) {
+    throw new Error("Receive amount must be a positive safe integer.");
+  }
 
-        if (!["receive", "change"].includes(receiveFlow)) {
-          throw new Error("Select a valid receive flow.");
-        }
+  if (!["receive", "change"].includes(receiveFlow)) {
+    throw new Error("Select a valid receive flow.");
+  }
 
-        res = await fetch(
-          `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}/receive`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            cache: "no-store",
-            body: JSON.stringify({ amount, flow: receiveFlow }),
-          },
-        );
+  const walletUrl =
+    `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}`;
 
-        setResult(await readResponse(res));
-      } else if (tab === "transit") {
+  // Inspect the selected substrate and its directory metadata first.
+  const directoryRes = await fetch(walletUrl, {
+    method: "GET",
+    cache: "no-store",
+  });
+
+  const directory = await readResponse(directoryRes);
+
+  // Receive only to validate the QuantumTransaction::send() flow
+  // and inspect the event depth returned by the API.
+  const receiveRes = await fetch(`${walletUrl}/receive`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify({
+      amount,
+      flow: receiveFlow,
+    }),
+  });
+
+  const receive = await readResponse(receiveRes);
+
+  setResult({
+    directory,
+    receive,
+  });
+}     else if (tab === "transit") {
         if (!selectedNetwork) {
           throw new Error("Select a network before transit.");
         }
@@ -1245,38 +1345,63 @@ export default function Home() {
               </>
             )}
 
-            {tab === "open" && (
-              <div className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <NumberField
-                    label="Receive amount / activation"
-                    value={receiveAmount}
-                    onChange={setReceiveAmount}
-                    min={1}
-                  />
+           
+{tab === "open" && (
+  <div className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+    <div>
+      <h3 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">
+        Substrate directory and depth
+      </h3>
+      <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+        Inspect the selected substrate directory and its retained event depth.
+        Open uses the receive operation to validate the QuantumTransaction
+        send flow.
+      </p>
+    </div>
 
-                  <label className="flex min-w-0 flex-col gap-1">
-                    <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                      Flow
-                    </span>
-                    <select
-                      value={receiveFlow}
-                      onChange={(e) => setReceiveFlow(e.target.value)}
-                      className="h-9 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800"
-                    >
-                      <option value="receive">Receive</option>
-                      <option value="change">Change</option>
-                    </select>
-                  </label>
-                </div>
+    <div className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+      <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+        Selected substrate
+      </p>
+      <p className="mt-1 break-all font-mono text-sm text-zinc-900 dark:text-zinc-100">
+        {selectedSubstrate || "No substrate selected"}
+      </p>
+      <p className="mt-2 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+        The directory is determined by the API. This name identifies the
+        selected substrate; it is not itself a verified filesystem path.
+      </p>
+    </div>
 
-                <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                  Open calls the API receive endpoint. The amount is passed to
-                  the QuantumTransaction receive operation; it is not a
-                  displayed wallet balance.
-                </p>
-              </div>
-            )}
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <NumberField
+        label="Transaction amount"
+        value={receiveAmount}
+        onChange={setReceiveAmount}
+        min={1}
+      />
+
+      <label className="flex min-w-0 flex-col gap-1">
+        <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+          Receive flow
+        </span>
+        <select
+          value={receiveFlow}
+          onChange={(e) => setReceiveFlow(e.target.value)}
+          className="h-9 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800"
+        >
+          <option value="receive">Receive</option>
+          <option value="change">Change</option>
+        </select>
+      </label>
+    </div>
+
+    <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+      The amount is passed to the API's QuantumTransaction receive operation.
+      It is not a wallet balance or an activation count. The returned event
+      depth is displayed in the results.
+    </p>
+  </div>
+)}
 
             {tab === "transit" && (
               <>
@@ -1379,12 +1504,15 @@ export default function Home() {
           </p>
         )}
 
-        <ResultCard
-          result={result}
-          tab={tab}
-          network={currentNetwork}
-          path={path}
-        />
+        
+<ResultCard
+  result={result}
+  tab={tab}
+  network={currentNetwork}
+  path={path}
+  displayMode="key-value"
+/>
+
 
         <footer className="mt-9 border-t border-zinc-200 pt-4 text-xs leading-5 text-zinc-500 dark:border-zinc-800 dark:text-zinc-500">
           QTM substrate console
