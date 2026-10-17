@@ -713,6 +713,20 @@ export default function Home() {
             operations against that environment. API results are displayed as
             readable fields rather than raw JSON.
           </p>
+          <div className="flex flex-wrap gap-2 pt-1">
+            <a
+              href="/network"
+              className="inline-flex h-9 items-center justify-center rounded-lg border border-zinc-200 px-3 text-xs font-medium hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+            >
+              Network
+            </a>
+            <a
+              href="/eventstore"
+              className="inline-flex h-9 items-center justify-center rounded-lg border border-zinc-200 px-3 text-xs font-medium hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+            >
+              Event Store
+            </a>
+          </div>
         </header>
         <section className="mb-4 space-y-3 rounded-xl border border-zinc-200 bg-white p-3 sm:mb-5 sm:p-4 md:p-5 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
