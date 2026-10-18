@@ -32,18 +32,20 @@ function normalizeEntries(result, keys = []) {
     if (Array.isArray(result?.[key])) return result[key];
   }
 
-  if (result && typeof result === "object") {
-    for (const value of Object.values(result)) {
-      if (Array.isArray(value)) return value;
-    }
-  }
-
   return [];
 }
 
 function displayValue(value) {
   if (value === null || value === undefined || value === "") return "—";
-  if (typeof value === "object") return JSON.stringify(value);
+
+  if (Array.isArray(value)) {
+    return value.length ? value.join(", ") : "—";
+  }
+
+  if (typeof value === "object") {
+    return JSON.stringify(value);
+  }
+
   return String(value);
 }
 
@@ -58,89 +60,23 @@ function getPathIdentifier(entry) {
   );
 }
 
-function getDepth(entry) {
-  const direct =
-    entry?.depth ??
-    entry?.Depth ??
-    entry?.coordinate?.depth ??
-    entry?.structure?.depth;
-
-  if (direct !== undefined && direct !== null) {
-    return displayValue(direct);
-  }
-
-  const match = getPathIdentifier(entry).match(
-    /(?:^|[/.:_-])depth[/.:_-]?(\d+)/i,
-  );
-
-  return match?.[1] ?? "—";
-}
-
-function getEventIdentifier(entry, index) {
-  return String(
-    entry?.event_id ??
-      entry?.eventId ??
-      entry?.activation ??
-      entry?.heritage?.state?.activation_count ??
-      entry?.id ??
-      index + 1,
-  );
-}
-
-function isWalletPayloadPath(entry) {
-  const identifier = [
-    getPathIdentifier(entry),
-    entry?.name,
-    entry?.kind,
-    entry?.type,
-    entry?.identifier,
-  ]
-    .filter(Boolean)
-    .join(" ");
-
-  return /qp\/wallet/i.test(identifier) ||
-    /BitcoinPayload/i.test(identifier);
+function getSubstrateName(entry) {
+  return String(entry?.name ?? "");
 }
 
 function formatTimestamp(value) {
-  if (value === undefined || value === null || value === "") {
+  if (value === null || value === undefined || value === "") {
     return "—";
   }
 
-  const date = new Date(value);
+  const date =
+    typeof value === "number"
+      ? new Date(value * 1000)
+      : new Date(value);
 
   return Number.isNaN(date.getTime())
     ? String(value)
     : date.toLocaleString();
-}
-
-function getEventTimestamp(event) {
-  return (
-    event?.timestamp ??
-    event?.created_at ??
-    event?.time ??
-    event?.persisted_at ??
-    null
-  );
-}
-
-function getEventType(event) {
-  return (
-    event?.type ??
-    event?.kind ??
-    event?.event_type ??
-    (event?.heritage ? "Heritage" : "Event")
-  );
-}
-
-function getEventIdentifierValue(event) {
-  return (
-    event?.path ??
-    event?.identifier ??
-    event?.commitment ??
-    event?.id ??
-    "—"
-  );
 }
 
 function diagnosticClass(status) {
@@ -182,380 +118,298 @@ function DiagnosticValue({ label, value }) {
   );
 }
 
+function ErrorMessage({ children }) {
+  if (!children) return null;
+
+  return (
+    <p
+      role="alert"
+      className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
+    >
+      {children}
+    </p>
+  );
+}
+
+function getEventKey(event, index) {
+  return `${event?.kind ?? "event"}-${event?.activation ?? index}-${event?.record ?? index}`;
+}
+
 export default function NetworkPage() {
   const [networks, setNetworks] = useState([]);
-  const [events, setEvents] = useState([]);
-  const [selectedNetwork, setSelectedNetwork] = useState(null);
+  const [substrates, setSubstrates] = useState([]);
 
-  const [loading, setLoading] = useState(true);
-  const [eventsLoading, setEventsLoading] = useState(false);
+  // A registered network path is context, not an independent event store.
+  const [selectedPath, setSelectedPath] = useState("");
+  const [selectedSubstrate, setSelectedSubstrate] = useState("");
 
-  const [error, setError] = useState("");
-  const [eventsError, setEventsError] = useState("");
+  const [substrateState, setSubstrateState] = useState(null);
+  const [eventStore, setEventStore] = useState(null);
 
-  const [lastUpdated, setLastUpdated] = useState(null);
-  const [eventsUpdated, setEventsUpdated] = useState(null);
+  const [networkLoading, setNetworkLoading] = useState(true);
+  const [substrateLoading, setSubstrateLoading] = useState(true);
+  const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
+
+  const [networkError, setNetworkError] = useState("");
+  const [substrateListError, setSubstrateListError] = useState("");
+  const [stateError, setStateError] = useState("");
+  const [eventStoreError, setEventStoreError] = useState("");
+
+  const [stateStatus, setStateStatus] = useState("unknown");
+  const [eventStoreStatus, setEventStoreStatus] = useState("unknown");
+
+  const [lastNetworkCheck, setLastNetworkCheck] = useState(null);
+  const [lastSubstrateCheck, setLastSubstrateCheck] = useState(null);
+  const [lastDiagnosticsCheck, setLastDiagnosticsCheck] = useState(null);
 
   const [autoRefresh, setAutoRefresh] = useState(true);
 
-  // Per-path diagnostics are keyed by path identity, never table position.
-  const [pathDiagnostics, setPathDiagnostics] = useState({});
-  const [systemDiagnostics, setSystemDiagnostics] = useState(null);
-
-  const requestRef = useRef(null);
-  const eventRequestRef = useRef(null);
-  const diagnosticRequestRef = useRef(null);
-
-  const selectedPathRef = useRef(null);
-  const diagnosticInFlightRef = useRef(new Set());
+  const networkRequestRef = useRef(null);
+  const substrateRequestRef = useRef(null);
+  const diagnosticsRequestRef = useRef(null);
 
   const loadNetworks = useCallback(async ({ silent = false } = {}) => {
-    requestRef.current?.abort();
+    networkRequestRef.current?.abort();
 
     const controller = new AbortController();
-    requestRef.current = controller;
+    networkRequestRef.current = controller;
 
-    if (!silent) setLoading(true);
-    setError("");
+    if (!silent) setNetworkLoading(true);
+    setNetworkError("");
 
     try {
       const result = await apiRequest("/networks", controller.signal);
-      const entries = normalizeEntries(result, [
-        "networks",
-        "paths",
-        "items",
-      ]);
+      const entries = normalizeEntries(result, ["networks"]);
 
       if (controller.signal.aborted) return;
 
       setNetworks(entries);
-      setLastUpdated(new Date());
+      setLastNetworkCheck(new Date());
 
-      setSelectedNetwork((current) => {
-        if (!current) return null;
-
-        const identifier = getPathIdentifier(current);
-
-        return (
-          entries.find(
-            (entry) => getPathIdentifier(entry) === identifier,
-          ) ?? current
-        );
-      });
-
-      // Remove diagnostic entries for paths no longer registered.
-      const registered = new Set(entries.map(getPathIdentifier));
-
-      setPathDiagnostics((current) => {
-        const next = {};
-
-        for (const [identifier, diagnostic] of Object.entries(current)) {
-          if (registered.has(identifier)) {
-            next[identifier] = diagnostic;
-          }
+      setSelectedPath((current) => {
+        if (current && entries.some((entry) => getPathIdentifier(entry) === current)) {
+          return current;
         }
 
-        return next;
+        return entries.length ? getPathIdentifier(entries[0]) : "";
       });
-    } catch (err) {
-      if (err?.name !== "AbortError") {
-        setError(
-          err instanceof Error ? err.message : "Unable to load networks.",
+    } catch (error) {
+      if (error?.name !== "AbortError") {
+        setNetworkError(
+          error instanceof Error ? error.message : "Unable to load registered paths.",
         );
       }
     } finally {
-      if (!controller.signal.aborted) setLoading(false);
+      if (!controller.signal.aborted) setNetworkLoading(false);
     }
   }, []);
 
-  const loadEvents = useCallback(
-    async (network, { silent = false } = {}) => {
-      if (!network) return;
+  const loadSubstrates = useCallback(async ({ silent = false } = {}) => {
+    substrateRequestRef.current?.abort();
 
-      const identifier = getPathIdentifier(network);
+    const controller = new AbortController();
+    substrateRequestRef.current = controller;
 
-      if (!identifier) {
-        setEventsError("This registration has no usable path identifier.");
+    if (!silent) setSubstrateLoading(true);
+    setSubstrateListError("");
+
+    try {
+      const result = await apiRequest("/wallets", controller.signal);
+      const entries = normalizeEntries(result, ["substrates"]).filter(
+        (entry) => getSubstrateName(entry),
+      );
+
+      if (controller.signal.aborted) return;
+
+      setSubstrates(entries);
+      setLastSubstrateCheck(new Date());
+
+      setSelectedSubstrate((current) => {
+        if (current && entries.some((entry) => getSubstrateName(entry) === current)) {
+          return current;
+        }
+
+        return entries.length ? getSubstrateName(entries[0]) : "";
+      });
+    } catch (error) {
+      if (error?.name !== "AbortError") {
+        setSubstrateListError(
+          error instanceof Error
+            ? error.message
+            : "Unable to load substrate hosts.",
+        );
+      }
+    } finally {
+      if (!controller.signal.aborted) setSubstrateLoading(false);
+    }
+  }, []);
+
+  const loadHostDiagnostics = useCallback(
+    async (name, { silent = false } = {}) => {
+      if (!name) {
+        setSubstrateState(null);
+        setEventStore(null);
+        setStateStatus("unknown");
+        setEventStoreStatus("unknown");
+        setStateError("");
+        setEventStoreError("");
+        setDiagnosticsLoading(false);
         return;
       }
 
-      eventRequestRef.current?.abort();
+      diagnosticsRequestRef.current?.abort();
 
       const controller = new AbortController();
-      eventRequestRef.current = controller;
+      diagnosticsRequestRef.current = controller;
 
-      if (!silent) setEventsLoading(true);
-      setEventsError("");
-
-      const params = new URLSearchParams({
-        path: identifier,
-      });
-
-      if (network.id !== undefined && network.id !== null) {
-        params.set("id", String(network.id));
+      if (!silent) {
+        setSubstrateState(null);
+        setEventStore(null);
+        setStateError("");
+        setEventStoreError("");
+        setStateStatus("checking");
+        setEventStoreStatus("checking");
+      } else {
+        if (!substrateState) setStateStatus("checking");
+        if (!eventStore) setEventStoreStatus("checking");
       }
 
-      if (network.name) {
-        params.set("network", String(network.name));
-      }
+      setDiagnosticsLoading(true);
 
-      // Prefer a path-scoped persistent event endpoint.
-      // The query endpoint is a compatibility fallback.
-      const endpoints = [
-        `/networks/${encodeURIComponent(identifier)}/events`,
-        `/events?${params.toString()}`,
-      ];
+      const encodedName = encodeURIComponent(name);
 
-      try {
-        let result;
-        let lastError;
+      // These are the actual substrate-scoped API endpoints.
+      const [stateResult, eventsResult] = await Promise.allSettled([
+        apiRequest(`/wallets/${encodedName}`, controller.signal),
+        apiRequest(`/wallets/${encodedName}/events`, controller.signal),
+      ]);
 
-        for (const endpoint of endpoints) {
-          try {
-            result = await apiRequest(endpoint, controller.signal);
-            lastError = null;
-            break;
-          } catch (err) {
-            if (err?.name === "AbortError") throw err;
-            lastError = err;
-          }
-        }
+      if (controller.signal.aborted) return;
 
-        if (lastError) throw lastError;
-        if (controller.signal.aborted) return;
-
-        const entries = normalizeEntries(result, [
-          "events",
-          "items",
-          "entries",
-          "results",
-        ]);
-
-        setEvents(entries);
-        setEventsUpdated(new Date());
-
-        // Liveness means the registered path's event store was reachable.
-        setPathDiagnostics((current) => ({
-          ...current,
-          [identifier]: {
-            ...current[identifier],
-            eventStore: "live",
-            eventCount: entries.length,
-            latestEvent: entries.length
-              ? getEventTimestamp(entries[entries.length - 1])
-              : null,
-            eventsCheckedAt: new Date().toISOString(),
-            eventError: null,
-          },
-        }));
-      } catch (err) {
-        if (err?.name !== "AbortError") {
-          const message =
-            err instanceof Error ? err.message : "Unable to load events.";
-
-          setEventsError(message);
-
-          setPathDiagnostics((current) => ({
-            ...current,
-            [identifier]: {
-              ...current[identifier],
-              eventStore: "error",
-              eventsCheckedAt: new Date().toISOString(),
-              eventError: message,
-            },
-          }));
-        }
-      } finally {
-        if (!controller.signal.aborted) setEventsLoading(false);
-      }
-    },
-    [],
-  );
-
-  const loadPathDiagnostics = useCallback(
-    async (network, { silent = false } = {}) => {
-      if (!network) return;
-
-      const identifier = getPathIdentifier(network);
-      if (!identifier) return;
-
-      // Avoid overlapping diagnostics for the same path.
-      if (diagnosticInFlightRef.current.has(identifier)) return;
-
-      diagnosticInFlightRef.current.add(identifier);
-
-      setPathDiagnostics((current) => ({
-        ...current,
-        [identifier]: {
-          ...current[identifier],
-          registration: "live",
-          diagnostics: "checking",
-          eventStore: current[identifier]?.eventStore ?? "unknown",
-          checkedAt: current[identifier]?.checkedAt ?? null,
-        },
-      }));
-
-      try {
-        const params = new URLSearchParams({ path: identifier });
-
-        // These endpoints must be implemented by the API to return
-        // authoritative system diagnostics for a specific registration.
-        const endpoints = [
-          `/networks/${encodeURIComponent(identifier)}/diagnostics`,
-          `/diagnostics?${params.toString()}`,
-        ];
-
-        let result;
-        let lastError;
-
-        for (const endpoint of endpoints) {
-          try {
-            result = await apiRequest(endpoint);
-            lastError = null;
-            break;
-          } catch (err) {
-            if (err?.name === "AbortError") throw err;
-            lastError = err;
-          }
-        }
-
-        if (lastError) throw lastError;
-
-        const diagnostic = result?.diagnostics ?? result;
-
-        setPathDiagnostics((current) => ({
-          ...current,
-          [identifier]: {
-            ...current[identifier],
-            registration: "live",
-            diagnostics: "live",
-            system: diagnostic,
-            checkedAt: new Date().toISOString(),
-            diagnosticError: null,
-          },
-        }));
-      } catch (err) {
+      if (stateResult.status === "fulfilled") {
+        setSubstrateState(stateResult.value);
+        setStateStatus("live");
+        setStateError("");
+      } else {
+        const error = stateResult.reason;
         const message =
-          err instanceof Error
-            ? err.message
-            : "Path diagnostics are unavailable.";
+          error instanceof Error
+            ? error.message
+            : "Persisted substrate state could not be read.";
 
-        setPathDiagnostics((current) => ({
-          ...current,
-          [identifier]: {
-            ...current[identifier],
-            registration: "live",
-            diagnostics: "error",
-            checkedAt: new Date().toISOString(),
-            diagnosticError: message,
-          },
-        }));
-
-        if (!silent) {
-          setEventsError((current) => current || message);
-        }
-      } finally {
-        diagnosticInFlightRef.current.delete(identifier);
+        setSubstrateState(null);
+        setStateStatus("error");
+        setStateError(message);
       }
+
+      if (eventsResult.status === "fulfilled") {
+        const result = eventsResult.value;
+
+        setEventStore({
+          ...result,
+          events: normalizeEntries(result, ["events"]),
+        });
+
+        // An empty event list is still a successful read of the endpoint.
+        setEventStoreStatus("live");
+        setEventStoreError("");
+      } else {
+        const error = eventsResult.reason;
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Persistent event store could not be read.";
+
+        setEventStore(null);
+        setEventStoreStatus("error");
+        setEventStoreError(message);
+      }
+
+      setLastDiagnosticsCheck(new Date());
+      setDiagnosticsLoading(false);
     },
-    [],
-  );
-
-  const openNetwork = useCallback(
-    (network) => {
-      const identifier = getPathIdentifier(network);
-
-      selectedPathRef.current = identifier;
-      setSelectedNetwork(network);
-      setEvents([]);
-      setEventsError("");
-      setEventsUpdated(null);
-      setSystemDiagnostics(null);
-
-      loadEvents(network);
-      loadPathDiagnostics(network);
-    },
-    [loadEvents, loadPathDiagnostics],
+    [substrateState, eventStore],
   );
 
   useEffect(() => {
     loadNetworks();
+    loadSubstrates();
 
     return () => {
-      requestRef.current?.abort();
-      eventRequestRef.current?.abort();
-      diagnosticRequestRef.current?.abort();
+      networkRequestRef.current?.abort();
+      substrateRequestRef.current?.abort();
+      diagnosticsRequestRef.current?.abort();
     };
-  }, [loadNetworks]);
+  }, [loadNetworks, loadSubstrates]);
+
+  useEffect(() => {
+    if (!selectedSubstrate) {
+      setSubstrateState(null);
+      setEventStore(null);
+      setStateStatus("unknown");
+      setEventStoreStatus("unknown");
+      setStateError("");
+      setEventStoreError("");
+      return undefined;
+    }
+
+    loadHostDiagnostics(selectedSubstrate);
+
+    return () => {
+      diagnosticsRequestRef.current?.abort();
+    };
+  }, [selectedSubstrate]); // Diagnostics follow the selected host.
 
   useEffect(() => {
     if (!autoRefresh) return undefined;
 
     const interval = setInterval(() => {
       loadNetworks({ silent: true });
+      loadSubstrates({ silent: true });
 
-      const identifier = selectedPathRef.current;
-
-      if (identifier) {
-        const network = networks.find(
-          (entry) => getPathIdentifier(entry) === identifier,
-        );
-
-        if (network) {
-          loadEvents(network, { silent: true });
-          loadPathDiagnostics(network, { silent: true });
-        }
+      if (selectedSubstrate) {
+        loadHostDiagnostics(selectedSubstrate, { silent: true });
       }
     }, REFRESH_INTERVAL);
 
     return () => clearInterval(interval);
   }, [
     autoRefresh,
+    selectedSubstrate,
     loadNetworks,
-    loadEvents,
-    loadPathDiagnostics,
-    networks,
+    loadSubstrates,
+    loadHostDiagnostics,
   ]);
 
-  useEffect(() => {
-    if (!selectedNetwork) {
-      setSystemDiagnostics(null);
-      return;
+  const selectedNetwork =
+    networks.find((entry) => getPathIdentifier(entry) === selectedPath) ?? null;
+
+  const persistedEvents = eventStore?.events ?? [];
+  const runtime = eventStore?.runtime ?? null;
+
+  const refreshAll = () => {
+    loadNetworks();
+    loadSubstrates();
+
+    if (selectedSubstrate) {
+      loadHostDiagnostics(selectedSubstrate);
     }
-
-    const identifier = getPathIdentifier(selectedNetwork);
-
-    setSystemDiagnostics(
-      pathDiagnostics[identifier]?.system ?? null,
-    );
-  }, [selectedNetwork, pathDiagnostics]);
-
-  const closeEvents = () => {
-    eventRequestRef.current?.abort();
-    diagnosticRequestRef.current?.abort();
-
-    selectedPathRef.current = null;
-
-    setSelectedNetwork(null);
-    setEvents([]);
-    setEventsError("");
-    setEventsLoading(false);
-    setEventsUpdated(null);
-    setSystemDiagnostics(null);
   };
 
-  const selectedIdentifier = selectedNetwork
-    ? getPathIdentifier(selectedNetwork)
-    : "";
+  const handleSubstrateChange = (event) => {
+    setSelectedSubstrate(event.target.value);
+  };
 
-  const selectedDiagnostic = selectedIdentifier
-    ? pathDiagnostics[selectedIdentifier] ?? {}
-    : {};
+  const handlePathSelect = (identifier) => {
+    setSelectedPath(identifier);
+  };
 
-  const liveCount = networks.filter(
-    (network) =>
-      pathDiagnostics[getPathIdentifier(network)]?.eventStore === "live",
-  ).length;
+  const selectedHostEntry = substrates.find(
+    (entry) => getSubstrateName(entry) === selectedSubstrate,
+  );
+
+  const hostLive =
+    stateStatus === "live" && eventStoreStatus === "live";
 
   return (
     <main className="min-h-screen bg-zinc-50 px-2.5 py-5 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 sm:px-4 sm:py-7 md:px-5 md:py-9 lg:px-6">
@@ -570,19 +424,19 @@ export default function NetworkPage() {
           </h1>
 
           <p className="mt-2 max-w-3xl text-xs leading-5 text-zinc-600 dark:text-zinc-400 sm:text-sm sm:leading-6">
-            Each registered path is an entry point to its system diagnostics
-            and persistent event history. Event-store access, not registration
-            alone, establishes path liveness.
+            Registered network paths are shown as contexts. The selected
+            substrate is the host: its persisted state and event store are
+            checked independently through the QTM API.
           </p>
 
           <div className="mt-3.5 flex flex-wrap items-center gap-2">
             <button
               type="button"
-              disabled={loading}
-              onClick={() => loadNetworks()}
+              onClick={refreshAll}
+              disabled={networkLoading || substrateLoading}
               className="inline-flex h-9 items-center justify-center rounded-md bg-zinc-950 px-3.5 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 sm:text-sm"
             >
-              {loading ? "Loading…" : "Refresh network"}
+              {networkLoading || substrateLoading ? "Loading…" : "Refresh"}
             </button>
 
             <button
@@ -602,92 +456,291 @@ export default function NetworkPage() {
           </div>
 
           <div className="mt-3 flex flex-wrap gap-2">
-            <DiagnosticBadge status="live">
-              {liveCount} event stores reachable
+            <DiagnosticBadge status="unknown">
+              {networks.length} registered paths
             </DiagnosticBadge>
 
             <DiagnosticBadge status="unknown">
-              {networks.length} registered paths
+              {substrates.length} substrate hosts
+            </DiagnosticBadge>
+
+            <DiagnosticBadge status={hostLive ? "live" : "unknown"}>
+              {hostLive ? "Host state and event store reachable" : "Host liveness not confirmed"}
             </DiagnosticBadge>
           </div>
 
           <p className="mt-2 text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
-            {lastUpdated
-              ? `Network checked ${lastUpdated.toLocaleTimeString()}`
-              : "Waiting for API data"}
+            {lastNetworkCheck
+              ? `Paths checked ${lastNetworkCheck.toLocaleTimeString()}`
+              : "Waiting for network data"}
             {" · "}
             {REFRESH_INTERVAL / 1000}s refresh interval
           </p>
         </header>
 
-        {error && (
-          <p
-            role="alert"
-            className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
-          >
-            {error}
-          </p>
+        {networkError && (
+          <div className="mb-3">
+            <ErrorMessage>{networkError}</ErrorMessage>
+          </div>
+        )}
+
+        <section className="mb-4 rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900 sm:p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <h2 className="text-sm font-semibold sm:text-base">
+                Substrate host
+              </h2>
+
+              <p className="mt-1 text-[11px] leading-5 text-zinc-500 dark:text-zinc-400 sm:text-xs">
+                Choose the substrate whose saved state and persisted event
+                directory should be inspected.
+              </p>
+            </div>
+
+            <DiagnosticBadge
+              status={hostLive ? "live" : stateStatus === "error" || eventStoreStatus === "error" ? "error" : diagnosticsLoading ? "checking" : "unknown"}
+            >
+              {hostLive
+                ? "Host live"
+                : stateStatus === "error" || eventStoreStatus === "error"
+                  ? "Host check failed"
+                  : diagnosticsLoading
+                    ? "Checking host"
+                    : "Not checked"}
+            </DiagnosticBadge>
+          </div>
+
+          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <label className="block min-w-0">
+              <span className="mb-1.5 block text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                Substrate
+              </span>
+
+              <select
+                value={selectedSubstrate}
+                onChange={handleSubstrateChange}
+                disabled={substrateLoading || substrates.length === 0}
+                className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 sm:text-sm"
+              >
+                {substrates.length === 0 && (
+                  <option value="">
+                    {substrateLoading ? "Loading substrates…" : "No substrate hosts found"}
+                  </option>
+                )}
+
+                {substrates.map((substrate) => {
+                  const name = getSubstrateName(substrate);
+
+                  return (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  );
+                })}
+              </select>
+            </label>
+
+            <div className="flex items-end">
+              <button
+                type="button"
+                onClick={() => loadHostDiagnostics(selectedSubstrate)}
+                disabled={!selectedSubstrate || diagnosticsLoading}
+                className="h-10 w-full rounded-md border border-zinc-300 px-3 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800 sm:w-auto sm:text-sm"
+              >
+                {diagnosticsLoading ? "Checking…" : "Check host"}
+              </button>
+            </div>
+          </div>
+
+          {substrateListError && (
+            <div className="mt-3">
+              <ErrorMessage>{substrateListError}</ErrorMessage>
+            </div>
+          )}
+
+          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div className="rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-semibold">Persisted system state</p>
+                <DiagnosticBadge status={stateStatus}>
+                  {stateStatus === "live"
+                    ? "Reachable"
+                    : stateStatus === "error"
+                      ? "Unavailable"
+                      : stateStatus === "checking"
+                        ? "Checking"
+                        : "Not checked"}
+                </DiagnosticBadge>
+              </div>
+
+              <p className="mt-1 text-[10px] leading-5 text-zinc-500 dark:text-zinc-400">
+                GET /wallets/{selectedSubstrate || ":name"}
+              </p>
+
+              {stateError && (
+                <p className="mt-2 break-words text-xs text-red-700 dark:text-red-300">
+                  {stateError}
+                </p>
+              )}
+            </div>
+
+            <div className="rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-semibold">Persistent event store</p>
+                <DiagnosticBadge status={eventStoreStatus}>
+                  {eventStoreStatus === "live"
+                    ? "Readable"
+                    : eventStoreStatus === "error"
+                      ? "Unavailable"
+                      : eventStoreStatus === "checking"
+                        ? "Checking"
+                        : "Not checked"}
+                </DiagnosticBadge>
+              </div>
+
+              <p className="mt-1 text-[10px] leading-5 text-zinc-500 dark:text-zinc-400">
+                GET /wallets/{selectedSubstrate || ":name"}/events
+              </p>
+
+              {eventStoreError && (
+                <p className="mt-2 break-words text-xs text-red-700 dark:text-red-300">
+                  {eventStoreError}
+                </p>
+              )}
+            </div>
+          </div>
+
+          {lastDiagnosticsCheck && (
+            <p className="mt-2 text-[10px] text-zinc-500 dark:text-zinc-400">
+              Host diagnostics checked {lastDiagnosticsCheck.toLocaleTimeString()}
+            </p>
+          )}
+        </section>
+
+        {substrateState && (
+          <section className="mb-4 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="border-b border-zinc-200 px-3 py-2.5 dark:border-zinc-800 sm:px-4">
+              <h2 className="text-sm font-semibold sm:text-base">
+                Host system state
+              </h2>
+              <p className="mt-1 break-all text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
+                {displayValue(substrateState.namespace)}
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-3 sm:p-4 lg:grid-cols-4">
+              <DiagnosticValue
+                label="Substrate"
+                value={selectedSubstrate}
+              />
+
+              <DiagnosticValue
+                label="Dimension"
+                value={substrateState.dimension}
+              />
+
+              <DiagnosticValue
+                label="Commitment"
+                value={substrateState.commitment}
+              />
+
+              <DiagnosticValue
+                label="Coordinate"
+                value={substrateState.coordinate}
+              />
+
+              <DiagnosticValue
+                label="Sigma"
+                value={substrateState.sigma}
+              />
+
+              <DiagnosticValue
+                label="Network"
+                value={substrateState.network}
+              />
+
+              <DiagnosticValue
+                label="Indices"
+                value={substrateState.indices}
+              />
+
+              <DiagnosticValue
+                label="Entropy"
+                value={
+                  substrateState.entropy
+                    ? `Present · ${String(substrateState.entropy).length} characters`
+                    : "Not available"
+                }
+              />
+
+              <DiagnosticValue
+                label="Registered activations"
+                value={selectedHostEntry?.activations}
+              />
+            </div>
+
+            <p className="px-3 pb-3 text-[10px] leading-5 text-zinc-500 dark:text-zinc-400 sm:px-4">
+              Entropy content is intentionally not displayed. The diagnostic
+              shows whether the field is present without exposing its value.
+            </p>
+          </section>
         )}
 
         <section className="overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 px-3 py-2.5 dark:border-zinc-800 sm:px-4">
-            <h2 className="text-sm font-semibold sm:text-base">
-              Registered paths
-            </h2>
+            <div>
+              <h2 className="text-sm font-semibold sm:text-base">
+                Registered network paths
+              </h2>
+              <p className="mt-1 text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
+                Select a row to set the path context for the host diagnostics.
+              </p>
+            </div>
 
             <span className="text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
-              Select a path to open its diagnostics
+              {networks.length} paths
             </span>
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] border-collapse text-left text-xs sm:text-sm">
+            <table className="w-full min-w-[680px] border-collapse text-left text-xs sm:text-sm">
               <thead className="bg-zinc-100 text-[10px] uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300 sm:text-xs">
                 <tr>
                   <th className="px-3 py-2.5 sm:px-4">Network</th>
                   <th className="px-3 py-2.5 sm:px-4">ID</th>
-                  <th className="px-3 py-2.5 sm:px-4">Depth</th>
-                  <th className="px-3 py-2.5 sm:px-4">Path</th>
-                  <th className="px-3 py-2.5 sm:px-4">Persistent store</th>
-                  <th className="px-3 py-2.5 sm:px-4">Action</th>
+                  <th className="px-3 py-2.5 sm:px-4">Coin</th>
+                  <th className="px-3 py-2.5 sm:px-4">Purpose</th>
+                  <th className="px-3 py-2.5 sm:px-4">Registered path</th>
+                  <th className="px-3 py-2.5 sm:px-4">Context</th>
                 </tr>
               </thead>
 
               <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                {networks.map((net, index) => {
-                  const identifier = getPathIdentifier(net);
-                  const diagnostic = pathDiagnostics[identifier] ?? {};
-                  const isSelected = selectedIdentifier === identifier;
+                {networks.map((network, index) => {
+                  const identifier = getPathIdentifier(network);
+                  const selected = identifier === selectedPath;
 
                   return (
                     <tr
-                      key={`${net.id ?? identifier}-${index}`}
+                      key={`${network.id ?? identifier}-${index}`}
                       className={`align-top transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800 ${
-                        isSelected ? "bg-zinc-100 dark:bg-zinc-800" : ""
+                        selected ? "bg-zinc-100 dark:bg-zinc-800" : ""
                       }`}
                     >
                       <td className="px-3 py-2.5 font-medium sm:px-4">
-                        <button
-                          type="button"
-                          onClick={() => openNetwork(net)}
-                          className="break-all text-left underline decoration-zinc-300 underline-offset-4"
-                        >
-                          {displayValue(net.name ?? identifier)}
-                        </button>
-
-                        {isWalletPayloadPath(net) && (
-                          <span className="mt-1 block text-[10px] text-zinc-500 dark:text-zinc-400">
-                            Wallet payload
-                          </span>
-                        )}
+                        {displayValue(network.name ?? identifier)}
                       </td>
 
                       <td className="px-3 py-2.5 font-mono text-[10px] text-zinc-500 sm:px-4 sm:text-xs">
-                        {displayValue(net.id)}
+                        {displayValue(network.id)}
                       </td>
 
-                      <td className="px-3 py-2.5 tabular-nums sm:px-4">
-                        {getDepth(net)}
+                      <td className="px-3 py-2.5 sm:px-4">
+                        {displayValue(network.coin)}
+                      </td>
+
+                      <td className="px-3 py-2.5 sm:px-4">
+                        {displayValue(network.purpose)}
                       </td>
 
                       <td className="break-all px-3 py-2.5 font-mono text-[10px] sm:px-4 sm:text-xs">
@@ -695,31 +748,20 @@ export default function NetworkPage() {
                       </td>
 
                       <td className="px-3 py-2.5 sm:px-4">
-                        <DiagnosticBadge
-                          status={diagnostic.eventStore ?? "unknown"}
-                        >
-                          {diagnostic.eventStore === "live"
-                            ? `${diagnostic.eventCount ?? 0} events`
-                            : diagnostic.eventStore === "error"
-                              ? "Unavailable"
-                              : "Not checked"}
-                        </DiagnosticBadge>
-                      </td>
-
-                      <td className="px-3 py-2.5 sm:px-4">
                         <button
                           type="button"
-                          onClick={() => openNetwork(net)}
+                          onClick={() => handlePathSelect(identifier)}
+                          aria-pressed={selected}
                           className="whitespace-nowrap rounded-md border border-zinc-300 px-2.5 py-1.5 text-[10px] font-semibold hover:bg-zinc-200 dark:border-zinc-700 dark:hover:bg-zinc-700 sm:text-xs"
                         >
-                          Inspect path →
+                          {selected ? "Selected" : "Select path"}
                         </button>
                       </td>
                     </tr>
                   );
                 })}
 
-                {!loading && networks.length === 0 && (
+                {!networkLoading && networks.length === 0 && (
                   <tr>
                     <td
                       colSpan={6}
@@ -729,287 +771,229 @@ export default function NetworkPage() {
                     </td>
                   </tr>
                 )}
+
+                {networkLoading && networks.length === 0 && (
+                  <tr>
+                    <td
+                      colSpan={6}
+                      className="px-3 py-8 text-center text-xs text-zinc-500 sm:px-4 sm:text-sm"
+                    >
+                      Loading registered paths…
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
+
+          {selectedNetwork && (
+            <div className="border-t border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                Selected path context
+              </p>
+
+              <p className="mt-1 break-all text-xs font-medium">
+                {getPathIdentifier(selectedNetwork)}
+              </p>
+
+              <p className="mt-1 text-[10px] leading-5 text-zinc-500 dark:text-zinc-400 sm:text-xs">
+                The current API exposes event history at substrate scope. This
+                selection does not imply that this network path has a separate
+                event directory.
+              </p>
+            </div>
+          )}
         </section>
 
-        {selectedNetwork && (
-          <section
-            className="mt-4 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5"
-            aria-live="polite"
-          >
-            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
-              <div className="min-w-0 flex-1">
-                <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                  Path diagnostics
-                </p>
-
-                <h2 className="mt-1 break-all text-sm font-semibold sm:text-base">
-                  {selectedIdentifier}
-                </h2>
-
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <DiagnosticBadge status="live">
-                    Registered
-                  </DiagnosticBadge>
-
-                  <DiagnosticBadge
-                    status={selectedDiagnostic.diagnostics ?? "unknown"}
-                  >
-                    System: {selectedDiagnostic.diagnostics ?? "Not checked"}
-                  </DiagnosticBadge>
-
-                  <DiagnosticBadge
-                    status={selectedDiagnostic.eventStore ?? "unknown"}
-                  >
-                    Event store: {selectedDiagnostic.eventStore ?? "Not checked"}
-                  </DiagnosticBadge>
-                </div>
-              </div>
-
-              <div className="flex shrink-0 flex-wrap gap-2">
-                <button
-                  type="button"
-                  disabled={eventsLoading}
-                  onClick={() => loadEvents(selectedNetwork)}
-                  className="rounded-md border border-zinc-300 px-3 py-2 text-xs font-medium disabled:opacity-50 dark:border-zinc-700"
-                >
-                  {eventsLoading ? "Checking…" : "Check event store"}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => loadPathDiagnostics(selectedNetwork)}
-                  className="rounded-md border border-zinc-300 px-3 py-2 text-xs font-medium dark:border-zinc-700"
-                >
-                  Check system
-                </button>
-
-                <button
-                  type="button"
-                  onClick={closeEvents}
-                  className="rounded-md border border-zinc-300 px-3 py-2 text-xs font-medium dark:border-zinc-700"
-                >
-                  Close
-                </button>
-              </div>
+        <section className="mt-4 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
+            <div>
+              <h2 className="text-sm font-semibold sm:text-base">
+                Persistent event store
+              </h2>
+              <p className="mt-1 break-all text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
+                {eventStore?.events_directory ??
+                  (selectedSubstrate
+                    ? `Host: ${selectedSubstrate}`
+                    : "Select a substrate host")}
+              </p>
             </div>
 
-            <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-3 sm:p-4 lg:grid-cols-4">
-              <DiagnosticValue
-                label="Registration ID"
-                value={selectedNetwork.id}
-              />
+            <div className="flex flex-wrap items-center gap-2">
+              <DiagnosticBadge status={eventStoreStatus}>
+                {eventStoreStatus === "live"
+                  ? "Readable"
+                  : eventStoreStatus === "error"
+                    ? "Unavailable"
+                    : eventStoreStatus === "checking"
+                      ? "Checking"
+                      : "Not checked"}
+              </DiagnosticBadge>
 
-              <DiagnosticValue
-                label="Depth"
-                value={getDepth(selectedNetwork)}
-              />
-
-              <DiagnosticValue
-                label="Purpose"
-                value={selectedNetwork.purpose}
-              />
-
-              <DiagnosticValue
-                label="Path"
-                value={selectedIdentifier}
-              />
-
-              <DiagnosticValue
-                label="Persisted event count"
-                value={selectedDiagnostic.eventCount}
-              />
-
-              <DiagnosticValue
-                label="Latest event timestamp"
-                value={formatTimestamp(selectedDiagnostic.latestEvent)}
-              />
-
-              <DiagnosticValue
-                label="Last event-store check"
-                value={formatTimestamp(selectedDiagnostic.eventsCheckedAt)}
-              />
-
-              <DiagnosticValue
-                label="Last system diagnostic"
-                value={formatTimestamp(selectedDiagnostic.checkedAt)}
-              />
+              <DiagnosticBadge status="unknown">
+                {persistedEvents.length} records
+              </DiagnosticBadge>
             </div>
+          </div>
 
-            {selectedDiagnostic.diagnosticError && (
-              <div className="px-3 pb-3 sm:px-4">
-                <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
-                  System diagnostics unavailable:{" "}
-                  {selectedDiagnostic.diagnosticError}
-                </p>
+          {eventStoreError && (
+            <div className="p-3 sm:p-4">
+              <ErrorMessage>{eventStoreError}</ErrorMessage>
+            </div>
+          )}
+
+          {eventStore && (
+            <>
+              <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-3 sm:p-4">
+                <DiagnosticValue
+                  label="Substrate"
+                  value={eventStore.substrate}
+                />
+
+                <DiagnosticValue
+                  label="Event directory"
+                  value={eventStore.events_directory}
+                />
+
+                <DiagnosticValue
+                  label="Substrate directory"
+                  value={eventStore.directory}
+                />
+
+                <DiagnosticValue
+                  label="Runtime time"
+                  value={
+                    runtime?.unix_seconds !== undefined
+                      ? formatTimestamp(runtime.unix_seconds)
+                      : "—"
+                  }
+                />
+
+                <DiagnosticValue
+                  label="Runtime nanoseconds"
+                  value={runtime?.subsec_nanos}
+                />
+
+                <DiagnosticValue
+                  label="Persistent records"
+                  value={persistedEvents.length}
+                />
               </div>
-            )}
 
-            {selectedDiagnostic.eventError && (
-              <div className="px-3 pb-3 sm:px-4">
-                <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
-                  Persistent event-store access failed:{" "}
-                  {selectedDiagnostic.eventError}
-                </p>
-              </div>
-            )}
-
-            {systemDiagnostics && (
-              <details className="mx-3 mb-3 rounded-md border border-zinc-200 dark:border-zinc-800 sm:mx-4">
-                <summary className="cursor-pointer px-3 py-2 text-xs font-semibold">
-                  System diagnostic fields
-                </summary>
-
-                <div className="grid grid-cols-1 gap-2 border-t border-zinc-200 p-3 dark:border-zinc-800 sm:grid-cols-2">
-                  {Object.entries(systemDiagnostics).map(([key, value]) => (
-                    <DiagnosticValue
-                      key={key}
-                      label={key}
-                      value={value}
-                    />
-                  ))}
-                </div>
-              </details>
-            )}
-
-            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
-              <h3 className="text-xs font-semibold sm:text-sm">
-                Persistent events
-              </h3>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
-                  {events.length} returned
-                </span>
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
+                <h3 className="text-xs font-semibold sm:text-sm">
+                  Persisted event records
+                </h3>
 
                 <span className="text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
-                  {eventsUpdated
-                    ? `Checked ${eventsUpdated.toLocaleTimeString()}`
+                  {lastDiagnosticsCheck
+                    ? `Checked ${lastDiagnosticsCheck.toLocaleTimeString()}`
                     : "Not checked"}
                 </span>
               </div>
-            </div>
 
-            {eventsError && (
-              <div className="px-3 pb-3 sm:px-4">
-                <p
-                  role="alert"
-                  className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
-                >
-                  {eventsError}
-                </p>
-              </div>
-            )}
-
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[640px] border-collapse text-left text-xs">
-                <thead className="bg-zinc-100 text-[10px] uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                  <tr>
-                    <th className="px-3 py-2.5 sm:px-4">Event</th>
-                    <th className="px-3 py-2.5 sm:px-4">Depth</th>
-                    <th className="px-3 py-2.5 sm:px-4">Identifier</th>
-                    <th className="px-3 py-2.5 sm:px-4">Type</th>
-                    <th className="px-3 py-2.5 sm:px-4">Timestamp</th>
-                  </tr>
-                </thead>
-
-                <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                  {events.map((event, index) => (
-                    <tr
-                      key={`${getEventIdentifier(event, index)}-${index}`}
-                      className="align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
-                    >
-                      <td className="px-3 py-2.5 font-medium sm:px-4">
-                        {getEventIdentifier(event, index)}
-                      </td>
-
-                      <td className="px-3 py-2.5 tabular-nums sm:px-4">
-                        {getDepth(event)}
-                      </td>
-
-                      <td className="max-w-[260px] break-all px-3 py-2.5 font-mono text-[10px] sm:px-4">
-                        {displayValue(getEventIdentifierValue(event))}
-                      </td>
-
-                      <td className="px-3 py-2.5 sm:px-4">
-                        {displayValue(getEventType(event))}
-                      </td>
-
-                      <td className="px-3 py-2.5 text-zinc-500 dark:text-zinc-400 sm:px-4">
-                        {formatTimestamp(getEventTimestamp(event))}
-                      </td>
-                    </tr>
-                  ))}
-
-                  {eventsLoading && events.length === 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[780px] border-collapse text-left text-xs">
+                  <thead className="bg-zinc-100 text-[10px] uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
                     <tr>
-                      <td colSpan={5} className="px-3 py-8 text-center">
-                        Checking persistent event store…
-                      </td>
+                      <th className="px-3 py-2.5 sm:px-4">Kind</th>
+                      <th className="px-3 py-2.5 sm:px-4">Record</th>
+                      <th className="px-3 py-2.5 sm:px-4">Activation</th>
+                      <th className="px-3 py-2.5 sm:px-4">Dimension</th>
+                      <th className="px-3 py-2.5 sm:px-4">Structural value</th>
+                      <th className="px-3 py-2.5 sm:px-4">Depth objects</th>
+                      <th className="px-3 py-2.5 sm:px-4">Retained mass</th>
                     </tr>
-                  )}
+                  </thead>
 
-                  {!eventsLoading &&
-                    !eventsError &&
-                    events.length === 0 && (
+                  <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                    {persistedEvents.map((event, index) => (
+                      <tr
+                        key={getEventKey(event, index)}
+                        className="align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
+                      >
+                        <td className="px-3 py-2.5 font-medium sm:px-4">
+                          {displayValue(event.kind)}
+                        </td>
+
+                        <td className="max-w-[220px] break-all px-3 py-2.5 font-mono text-[10px] sm:px-4">
+                          {displayValue(event.record)}
+                        </td>
+
+                        <td className="px-3 py-2.5 tabular-nums sm:px-4">
+                          {displayValue(event.activation)}
+                        </td>
+
+                        <td className="px-3 py-2.5 tabular-nums sm:px-4">
+                          {displayValue(event.dimension)}
+                        </td>
+
+                        <td className="px-3 py-2.5 tabular-nums sm:px-4">
+                          {displayValue(event.structural_value)}
+                        </td>
+
+                        <td className="px-3 py-2.5 tabular-nums sm:px-4">
+                          {displayValue(event.depth_objects)}
+                        </td>
+
+                        <td className="px-3 py-2.5 tabular-nums sm:px-4">
+                          {displayValue(event.retained_mass)}
+                        </td>
+                      </tr>
+                    ))}
+
+                    {diagnosticsLoading && persistedEvents.length === 0 && (
                       <tr>
                         <td
-                          colSpan={5}
+                          colSpan={7}
                           className="px-3 py-8 text-center text-zinc-500 dark:text-zinc-400"
                         >
-                          The event endpoint returned no events. An empty
-                          response does not establish that events were
-                          persisted or that the store is complete.
+                          Reading the persistent event store…
                         </td>
                       </tr>
                     )}
-                </tbody>
-              </table>
-            </div>
 
-            {events.some(
-              (event) =>
-                event.depth !== undefined ||
-                event.structure !== undefined ||
-                event.children !== undefined,
-            ) && (
-              <div className="border-t border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
-                <h3 className="mb-2 text-xs font-semibold">
-                  Event depth structure
-                </h3>
+                    {!diagnosticsLoading &&
+                      eventStoreStatus === "live" &&
+                      persistedEvents.length === 0 && (
+                        <tr>
+                          <td
+                            colSpan={7}
+                            className="px-3 py-8 text-center text-zinc-500 dark:text-zinc-400"
+                          >
+                            The event endpoint is reachable, but no persisted
+                            event records were returned for this substrate.
+                          </td>
+                        </tr>
+                      )}
 
-                <div className="space-y-1.5">
-                  {events.map((event, index) => (
-                    <details
-                      key={`depth-${getEventIdentifier(event, index)}-${index}`}
-                      className="rounded-md border border-zinc-200 dark:border-zinc-800"
-                    >
-                      <summary className="cursor-pointer px-3 py-2 text-xs">
-                        Depth {getDepth(event)} · Event{" "}
-                        {getEventIdentifier(event, index)}
-                      </summary>
-
-                      <div className="grid grid-cols-1 gap-2 border-t border-zinc-200 p-3 dark:border-zinc-800 sm:grid-cols-2">
-                        {Object.entries(event).map(([key, value]) => (
-                          <DiagnosticValue
-                            key={key}
-                            label={key}
-                            value={value}
-                          />
-                        ))}
-                      </div>
-                    </details>
-                  ))}
-                </div>
+                    {!diagnosticsLoading &&
+                      !selectedSubstrate &&
+                      persistedEvents.length === 0 && (
+                        <tr>
+                          <td
+                            colSpan={7}
+                            className="px-3 py-8 text-center text-zinc-500 dark:text-zinc-400"
+                          >
+                            Select a substrate host to inspect its event store.
+                          </td>
+                        </tr>
+                      )}
+                  </tbody>
+                </table>
               </div>
-            )}
-          </section>
-        )}
+            </>
+          )}
+
+          {!eventStore && eventStoreStatus !== "error" && !diagnosticsLoading && (
+            <p className="px-3 py-8 text-center text-xs text-zinc-500 dark:text-zinc-400 sm:px-4 sm:text-sm">
+              Select a substrate to load its persisted event records.
+            </p>
+          )}
+        </section>
 
         <footer className="mt-6 border-t border-zinc-200 pt-3.5 text-[10px] leading-5 text-zinc-500 dark:border-zinc-800 sm:mt-8 sm:pt-4 sm:text-xs">
-          QTM Network · Path-level system diagnostics · Persistent event-store
+          QTM Network · Substrate-host diagnostics · Persistent event-store
           liveness · qtm-api
         </footer>
       </div>
