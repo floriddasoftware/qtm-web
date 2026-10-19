@@ -292,46 +292,77 @@ function ReceiveUnitIdentifiers({ amount }) {
   );
 }
 
-function validDepth(depth) {
-  if (!isRecord(depth)) return false;
-  if (typeof depth.path !== "string" || !depth.path.trim()) return false;
-  if (!Array.isArray(depth.objects) || depth.objects.length === 0) return false;
+function eventRecordsOf(source) {
+  const candidates = [
+    source?.events,
+    source?.records,
+    source?.event_records,
+    source?.eventRecords,
+    source?.items,
+    source?.data?.events,
+    source?.data?.records,
+  ];
 
-  return depth.objects.every(
-    (item) =>
-      isRecord(item) &&
-      Number.isSafeInteger(Number(item.position)) &&
-      Number(item.position) >= 0 &&
-      typeof item.identifier === "string" &&
-      item.identifier.trim().length > 0
-  );
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate.filter(isRecord);
+    if (isRecord(candidate)) {
+      for (const key of ["events", "records", "items"]) {
+        if (Array.isArray(candidate[key])) return candidate[key].filter(isRecord);
+      }
+    }
+  }
+
+  return [];
 }
 
-function depthValidationMessage(depth) {
-  if (!isRecord(depth)) return "The API did not return a depth record.";
-
-  if (typeof depth.path !== "string" || !depth.path.trim()) {
-    return "The depth record has no substrate memory path.";
+function recordNameOf(record) {
+  for (const key of [
+    "record_name", "recordName", "filename", "file_name", "fileName",
+    "name", "record", "path", "id",
+  ]) {
+    if (typeof record?.[key] === "string" && record[key].trim()) {
+      return record[key];
+    }
   }
-
-  if (!Array.isArray(depth.objects) || depth.objects.length === 0) {
-    return "Exile requires at least one retained depth object with a position.";
-  }
-
-  if (
-    !depth.objects.every(
-      (item) =>
-        isRecord(item) &&
-        Number.isSafeInteger(Number(item.position)) &&
-        Number(item.position) >= 0 &&
-        typeof item.identifier === "string" &&
-        item.identifier.trim().length > 0
-    )
-  ) {
-    return "Every depth object must have a valid position and identifier.";
-  }
-
   return "";
+}
+
+function recordKind(record) {
+  const explicit = String(valueAt(record, ["kind", "type", "record_type", "recordType", "operation"]) ?? "").toLowerCase();
+  const name = recordNameOf(record).toLowerCase().split(/[\\/]/).pop() || "";
+
+  if (explicit.includes("exil") || name.startsWith("exile_")) return "exile";
+  if (explicit.includes("transit") || explicit.includes("event") || name.startsWith("event_")) return "transit";
+  return "other";
+}
+
+function recordIdentity(record) {
+  const activation = valueAt(record, ["activation", "activation_count", "activationCount"]);
+  const dimension = valueAt(record, ["dimension"]);
+  if (activation !== undefined && dimension !== undefined) {
+    return `${String(activation)}:${String(dimension)}`;
+  }
+
+  const name = recordNameOf(record).toLowerCase().split(/[\\/]/).pop() || "";
+  const match = name.match(/^(?:event|exile)_(\d+)_(\d+)(?:\.[^.]+)?$/);
+  return match ? `${match[1]}:${match[2]}` : "";
+}
+
+function pendingEventRecords(records) {
+  const exiledIdentities = new Set(
+    records.filter((record) => recordKind(record) === "exile")
+      .map(recordIdentity)
+      .filter(Boolean)
+  );
+
+  return records.filter((record) => {
+    if (recordKind(record) !== "transit") return false;
+    if (record.exiled === true || record.is_exiled === true || record.isExiled === true) return false;
+    const status = String(valueAt(record, ["status", "state"]) ?? "").toLowerCase();
+    if (["exiled", "settled", "consumed"].includes(status)) return false;
+    const identity = recordIdentity(record);
+    return !identity || !exiledIdentities.has(identity);
+  });
 }
 
 function OpenResults({ result }) {
@@ -552,10 +583,10 @@ export default function Home() {
   const [receiveAmount, setReceiveAmount] = useState("1");
   const [receiveFlow, setReceiveFlow] = useState("receive");
 
-  // These hooks must stay inside Home(), not at module scope.
-  const [exileDepth, setExileDepth] = useState(null);
-  const [exileDepthLoading, setExileDepthLoading] = useState(false);
-  const [exileDepthError, setExileDepthError] = useState("");
+  // Exile eligibility comes from persisted event records, not a transient in-memory depth.
+  const [exileRecords, setExileRecords] = useState([]);
+  const [exileRecordsLoading, setExileRecordsLoading] = useState(false);
+  const [exileRecordsError, setExileRecordsError] = useState("");
 
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
@@ -589,31 +620,46 @@ export default function Home() {
     }
   }, []);
 
-  const loadExileDepth = useCallback(async () => {
+  const loadExileRecords = useCallback(async () => {
     if (!selectedSubstrate) {
-      setExileDepth(null);
-      setExileDepthError("Select a substrate before loading its depth.");
+      setExileRecords([]);
+      setExileRecordsError("Select a substrate before loading its persisted events.");
       return;
     }
 
-    setExileDepthLoading(true);
-    setExileDepthError("");
-    setExileDepth(null);
+    setExileRecordsLoading(true);
+    setExileRecordsError("");
 
     try {
-      const url = `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}/exile/depth`;
+      const url = `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}/events`;
       const response = await fetch(url, { method: "GET", cache: "no-store" });
       const data = await readResponse(response);
-      const depth = objectAt(data, ["depth"]) ?? data;
-      const validationError = depthValidationMessage(depth);
+      const records = eventRecordsOf(data);
+      const hasRecognizedList =
+        Array.isArray(data.events) ||
+        Array.isArray(data.records) ||
+        Array.isArray(data.event_records) ||
+        Array.isArray(data.eventRecords) ||
+        Array.isArray(data.items) ||
+        Array.isArray(data.data?.events) ||
+        Array.isArray(data.data?.records) ||
+        isRecord(data.events) ||
+        isRecord(data.records);
 
-      if (validationError) throw new Error(validationError);
-      setExileDepth(depth);
+      if (!records.length && !hasRecognizedList) {
+        throw new Error("The events endpoint did not return a recognized persisted event-record list.");
+      }
+
+      setExileRecords(records);
+      const pending = pendingEventRecords(records);
+      if (!pending.length) {
+        setExileRecordsError("No recorded transit events are currently identified as pending exile for this substrate.");
+      }
     } catch (err) {
-      setExileDepth(null);
-      setExileDepthError(err instanceof Error ? err.message : "Unable to load the substrate depth.");
+      setExileRecords([]);
+      setExileRecordsError(err instanceof Error ? err.message : "Unable to load persisted event records.");
     } finally {
-      setExileDepthLoading(false);
+      setExileRecordsLoading(false);
     }
   }, [selectedSubstrate]);
 
@@ -666,14 +712,18 @@ export default function Home() {
     loadNetworks();
   }, [loadNetworks]);
 
+  useEffect(() => {
+    if (tab === "exile" && selectedSubstrate) loadExileRecords();
+  }, [tab, selectedSubstrate, loadExileRecords]);
+
   const currentNetwork = networks.find((network) => network.id === selectedNetwork) ?? null;
 
   function handleSubstrateChange(value) {
     setSelectedSubstrate(value);
     setResult(null);
     setError("");
-    setExileDepth(null);
-    setExileDepthError("");
+    setExileRecords([]);
+    setExileRecordsError("");
   }
 
   function handleNetworkChange(id) {
@@ -820,32 +870,28 @@ export default function Home() {
         setResult(await readResponse(response));
         await loadSubstrates(selectedSubstrate);
       } else if (tab === "exile") {
-        const validationError = depthValidationMessage(exileDepth);
-        if (validationError) {
-          throw new Error(`Exile requires a valid substrate depth. ${validationError}`);
+        const pending = pendingEventRecords(exileRecords);
+        if (!pending.length) {
+          throw new Error("There are no persisted transit event records identified as pending exile. Refresh the event list after recording a transit event.");
         }
 
+        // The Rust API derives exile depth from persisted substrate event history.
+        // Do not send a client-created/in-memory depth snapshot.
         response = await fetch(
           `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}/exile`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             cache: "no-store",
-            body: JSON.stringify({ depth: exileDepth }),
           }
         );
 
         const data = await readResponse(response);
-        const eventMap = eventMapOf(data);
-        const returnedDepth = objectAt(eventMap, ["depth"]);
-
-        if (!validDepth(returnedDepth)) {
-          throw new Error("The exile API did not return a valid depth record in its event map.");
-        }
-
         setResult(data);
-        setExileDepth(returnedDepth);
-        await loadSubstrates(selectedSubstrate);
+        await Promise.all([
+          loadExileRecords(),
+          loadSubstrates(selectedSubstrate),
+        ]);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
@@ -1016,7 +1062,7 @@ export default function Home() {
               {tab === "create" && "Initialize a substrate using persistent indices or a BIP39 mnemonic."}
               {tab === "open" && "Inspect the substrate directory and receive event depth; list unit ordinals from 1 through N."}
               {tab === "transit" && "Select a network, customize its path, and inspect the resulting QP44 event."}
-              {tab === "exile" && "Load a valid depth record from substrate memory before requesting exile."}
+              {tab === "exile" && "Exile recorded transit events that have not already been exiled."}
             </p>
           </div>
 
@@ -1181,76 +1227,61 @@ export default function Home() {
             {tab === "exile" && (
               <section className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
                 <div>
-                  <h3 className="text-xs font-semibold">Required substrate depth</h3>
+                  <h3 className="text-xs font-semibold">Persisted events pending exile</h3>
                   <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                    Load a depth record from the substrate server. Exile remains disabled until the depth contains a path and retained objects with valid positions and identifiers.
+                    Exile reads the substrate's persisted event history. Transit records are the source of eligible work; the Rust API derives the depth during exile. No in-memory depth record is required.
                   </p>
                 </div>
 
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-xs text-zinc-600 dark:text-zinc-300">
-                    {exileDepthLoading
-                      ? "Loading depth..."
-                      : exileDepth
-                        ? `${exileDepth.objects.length} retained object(s) loaded`
-                        : "No valid depth loaded"}
+                    {exileRecordsLoading
+                      ? "Loading persisted events..."
+                      : `${pendingEventRecords(exileRecords).length} transit record(s) pending exile`}
                   </span>
 
                   <button
                     type="button"
-                    onClick={loadExileDepth}
-                    disabled={exileDepthLoading || !selectedSubstrate || loading}
+                    onClick={loadExileRecords}
+                    disabled={exileRecordsLoading || !selectedSubstrate || loading}
                     className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-xs font-medium hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
                   >
-                    {exileDepthLoading ? "Loading..." : "Load required depth"}
+                    {exileRecordsLoading ? "Refreshing..." : "Refresh persisted events"}
                   </button>
                 </div>
 
-                {exileDepthError && (
-                  <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
-                    {exileDepthError}
+                {exileRecordsError && (
+                  <p role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
+                    {exileRecordsError}
                   </p>
                 )}
 
-                {exileDepth && (
-                  <div className="space-y-3 rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-                    <div>
-                      <p className="text-xs font-medium">Substrate memory path</p>
-                      <p className="mt-1 break-all font-mono text-xs text-zinc-600 dark:text-zinc-300">
-                        {exileDepth.path}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-xs font-medium">Retained depth objects</p>
-                      <div className="mt-2 space-y-2">
-                        {exileDepth.objects.map((item, index) => (
-                          <div
-                            key={`${item.identifier}-${item.position}-${index}`}
-                            className="grid grid-cols-1 gap-2 rounded-md border border-zinc-200 p-3 sm:grid-cols-2 dark:border-zinc-800"
-                          >
-                            <div>
-                              <p className="text-xs text-zinc-500 dark:text-zinc-400">Position</p>
-                              <p className="mt-1 break-all font-mono text-xs">{item.position}</p>
-                            </div>
-                            <div>
-                              <p className="text-xs text-zinc-500 dark:text-zinc-400">Identifier</p>
-                              <p className="mt-1 break-all font-mono text-xs">{item.identifier}</p>
-                            </div>
-                            <div>
-                              <p className="text-xs text-zinc-500 dark:text-zinc-400">Retained mass</p>
-                              <p className="mt-1 break-all font-mono text-xs">{friendlyValue(item.mass)}</p>
-                            </div>
-                            <div>
-                              <p className="text-xs text-zinc-500 dark:text-zinc-400">Source</p>
-                              <p className="mt-1 break-all font-mono text-xs">{friendlyValue(item.from)}</p>
-                            </div>
+                <div className="space-y-2">
+                  <p className="text-xs font-medium">Persisted event records</p>
+                  {exileRecords.length === 0 ? (
+                    <p className="rounded-md border border-zinc-200 bg-white p-3 text-xs text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
+                      No event records were returned. Record a transit event, then refresh this list.
+                    </p>
+                  ) : (
+                    exileRecords.map((record, index) => {
+                      const kind = recordKind(record);
+                      const pending = pendingEventRecords(exileRecords).includes(record);
+                      return (
+                        <div key={`${recordNameOf(record) || recordIdentity(record) || "record"}-${index}`} className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="break-all font-mono text-xs font-medium">{recordNameOf(record) || `Persisted record ${index + 1}`}</p>
+                            <span className="rounded border border-zinc-200 px-2 py-1 text-[10px] font-medium dark:border-zinc-700">
+                              {kind === "transit" ? (pending ? "Pending exile" : "Transit record") : kind === "exile" ? "Exile record" : "Persisted record"}
+                            </span>
                           </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                )}
+                          <div className="mt-3">
+                            <KeyValueList value={record} />
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
               </section>
             )}
 
@@ -1262,7 +1293,7 @@ export default function Home() {
                 listLoading ||
                 (substrateRequired && !selectedSubstrate) ||
                 (tab === "transit" && (networkLoading || !selectedNetwork)) ||
-                (tab === "exile" && (!validDepth(exileDepth) || exileDepthLoading))
+                (tab === "exile" && (pendingEventRecords(exileRecords).length === 0 || exileRecordsLoading))
               }
               className="mt-2 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-zinc-950 px-5 text-xs font-semibold text-white hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
             >
