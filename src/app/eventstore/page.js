@@ -1,6 +1,8 @@
-“use client”;
+"use client";
 
-import { useCallback, useEffect, useRef, useState } from “react”;
+import { useCallback, useEffect, useRef, useState } from "react";
+
+const API_BASE = "https://qtm-api.onrender.com";
 
 const API_BASE = “https://qtm-api.onrender.com”;
 const REFRESH_INTERVAL = 5000;
