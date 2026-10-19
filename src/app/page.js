@@ -3,26 +3,36 @@
 import { useCallback, useEffect, useState } from "react";
 
 const API_BASE = "https://qtm-api.onrender.com";
+
 const TABS = [
   { id: "create", label: "Create" },
   { id: "open", label: "Open / Receive" },
   { id: "transit", label: "Transit" },
   { id: "exile", label: "Exile" },
 ];
-const [exileDepth, setExileDepth] = useState(null);
-const [exileDepthLoading, setExileDepthLoading] = useState(false);
-const [exileDepthError, setExileDepthError] = useState("");
-const isRecord = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+
+const isRecord = (v) =>
+  v !== null && typeof v === "object" && !Array.isArray(v);
+
 const objectAt = (source, keys) => {
   if (!isRecord(source)) return undefined;
-  for (const key of keys) if (isRecord(source[key])) return source[key];
+
+  for (const key of keys) {
+    if (isRecord(source[key])) return source[key];
+  }
+
   return undefined;
 };
+
 const valueAt = (source, keys) => {
   if (!isRecord(source)) return undefined;
+
   for (const key of keys) {
-    if (source[key] !== null && source[key] !== undefined) return source[key];
+    if (source[key] !== null && source[key] !== undefined) {
+      return source[key];
+    }
   }
+
   return undefined;
 };
 const formatKey = (key) => String(key)
