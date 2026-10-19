@@ -35,10 +35,12 @@ const valueAt = (source, keys) => {
 
   return undefined;
 };
-const formatKey = (key) => String(key)
-  .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-  .replace(/[_-]+/g, " ")
-  .replace(/\b\w/g, (c) => c.toUpperCase());
+
+const formatKey = (key) =>
+  String(key)
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 
 function friendlyValue(value) {
   if (value === null || value === undefined || value === "") return "Not provided";
@@ -58,7 +60,8 @@ function flatten(value, prefix = "", rows = []) {
     const entries = Object.entries(value);
     if (!entries.length && prefix) rows.push([prefix, "No details returned"]);
     entries.forEach(([key, child]) =>
-      flatten(child, prefix ? `${prefix} · ${formatKey(key)}` : formatKey(key), rows));
+      flatten(child, prefix ? `${prefix} · ${formatKey(key)}` : formatKey(key), rows)
+    );
   } else {
     rows.push([prefix || "Value", friendlyValue(value)]);
   }
@@ -66,107 +69,227 @@ function flatten(value, prefix = "", rows = []) {
 }
 
 function hasContent(value) {
-  return value !== null && value !== undefined &&
-    (typeof value !== "object" || (Array.isArray(value) ? value.length > 0 : Object.keys(value).length > 0));
+  return (
+    value !== null &&
+    value !== undefined &&
+    (typeof value !== "object" ||
+      (Array.isArray(value) ? value.length > 0 : Object.keys(value).length > 0))
+  );
 }
 
 async function readResponse(response) {
   const text = await response.text();
   let data = {};
+
   if (text) {
-    try { data = JSON.parse(text); }
-    catch { data = { response_text: text }; }
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { response_text: text };
+    }
   }
+
   if (!response.ok) {
     const message = valueAt(data, ["error", "message", "detail"]);
-    throw new Error(`${message ?? `Request failed (${response.status})`}${response.statusText ? ` (${response.statusText})` : ""}`);
+    throw new Error(
+      `${message ?? `Request failed (${response.status})`}${
+        response.statusText ? ` (${response.statusText})` : ""
+      }`
+    );
   }
+
   return data;
 }
 
 function eventMapOf(source) {
   const direct = objectAt(source, ["event", "event_map", "eventMap"]);
   if (direct) return direct;
+
   const frame = objectAt(source, ["frame"]);
   const frameEvent = objectAt(frame, ["event", "event_map", "eventMap"]);
   if (frameEvent) return frameEvent;
+
   const tx = objectAt(frame, ["quantum_transaction", "quantumTransaction"]);
   return objectAt(tx, ["event", "event_map", "eventMap"]);
 }
 
 function ResultHeading({ eyebrow, title }) {
-  return <div>
-    <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">{eyebrow}</p>
-    <h2 className="mt-1 text-lg font-semibold text-zinc-900 dark:text-zinc-100">{title}</h2>
-  </div>;
+  return (
+    <div>
+      <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+        {eyebrow}
+      </p>
+      <h2 className="mt-1 text-lg font-semibold text-zinc-900 dark:text-zinc-100">
+        {title}
+      </h2>
+    </div>
+  );
 }
 
 function KeyValueList({ value, emptyText = "No details were returned." }) {
   const rows = flatten(value);
-  if (!rows.length) return <p className="text-xs text-zinc-500 dark:text-zinc-400">{emptyText}</p>;
-  return <dl className="grid min-w-0 grid-cols-1 gap-x-5 gap-y-3 text-xs sm:grid-cols-[minmax(130px,0.75fr)_minmax(0,1.5fr)]">
-    {rows.map(([key, val], i) => <div key={`${key}-${i}`} className="contents">
-      <dt className="min-w-0 break-words text-zinc-500 dark:text-zinc-400">{key}</dt>
-      <dd className="min-w-0 break-words font-medium text-zinc-800 dark:text-zinc-200">{val}</dd>
-    </div>)}
-  </dl>;
+
+  if (!rows.length) {
+    return <p className="text-xs text-zinc-500 dark:text-zinc-400">{emptyText}</p>;
+  }
+
+  return (
+    <dl className="grid min-w-0 grid-cols-1 gap-x-5 gap-y-3 text-xs sm:grid-cols-[minmax(130px,0.75fr)_minmax(0,1.5fr)]">
+      {rows.map(([key, val], i) => (
+        <div key={`${key}-${i}`} className="contents">
+          <dt className="min-w-0 break-words text-zinc-500 dark:text-zinc-400">{key}</dt>
+          <dd className="min-w-0 break-words font-medium text-zinc-800 dark:text-zinc-200">
+            {val}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
 }
 
 function ResultSection({ title, description, value, defaultOpen = false }) {
   const [open, setOpen] = useState(defaultOpen);
-  return <section className="overflow-hidden rounded-md border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-    <button type="button" aria-expanded={open} onClick={() => setOpen((v) => !v)}
-      className="flex w-full items-center justify-between gap-3 px-3 py-3 text-left hover:bg-zinc-50 sm:px-4 dark:hover:bg-zinc-800/60">
-      <span className="min-w-0">
-        <span className="block break-words text-xs font-semibold text-zinc-900 dark:text-zinc-100">{title}</span>
-        {description && <span className="mt-1 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">{description}</span>}
-      </span>
-      <span className={`flex size-7 shrink-0 items-center justify-center rounded-md border border-zinc-200 transition-transform dark:border-zinc-700 ${open ? "rotate-180" : ""}`} aria-hidden="true">
-        <svg viewBox="0 0 20 20" fill="none" className="size-4"><path d="m5 7.5 5 5 5-5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>
-      </span>
-    </button>
-    {open && <div className="border-t border-zinc-200 px-3 py-3 sm:px-4 dark:border-zinc-800">
-      {!hasContent(value) ? <p className="text-xs text-zinc-500 dark:text-zinc-400">This information was not returned by the API.</p> : <KeyValueList value={value} />}
-    </div>}
-  </section>;
+
+  return (
+    <section className="overflow-hidden rounded-md border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between gap-3 px-3 py-3 text-left hover:bg-zinc-50 sm:px-4 dark:hover:bg-zinc-800/60"
+      >
+        <span className="min-w-0">
+          <span className="block break-words text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+            {title}
+          </span>
+          {description && (
+            <span className="mt-1 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+              {description}
+            </span>
+          )}
+        </span>
+        <span
+          className={`flex size-7 shrink-0 items-center justify-center rounded-md border border-zinc-200 transition-transform dark:border-zinc-700 ${
+            open ? "rotate-180" : ""
+          }`}
+          aria-hidden="true"
+        >
+          <svg viewBox="0 0 20 20" fill="none" className="size-4">
+            <path
+              d="m5 7.5 5 5 5-5"
+              stroke="currentColor"
+              strokeWidth="1.7"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </span>
+      </button>
+      {open && (
+        <div className="border-t border-zinc-200 px-3 py-3 sm:px-4 dark:border-zinc-800">
+          {!hasContent(value) ? (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              This information was not returned by the API.
+            </p>
+          ) : (
+            <KeyValueList value={value} />
+          )}
+        </div>
+      )}
+    </section>
+  );
 }
 
-function Field({ label, value, onChange, required = false, placeholder = "", mono = false, type = "text", autoComplete }) {
-  return <label className="flex min-w-0 flex-col gap-1">
-    <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">{label}</span>
-    <input type={type} autoComplete={autoComplete} value={value} onChange={(e) => onChange(e.target.value)} required={required} placeholder={placeholder}
-      className={`h-8 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-xs text-zinc-900 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800 ${mono ? "font-mono" : ""}`} />
-  </label>;
+function Field({
+  label,
+  value,
+  onChange,
+  required = false,
+  placeholder = "",
+  mono = false,
+  type = "text",
+  autoComplete,
+}) {
+  return (
+    <label className="flex min-w-0 flex-col gap-1">
+      <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">{label}</span>
+      <input
+        type={type}
+        autoComplete={autoComplete}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        required={required}
+        placeholder={placeholder}
+        className={`h-8 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-xs text-zinc-900 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800 ${
+          mono ? "font-mono" : ""
+        }`}
+      />
+    </label>
+  );
 }
 
 function NumberField({ label, value, onChange, min = 0 }) {
-  return <label className="flex min-w-0 flex-col gap-1">
-    <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">{label}</span>
-    <input type="number" min={min} step="1" value={value} onChange={(e) => onChange(e.target.value)} required
-      className="h-8 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-2.5 font-mono text-xs text-zinc-900 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800" />
-  </label>;
+  return (
+    <label className="flex min-w-0 flex-col gap-1">
+      <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">{label}</span>
+      <input
+        type="number"
+        min={min}
+        step="1"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        required
+        className="h-8 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-2.5 font-mono text-xs text-zinc-900 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800"
+      />
+    </label>
+  );
 }
 
 function ReceiveUnitIdentifiers({ amount }) {
   const count = Number(amount);
+
   if (!Number.isSafeInteger(count) || count <= 0) {
-    return <p className="text-xs text-zinc-500 dark:text-zinc-400">A valid positive amount was not returned; unit identifiers cannot be listed.</p>;
+    return (
+      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+        A valid positive amount was not returned; unit identifiers cannot be listed.
+      </p>
+    );
   }
+
   const displayLimit = 200;
   const displayedCount = Math.min(count, displayLimit);
-  return <section className="space-y-2">
-    <div>
-      <h3 className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">Receive unit identifiers</h3>
-      <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{count} {count === 1 ? "unit" : "units"} · Display ordinals 1–{count}</p>
-    </div>
-    <ol className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
-      {Array.from({ length: displayedCount }, (_, i) => i + 1).map((id) => <li key={id} className="flex items-center gap-3 rounded-md border border-zinc-200 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900">
-        <span className="text-xs text-zinc-500 dark:text-zinc-400">Unit</span><span className="font-mono text-xs font-semibold">{id}</span>
-      </li>)}
-    </ol>
-    {count > displayLimit && <p className="text-xs leading-5 text-amber-700 dark:text-amber-300">Showing the first {displayLimit} of {count} display ordinals to keep the page responsive.</p>}
-    <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">These are display ordinals from 1 through N, not distinct persisted identifiers supplied by the API.</p>
-  </section>;
+
+  return (
+    <section className="space-y-2">
+      <div>
+        <h3 className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+          Receive unit identifiers
+        </h3>
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          {count} {count === 1 ? "unit" : "units"} · Display ordinals 1–{count}
+        </p>
+      </div>
+      <ol className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
+        {Array.from({ length: displayedCount }, (_, i) => i + 1).map((id) => (
+          <li
+            key={id}
+            className="flex items-center gap-3 rounded-md border border-zinc-200 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900"
+          >
+            <span className="text-xs text-zinc-500 dark:text-zinc-400">Unit</span>
+            <span className="font-mono text-xs font-semibold">{id}</span>
+          </li>
+        ))}
+      </ol>
+      {count > displayLimit && (
+        <p className="text-xs leading-5 text-amber-700 dark:text-amber-300">
+          Showing the first {displayLimit} of {count} display ordinals to keep the page responsive.
+        </p>
+      )}
+      <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+        These are display ordinals from 1 through N, not distinct persisted identifiers supplied by the API.
+      </p>
+    </section>
+  );
 }
 
 function validDepth(depth) {
@@ -174,32 +297,40 @@ function validDepth(depth) {
   if (typeof depth.path !== "string" || !depth.path.trim()) return false;
   if (!Array.isArray(depth.objects) || depth.objects.length === 0) return false;
 
-  return depth.objects.every((item) =>
-    isRecord(item) &&
-    Number.isSafeInteger(Number(item.position)) &&
-    Number(item.position) >= 0 &&
-    typeof item.identifier === "string" &&
-    item.identifier.trim().length > 0
+  return depth.objects.every(
+    (item) =>
+      isRecord(item) &&
+      Number.isSafeInteger(Number(item.position)) &&
+      Number(item.position) >= 0 &&
+      typeof item.identifier === "string" &&
+      item.identifier.trim().length > 0
   );
 }
 
 function depthValidationMessage(depth) {
   if (!isRecord(depth)) return "The API did not return a depth record.";
+
   if (typeof depth.path !== "string" || !depth.path.trim()) {
     return "The depth record has no substrate memory path.";
   }
+
   if (!Array.isArray(depth.objects) || depth.objects.length === 0) {
     return "Exile requires at least one retained depth object with a position.";
   }
-  if (!depth.objects.every((item) =>
-    isRecord(item) &&
-    Number.isSafeInteger(Number(item.position)) &&
-    Number(item.position) >= 0 &&
-    typeof item.identifier === "string" &&
-    item.identifier.trim().length > 0
-  )) {
+
+  if (
+    !depth.objects.every(
+      (item) =>
+        isRecord(item) &&
+        Number.isSafeInteger(Number(item.position)) &&
+        Number(item.position) >= 0 &&
+        typeof item.identifier === "string" &&
+        item.identifier.trim().length > 0
+    )
+  ) {
     return "Every depth object must have a valid position and identifier.";
   }
+
   return "";
 }
 
@@ -212,29 +343,70 @@ function OpenResults({ result }) {
   const depth = objectAt(event, ["depth"]);
   const objects = Array.isArray(depth?.objects) ? depth.objects : [];
   const amount = valueAt(transaction, ["amount"]) ?? result?.requested_amount;
-  return <section className="mt-3 space-y-2">
-    <ResultHeading eyebrow="Open result" title="Substrate directory and receive depth" />
-    <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-      <h3 className="text-xs font-semibold">Substrate directory</h3>
-      <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-300">Directory metadata returned by the API for the selected substrate.</p>
-      <div className="mt-4"><KeyValueList value={directory} emptyText="The API did not return directory metadata." /></div>
-    </div>
-    <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-      <h3 className="text-xs font-semibold">Receive event depth</h3>
-      <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-300">Readable fields from the event returned by the receive operation.</p>
-      <div className="mt-4"><KeyValueList value={depth} emptyText="No event depth was returned." /></div>
-      {objects.length > 0 && <div className="mt-4 space-y-2">{objects.map((item, i) => <div key={`${item?.identifier ?? "object"}-${i}`} className="rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
-        <h4 className="mb-3 text-xs font-medium">Retained object {item?.position ?? i + 1}</h4><KeyValueList value={item} />
-      </div>)}</div>}
-    </div>
-    <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-      <h3 className="text-xs font-semibold">QuantumTransaction validation</h3>
-      <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-300">{transaction ? "The API returned a QuantumTransaction from the receive operation." : "The response did not contain the expected QuantumTransaction."}</p>
-      <div className="mt-4"><KeyValueList value={{ transaction_returned: Boolean(transaction), amount, flow: result?.flow, constant: valueAt(transaction, ["constant"]), qtm: objectAt(transaction, ["qtm"]) }} /></div>
-      <div className="mt-5"><ReceiveUnitIdentifiers amount={amount} /></div>
-    </div>
-    {event && <ResultSection title="Receive event fields" description="Event data displayed as key–value pairs." value={event} />}
-  </section>;
+
+  return (
+    <section className="mt-3 space-y-2">
+      <ResultHeading eyebrow="Open result" title="Substrate directory and receive depth" />
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <h3 className="text-xs font-semibold">Substrate directory</h3>
+        <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-300">
+          Directory metadata returned by the API for the selected substrate.
+        </p>
+        <div className="mt-4">
+          <KeyValueList value={directory} emptyText="The API did not return directory metadata." />
+        </div>
+      </div>
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <h3 className="text-xs font-semibold">Receive event depth</h3>
+        <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-300">
+          Readable fields from the event returned by the receive operation.
+        </p>
+        <div className="mt-4">
+          <KeyValueList value={depth} emptyText="No event depth was returned." />
+        </div>
+        {objects.length > 0 && (
+          <div className="mt-4 space-y-2">
+            {objects.map((item, i) => (
+              <div
+                key={`${item?.identifier ?? "object"}-${i}`}
+                className="rounded-md border border-zinc-200 p-3 dark:border-zinc-800"
+              >
+                <h4 className="mb-3 text-xs font-medium">
+                  Retained object {item?.position ?? i + 1}
+                </h4>
+                <KeyValueList value={item} />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <h3 className="text-xs font-semibold">QuantumTransaction validation</h3>
+        <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-300">
+          {transaction
+            ? "The API returned a QuantumTransaction from the receive operation."
+            : "The response did not contain the expected QuantumTransaction."}
+        </p>
+        <div className="mt-4">
+          <KeyValueList
+            value={{
+              transaction_returned: Boolean(transaction),
+              amount,
+              flow: result?.flow,
+              constant: valueAt(transaction, ["constant"]),
+              qtm: objectAt(transaction, ["qtm"]),
+            }}
+          />
+        </div>
+        <div className="mt-5">
+          <ReceiveUnitIdentifiers amount={amount} />
+        </div>
+      </div>
+      {event && (
+        <ResultSection title="Receive event fields" description="Event data displayed as key–value pairs." value={event} />
+      )}
+    </section>
+  );
 }
 
 function EventMapSections({ event, prefix = "" }) {
@@ -242,15 +414,31 @@ function EventMapSections({ event, prefix = "" }) {
   const heritage = objectAt(event, ["heritage", "state_heritage", "stateHeritage"]);
   const transition = objectAt(event, ["transition", "transition_heritage", "transitionHeritage"]);
   const depthIdentifier = valueAt(depth, ["identifier", "depth_identifier", "depthIdentifier", "id"]);
-  return <div className="space-y-2">
-    {depth && <ResultSection title={`${prefix}Final depth`} description={depthIdentifier === undefined ? "Final depth data returned by the API." : `Depth identifier: ${friendlyValue(depthIdentifier)}`} value={depth} defaultOpen />}
-    {heritage && <ResultSection title={`${prefix}Heritage state`} value={heritage} />}
-    {transition && <ResultSection title={`${prefix}Transition`} value={transition} />}
-    <ResultSection title={`${prefix}Event Map`} description="Event fields returned by the API, displayed as key–value pairs." value={event} />
-  </div>;
+
+  return (
+    <div className="space-y-2">
+      {depth && (
+        <ResultSection
+          title={`${prefix}Final depth`}
+          description={
+            depthIdentifier === undefined
+              ? "Final depth data returned by the API."
+              : `Depth identifier: ${friendlyValue(depthIdentifier)}`
+          }
+          value={depth}
+          defaultOpen
+        />
+      )}
+      {heritage && <ResultSection title={`${prefix}Heritage state`} value={heritage} />}
+      {transition && <ResultSection title={`${prefix}Transition`} value={transition} />}
+      <ResultSection
+        title={`${prefix}Event Map`}
+        description="Event fields returned by the API, displayed as key–value pairs."
+        value={event}
+      />
+    </div>
+  );
 }
-
-
 
 function TransitResults({ result, network, path }) {
   const frame = objectAt(result, ["frame"]);
@@ -259,11 +447,7 @@ function TransitResults({ result, network, path }) {
   return (
     <section className="mt-3 space-y-2">
       <ResultHeading eyebrow="Transit result" title="QP44 event" />
-      <ResultSection
-        title="QTM values"
-        value={objectAt(frame, ["qtm", "Qtm"])}
-        defaultOpen
-      />
+      <ResultSection title="QTM values" value={objectAt(frame, ["qtm", "Qtm"])} defaultOpen />
       <ResultSection
         title="Network and path"
         value={{
@@ -272,11 +456,7 @@ function TransitResults({ result, network, path }) {
           path: path || network?.path || "Not specified",
         }}
       />
-      {event ? (
-        <EventMapSections event={event} />
-      ) : (
-        <ResultSection title="Event Map" value={undefined} />
-      )}
+      {event ? <EventMapSections event={event} /> : <ResultSection title="Event Map" value={undefined} />}
     </section>
   );
 }
@@ -290,11 +470,7 @@ function ExileResults({ result }) {
   return (
     <section className="mt-3 space-y-2">
       <ResultHeading eyebrow="Exile result" title="Exile event" />
-      <ResultSection
-        title="Stored QTM"
-        value={objectAt(frame, ["qtm", "Qtm"])}
-        defaultOpen
-      />
+      <ResultSection title="Stored QTM" value={objectAt(frame, ["qtm", "Qtm"])} defaultOpen />
 
       {depth && (
         <section className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
@@ -313,9 +489,7 @@ function ExileResults({ result }) {
                   key={`${item?.identifier ?? "object"}-${item?.position ?? index}`}
                   className="rounded-md border border-zinc-200 p-3 dark:border-zinc-800"
                 >
-                  <h4 className="mb-3 text-xs font-medium">
-                    Position {item?.position ?? "Not returned"}
-                  </h4>
+                  <h4 className="mb-3 text-xs font-medium">Position {item?.position ?? "Not returned"}</h4>
                   <KeyValueList value={item} />
                 </div>
               ))}
@@ -324,11 +498,7 @@ function ExileResults({ result }) {
         </section>
       )}
 
-      {event ? (
-        <EventMapSections event={event} prefix="Exile " />
-      ) : (
-        <ResultSection title="Exile Event Map" value={undefined} />
-      )}
+      {event ? <EventMapSections event={event} prefix="Exile " /> : <ResultSection title="Exile Event Map" value={undefined} />}
     </section>
   );
 }
@@ -339,9 +509,7 @@ function ResultCard({ result, tab, network, path }) {
   return (
     <div className="mt-3 space-y-2">
       {tab === "open" && <OpenResults result={result} />}
-      {tab === "transit" && (
-        <TransitResults result={result} network={network} path={path} />
-      )}
+      {tab === "transit" && <TransitResults result={result} network={network} path={path} />}
       {tab === "exile" && <ExileResults result={result} />}
       {tab === "create" && (
         <section className="space-y-2">
@@ -384,6 +552,7 @@ export default function Home() {
   const [receiveAmount, setReceiveAmount] = useState("1");
   const [receiveFlow, setReceiveFlow] = useState("receive");
 
+  // These hooks must stay inside Home(), not at module scope.
   const [exileDepth, setExileDepth] = useState(null);
   const [exileDepthLoading, setExileDepthLoading] = useState(false);
   const [exileDepthError, setExileDepthError] = useState("");
@@ -397,18 +566,14 @@ export default function Home() {
     setListError("");
 
     try {
-      const response = await fetch(`${API_BASE}/wallets`, {
-        cache: "no-store",
-      });
+      const response = await fetch(`${API_BASE}/wallets`, { cache: "no-store" });
       const data = await readResponse(response);
 
       if (!Array.isArray(data.substrates)) {
         throw new Error("The API response did not contain a substrates list.");
       }
 
-      const valid = data.substrates.filter(
-        (item) => item && typeof item.name === "string"
-      );
+      const valid = data.substrates.filter((item) => item && typeof item.name === "string");
 
       setSubstrates(valid);
       setSelectedSubstrate((current) => {
@@ -418,9 +583,7 @@ export default function Home() {
           : valid[0]?.name || "";
       });
     } catch (err) {
-      setListError(
-        err instanceof Error ? err.message : "Unable to load substrates."
-      );
+      setListError(err instanceof Error ? err.message : "Unable to load substrates.");
     } finally {
       setListLoading(false);
     }
@@ -438,28 +601,17 @@ export default function Home() {
     setExileDepth(null);
 
     try {
-      const url =
-        `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}/exile/depth`;
-
-      const response = await fetch(url, {
-        method: "GET",
-        cache: "no-store",
-      });
-
+      const url = `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}/exile/depth`;
+      const response = await fetch(url, { method: "GET", cache: "no-store" });
       const data = await readResponse(response);
       const depth = objectAt(data, ["depth"]) ?? data;
       const validationError = depthValidationMessage(depth);
 
       if (validationError) throw new Error(validationError);
-
       setExileDepth(depth);
     } catch (err) {
       setExileDepth(null);
-      setExileDepthError(
-        err instanceof Error
-          ? err.message
-          : "Unable to load the substrate depth."
-      );
+      setExileDepthError(err instanceof Error ? err.message : "Unable to load the substrate depth.");
     } finally {
       setExileDepthLoading(false);
     }
@@ -470,9 +622,7 @@ export default function Home() {
     setNetworkError("");
 
     try {
-      const response = await fetch(`${API_BASE}/networks`, {
-        cache: "no-store",
-      });
+      const response = await fetch(`${API_BASE}/networks`, { cache: "no-store" });
       const data = await readResponse(response);
 
       if (!Array.isArray(data.networks)) {
@@ -488,29 +638,21 @@ export default function Home() {
 
       setNetworks(valid);
       setSelectedNetwork((current) =>
-        valid.some((network) => network.id === current)
-          ? current
-          : valid[0]?.id || ""
+        valid.some((network) => network.id === current) ? current : valid[0]?.id || ""
       );
 
       const first = valid[0];
       if (first) {
         if (Number.isFinite(first.purpose)) {
-          setPurpose((current) =>
-            current === "44" ? String(first.purpose) : current
-          );
+          setPurpose((current) => (current === "44" ? String(first.purpose) : current));
         }
         if (Number.isFinite(first.coin)) {
-          setCoin((current) =>
-            current === "0" ? String(first.coin) : current
-          );
+          setCoin((current) => (current === "0" ? String(first.coin) : current));
         }
         setPath((current) => current || first.path || "");
       }
     } catch (err) {
-      setNetworkError(
-        err instanceof Error ? err.message : "Unable to load networks."
-      );
+      setNetworkError(err instanceof Error ? err.message : "Unable to load networks.");
     } finally {
       setNetworkLoading(false);
     }
@@ -524,8 +666,7 @@ export default function Home() {
     loadNetworks();
   }, [loadNetworks]);
 
-  const currentNetwork =
-    networks.find((network) => network.id === selectedNetwork) ?? null;
+  const currentNetwork = networks.find((network) => network.id === selectedNetwork) ?? null;
 
   function handleSubstrateChange(value) {
     setSelectedSubstrate(value);
@@ -544,12 +685,8 @@ export default function Home() {
 
     if (!network) return;
 
-    if (Number.isFinite(network.purpose)) {
-      setPurpose(String(network.purpose));
-    }
-    if (Number.isFinite(network.coin)) {
-      setCoin(String(network.coin));
-    }
+    if (Number.isFinite(network.purpose)) setPurpose(String(network.purpose));
+    if (Number.isFinite(network.coin)) setCoin(String(network.coin));
     setPath(network.path || "");
   }
 
@@ -570,20 +707,13 @@ export default function Home() {
 
       if (tab === "create") {
         const substrateName = name.trim();
-
-        if (!substrateName) {
-          throw new Error("Enter a substrate name.");
-        }
+        if (!substrateName) throw new Error("Enter a substrate name.");
 
         let payload;
 
         if (seedSource === "bip39") {
-          if (!phrase.trim()) {
-            throw new Error("Enter a BIP39 mnemonic phrase.");
-          }
-          if (!language) {
-            throw new Error("Select a BIP39 language.");
-          }
+          if (!phrase.trim()) throw new Error("Enter a BIP39 mnemonic phrase.");
+          if (!language) throw new Error("Select a BIP39 language.");
 
           payload = {
             name: substrateName,
@@ -606,9 +736,7 @@ export default function Home() {
                 Number(item) > 2047
             )
           ) {
-            throw new Error(
-              "Enter exactly 12 indices, each an integer from 0 to 2047."
-            );
+            throw new Error("Enter exactly 12 indices, each an integer from 0 to 2047.");
           }
 
           payload = {
@@ -642,9 +770,7 @@ export default function Home() {
           throw new Error("Select a valid receive flow.");
         }
 
-        const walletUrl =
-          `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}`;
-
+        const walletUrl = `${API_BASE}/wallets/${encodeURIComponent(selectedSubstrate)}`;
         const directoryResponse = await fetch(walletUrl, {
           method: "GET",
           cache: "no-store",
@@ -659,17 +785,9 @@ export default function Home() {
         });
 
         const receive = await readResponse(receiveResponse);
-
-        setResult({
-          directory,
-          receive,
-          requested_amount: amount,
-          flow: receiveFlow,
-        });
+        setResult({ directory, receive, requested_amount: amount, flow: receiveFlow });
       } else if (tab === "transit") {
-        if (!selectedNetwork) {
-          throw new Error("Select a network before transit.");
-        }
+        if (!selectedNetwork) throw new Error("Select a network before transit.");
 
         const numeric = {
           purpose: Number(purpose),
@@ -682,9 +800,7 @@ export default function Home() {
 
         for (const [key, value] of Object.entries(numeric)) {
           if (!Number.isSafeInteger(value) || value < 0) {
-            throw new Error(
-              `${key} must be a non-negative safe integer.`
-            );
+            throw new Error(`${key} must be a non-negative safe integer.`);
           }
         }
 
@@ -705,11 +821,8 @@ export default function Home() {
         await loadSubstrates(selectedSubstrate);
       } else if (tab === "exile") {
         const validationError = depthValidationMessage(exileDepth);
-
         if (validationError) {
-          throw new Error(
-            `Exile requires a valid substrate depth. ${validationError}`
-          );
+          throw new Error(`Exile requires a valid substrate depth. ${validationError}`);
         }
 
         response = await fetch(
@@ -727,9 +840,7 @@ export default function Home() {
         const returnedDepth = objectAt(eventMap, ["depth"]);
 
         if (!validDepth(returnedDepth)) {
-          throw new Error(
-            "The exile API did not return a valid depth record in its event map."
-          );
+          throw new Error("The exile API did not return a valid depth record in its event map.");
         }
 
         setResult(data);
@@ -737,9 +848,7 @@ export default function Home() {
         await loadSubstrates(selectedSubstrate);
       }
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Something went wrong."
-      );
+      setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
       setLoading(false);
     }
@@ -816,9 +925,7 @@ export default function Home() {
               <ResultSection
                 title="Selected substrate details"
                 description="Fields returned for the selected substrate."
-                value={
-                  substrates.find((item) => item.name === selectedSubstrate) ?? {}
-                }
+                value={substrates.find((item) => item.name === selectedSubstrate) ?? {}}
               />
             </div>
           )}
@@ -1067,9 +1174,7 @@ export default function Home() {
                   </p>
                 )}
 
-                {currentNetwork && (
-                  <ResultSection title="Selected network definition" value={currentNetwork} />
-                )}
+                {currentNetwork && <ResultSection title="Selected network definition" value={currentNetwork} />}
               </>
             )}
 
@@ -1157,8 +1262,7 @@ export default function Home() {
                 listLoading ||
                 (substrateRequired && !selectedSubstrate) ||
                 (tab === "transit" && (networkLoading || !selectedNetwork)) ||
-                (tab === "exile" &&
-                  (!validDepth(exileDepth) || exileDepthLoading))
+                (tab === "exile" && (!validDepth(exileDepth) || exileDepthLoading))
               }
               className="mt-2 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-zinc-950 px-5 text-xs font-semibold text-white hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
             >
@@ -1177,12 +1281,7 @@ export default function Home() {
           </p>
         )}
 
-        <ResultCard
-          result={result}
-          tab={tab}
-          network={currentNetwork}
-          path={path}
-        />
+        <ResultCard result={result} tab={tab} network={currentNetwork} path={path} />
 
         <footer className="mt-5 border-t border-zinc-200 pt-4 text-xs leading-5 text-zinc-500 dark:border-zinc-800">
           QTM substrate console
@@ -1191,7 +1290,3 @@ export default function Home() {
     </div>
   );
 }
-
-
-
-
