@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const API_BASE = "https://qtm-api.onrender.com";
 const REFRESH_INTERVAL = 5000;
 const U128_MAX = "340282366920938463463374607431768211455";
+const USD_PER_EVENT = 1;
 
 async function apiRequest(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -80,7 +81,6 @@ function unsigned128(value, label) {
     throw new Error(`${label} must be a non-negative whole number.`);
   }
 
-  // BigInt prevents precision loss for Rust u128 values.
   const parsed = BigInt(input);
 
   if (parsed > BigInt(U128_MAX)) {
@@ -122,6 +122,35 @@ function asBigInt(value) {
   } catch {
     return null;
   }
+}
+
+/*
+ * Prefer the canonical persisted heritage field:
+ * event.heritage.state.retained_mass.
+ *
+ * The direct retained_mass fallback supports APIs that return event
+ * summaries instead of the complete heritage object.
+ */
+function eventRetainedMass(event) {
+  return (
+    asBigInt(event?.heritage?.state?.retained_mass) ??
+    asBigInt(event?.retained_mass)
+  );
+}
+
+function sumEventRetainedMass(events) {
+  return events.reduce((sum, event) => {
+    const amount = eventRetainedMass(event);
+    return amount === null ? sum : sum + amount;
+  }, 0n);
+}
+
+function usd(value) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 2,
+  }).format(value);
 }
 
 function Panel({
@@ -299,6 +328,7 @@ export default function EventStorePage() {
 
   const selectedSubstrateRef = useRef("");
   const requestSequenceRef = useRef(0);
+  const retainedMassEditedRef = useRef(false);
 
   const events = Array.isArray(store?.events) ? store.events : [];
 
@@ -309,11 +339,7 @@ export default function EventStorePage() {
     store?.event_budget ??
     null;
 
-  const usedRetainedBigInt = events.reduce((sum, item) => {
-    const amount = asBigInt(item?.retained_mass);
-    return amount !== null ? sum + amount : sum;
-  }, 0n);
-
+  const usedRetainedBigInt = sumEventRetainedMass(events);
   const usedRetained = usedRetainedBigInt.toString();
 
   const configuredMaxEvents = budgetValue(budget, "max_events");
@@ -326,9 +352,24 @@ export default function EventStorePage() {
   const maxEventNumber = Number(configuredMaxEvents);
 
   const remainingEvents =
-    configuredMaxEvents !== undefined && Number.isSafeInteger(maxEventNumber)
+    configuredMaxEvents !== undefined &&
+    Number.isSafeInteger(maxEventNumber)
       ? Math.max(0, maxEventNumber - events.length)
       : undefined;
+
+  // Live price estimate: one selected event costs one USD.
+  const parsedDepositEvents = /^\d+$/.test(depositEvents)
+    ? Number(depositEvents)
+    : NaN;
+
+  const validDepositCount =
+    Number.isSafeInteger(parsedDepositEvents) &&
+    parsedDepositEvents >= 0;
+
+  const depositCost =
+    validDepositCount
+      ? parsedDepositEvents * USD_PER_EVENT
+      : null;
 
   const loadSubstrates = useCallback(async () => {
     setLoadingList(true);
@@ -353,8 +394,6 @@ export default function EventStorePage() {
 
       const current = selectedSubstrateRef.current;
 
-      // Use the first available substrate if neither the URL nor the
-      // currently selected substrate is present in the API response.
       const chosen =
         requestedEntry?.name ??
         (entries.some((item) => item.name === current)
@@ -403,6 +442,10 @@ export default function EventStorePage() {
 
       setStore(result);
 
+      const returnedEvents = Array.isArray(result.events)
+        ? result.events
+        : [];
+
       const returnedBudget =
         result.budget_store ??
         result.budget ??
@@ -426,7 +469,20 @@ export default function EventStorePage() {
       }
 
       if (returnedRetainedMass !== undefined) {
+        // A persisted budget takes precedence over automatic filling.
         setMaxRetainedMass(String(returnedRetainedMass));
+        retainedMassEditedRef.current = false;
+      } else if (!retainedMassEditedRef.current) {
+        /*
+         * Autofill the ceiling from persisted event heritage when the
+         * API has not returned a configured max_retained_mass.
+         * Nested heritage is preferred by sumEventRetainedMass().
+         */
+        const total = sumEventRetainedMass(returnedEvents);
+
+        if (returnedEvents.some((item) => eventRetainedMass(item) !== null)) {
+          setMaxRetainedMass(total.toString());
+        }
       }
 
       return result;
@@ -490,6 +546,7 @@ export default function EventStorePage() {
   function selectSubstrate(name) {
     selectedSubstrateRef.current = name;
     requestSequenceRef.current += 1;
+    retainedMassEditedRef.current = false;
 
     setSubstrate(name);
     setStore(null);
@@ -549,12 +606,8 @@ export default function EventStorePage() {
     setSavingBudget(true);
 
     try {
-      /*
-       * max_retained_mass is a Rust u128. JSON.stringify() on a JavaScript
-       * Number can lose precision, so serialize this validated decimal as
-       * an unquoted JSON integer. The API must deserialize this field as
-       * u128 (or explicitly accept and parse a decimal string).
-       */
+      // Keep u128 precision by sending max_retained_mass as an exact
+      // JSON integer instead of converting it to a JavaScript Number.
       const body =
         `{"min_events":${payload.min_events},` +
         `"max_events":${payload.max_events},` +
@@ -571,6 +624,7 @@ export default function EventStorePage() {
       setBudgetResult(result);
       setNotice("The API accepted the budget configuration.");
 
+      retainedMassEditedRef.current = false;
       await loadEvents(substrate);
     } catch (err) {
       setError(
@@ -657,7 +711,11 @@ export default function EventStorePage() {
       );
 
       setDepositResult(result);
-      setNotice("The API accepted the event deposit request.");
+      setNotice(
+        `The API accepted the deposit request. Requested event cost: ${usd(
+          payload.events * USD_PER_EVENT,
+        )}.`,
+      );
 
       await loadEvents(substrate);
     } catch (err) {
@@ -796,9 +854,9 @@ export default function EventStorePage() {
 
             <Metric
               label="Maximum retained mass"
-              value={configuredMaxRetainedMass}
+              value={configuredMaxRetainedMass ?? maxRetainedMass}
               unit="bytes"
-              note="Configured retained-mass ceiling (u128)."
+              note="Uses the configured budget when available; otherwise autofills from persisted event heritage retained_mass."
             />
           </div>
 
@@ -816,9 +874,9 @@ export default function EventStorePage() {
                 <code className="font-mono">min_events</code>,{" "}
                 <code className="font-mono">max_events</code>, and{" "}
                 <code className="font-mono">max_retained_mass</code>.
-                The retained-mass value is kept as a decimal integer so
-                values larger than JavaScript&apos;s safe-integer limit
-                retain their exact precision.
+                Retained mass is kept as an exact decimal integer to
+                preserve Rust <code className="font-mono">u128</code>{" "}
+                precision.
               </p>
             </div>
 
@@ -843,9 +901,12 @@ export default function EventStorePage() {
               <NumberInput
                 label="max_retained_mass (bytes)"
                 value={maxRetainedMass}
-                onChange={setMaxRetainedMass}
+                onChange={(value) => {
+                  retainedMassEditedRef.current = true;
+                  setMaxRetainedMass(value);
+                }}
                 type="text"
-                hint="Unsigned u128 retained-mass ceiling."
+                hint="Autofilled from persisted event heritage when no budget ceiling is returned; editable."
                 disabled={savingBudget}
               />
             </div>
@@ -873,7 +934,7 @@ export default function EventStorePage() {
 
         <Panel
           title="Event admission deposit"
-          description="Request event slots and retained-memory capacity for the selected substrate."
+          description="Each requested event costs $1 USD. The estimate updates automatically as you change the event count."
         >
           <form onSubmit={submitDeposit} className="space-y-4">
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -896,19 +957,51 @@ export default function EventStorePage() {
               />
             </div>
 
+            <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-950">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                    Estimated event cost
+                  </p>
+                  <p className="mt-1 font-mono text-3xl font-semibold tabular-nums">
+                    {depositCost === null ? "—" : usd(depositCost)}
+                  </p>
+                  <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+                    {validDepositCount
+                      ? `${parsedDepositEvents.toLocaleString("en-US")} event(s) × ${usd(USD_PER_EVENT)} per event`
+                      : "Enter a valid whole-number event count."}
+                  </p>
+                </div>
+
+                <div className="text-sm text-zinc-600 dark:text-zinc-400">
+                  Rate: <span className="font-mono">$1 USD / event</span>
+                </div>
+              </div>
+            </div>
+
             <p className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-sm leading-6 text-zinc-600 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400">
-              The API must validate and persist deposits atomically.
-              Browser checks are advisory and cannot prevent concurrent
-              requests from exceeding a budget. This is an engineering
-              capacity reservation, not a currency payment.
+              This is a calculated estimate only. It does not charge a
+              payment method or establish a completed payment. The API
+              must validate and persist event deposits atomically.
+              Browser capacity checks are advisory.
             </p>
 
             <ActionButton
               type="submit"
               primary
-              disabled={!substrate || creatingDeposit || loadingEvents}
+              disabled={
+                !substrate ||
+                creatingDeposit ||
+                loadingEvents ||
+                !validDepositCount ||
+                parsedDepositEvents < 1
+              }
             >
-              {creatingDeposit ? "Submitting deposit…" : "Deposit events"}
+              {creatingDeposit
+                ? "Submitting deposit…"
+                : `Deposit events · ${
+                    depositCost === null ? "—" : usd(depositCost)
+                  }`}
             </ActionButton>
           </form>
 
@@ -957,7 +1050,7 @@ export default function EventStorePage() {
               label="Observed retained mass"
               value={usedRetained}
               unit="bytes"
-              note="Exact sum of valid retained_mass values returned by the API."
+              note="Exact sum of valid retained_mass values, preferring event.heritage.state.retained_mass."
             />
 
             <Metric
@@ -1046,7 +1139,10 @@ export default function EventStorePage() {
                     </td>
 
                     <td className="break-all px-4 py-3 font-mono">
-                      {text(event.retained_mass)}
+                      {text(
+                        event.heritage?.state?.retained_mass ??
+                          event.retained_mass,
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -1088,8 +1184,8 @@ export default function EventStorePage() {
         </Panel>
 
         <footer className="border-t border-zinc-200 pt-4 text-xs leading-5 text-zinc-500 dark:border-zinc-800">
-          QTM Event Store · Substrate-scoped navigation · Event capacity
-          · Retained-state diagnostics · Rust API
+          QTM Event Store · Substrate-scoped navigation · USD event-cost
+          estimate · Retained-state diagnostics · Rust API
         </footer>
       </div>
     </main>
