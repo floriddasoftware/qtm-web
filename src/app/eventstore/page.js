@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 const API_BASE = "https://qtm-api.onrender.com";
 const REFRESH_INTERVAL = 5000;
+const U128_MAX = "340282366920938463463374607431768211455";
 
 async function apiRequest(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -57,11 +58,13 @@ function text(value, fallback = "—") {
 }
 
 function integer(value, label) {
-  if (!/^\d+$/.test(String(value))) {
+  const input = String(value);
+
+  if (!/^\d+$/.test(input)) {
     throw new Error(`${label} must be a non-negative whole number.`);
   }
 
-  const parsed = Number(value);
+  const parsed = Number(input);
 
   if (!Number.isSafeInteger(parsed) || parsed < 0) {
     throw new Error(`${label} must be a non-negative safe integer.`);
@@ -70,13 +73,30 @@ function integer(value, label) {
   return parsed;
 }
 
+function unsigned128(value, label) {
+  const input = String(value).trim();
+
+  if (!/^\d+$/.test(input)) {
+    throw new Error(`${label} must be a non-negative whole number.`);
+  }
+
+  // BigInt prevents precision loss for Rust u128 values.
+  const parsed = BigInt(input);
+
+  if (parsed > BigInt(U128_MAX)) {
+    throw new Error(`${label} exceeds the maximum supported u128 value.`);
+  }
+
+  return parsed.toString();
+}
+
 function budgetValue(budget, key) {
   if (!budget || typeof budget !== "object") return undefined;
 
   const aliases = {
     max_events: ["max_events", "max_event"],
     min_events: ["min_events", "min_event"],
-    max_retained: ["max_retained"],
+    max_retained_mass: ["max_retained_mass", "max_retained"],
   };
 
   for (const name of aliases[key] ?? [key]) {
@@ -86,6 +106,22 @@ function budgetValue(budget, key) {
   }
 
   return undefined;
+}
+
+function asBigInt(value) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  try {
+    const input = String(value);
+
+    if (!/^\d+$/.test(input)) return null;
+
+    return BigInt(input);
+  } catch {
+    return null;
+  }
 }
 
 function Panel({
@@ -140,6 +176,7 @@ function NumberInput({
   min = 0,
   hint,
   disabled = false,
+  type = "number",
 }) {
   return (
     <label className="flex min-w-0 flex-col gap-1.5">
@@ -147,9 +184,11 @@ function NumberInput({
         {label}
       </span>
       <input
-        type="number"
-        min={min}
-        step="1"
+        type={type}
+        inputMode={type === "text" ? "numeric" : undefined}
+        min={type === "number" ? min : undefined}
+        step={type === "number" ? "1" : undefined}
+        pattern={type === "text" ? "[0-9]*" : undefined}
         required
         disabled={disabled}
         value={value}
@@ -250,7 +289,7 @@ export default function EventStorePage() {
 
   const [maxEvents, setMaxEvents] = useState("1024");
   const [minEvents, setMinEvents] = useState("0");
-  const [maxRetained, setMaxRetained] = useState("1048576");
+  const [maxRetainedMass, setMaxRetainedMass] = useState("1048576");
 
   const [depositEvents, setDepositEvents] = useState("1");
   const [depositRetained, setDepositRetained] = useState("1024");
@@ -270,19 +309,24 @@ export default function EventStorePage() {
     store?.event_budget ??
     null;
 
-  const usedRetained = events.reduce((sum, item) => {
-    const amount = Number(item?.retained_mass ?? 0);
-    return sum + (Number.isFinite(amount) && amount > 0 ? amount : 0);
-  }, 0);
+  const usedRetainedBigInt = events.reduce((sum, item) => {
+    const amount = asBigInt(item?.retained_mass);
+    return amount !== null ? sum + amount : sum;
+  }, 0n);
+
+  const usedRetained = usedRetainedBigInt.toString();
 
   const configuredMaxEvents = budgetValue(budget, "max_events");
   const configuredMinEvents = budgetValue(budget, "min_events");
-  const configuredMaxRetained = budgetValue(budget, "max_retained");
+  const configuredMaxRetainedMass = budgetValue(
+    budget,
+    "max_retained_mass",
+  );
 
   const maxEventNumber = Number(configuredMaxEvents);
 
   const remainingEvents =
-    configuredMaxEvents !== undefined && Number.isFinite(maxEventNumber)
+    configuredMaxEvents !== undefined && Number.isSafeInteger(maxEventNumber)
       ? Math.max(0, maxEventNumber - events.length)
       : undefined;
 
@@ -309,19 +353,18 @@ export default function EventStorePage() {
 
       const current = selectedSubstrateRef.current;
 
+      // Use the first available substrate if neither the URL nor the
+      // currently selected substrate is present in the API response.
       const chosen =
         requestedEntry?.name ??
-        (entries.some((item) => item.name === current) ? current : "") ??
-        entries[0]?.name ??
-        "";
+        (entries.some((item) => item.name === current)
+          ? current
+          : entries[0]?.name ?? "");
 
-      const finalChoice =
-        chosen || entries[0]?.name || "";
+      selectedSubstrateRef.current = chosen;
+      setSubstrate(chosen);
 
-      selectedSubstrateRef.current = finalChoice;
-      setSubstrate(finalChoice);
-
-      return finalChoice;
+      return chosen;
     } catch (err) {
       setError(
         err instanceof Error
@@ -356,8 +399,6 @@ export default function EventStorePage() {
       );
 
       if (requestId !== requestSequenceRef.current) return null;
-
-      // Do not show a response for a substrate that is no longer selected.
       if (selectedSubstrateRef.current !== name) return null;
 
       setStore(result);
@@ -371,16 +412,21 @@ export default function EventStorePage() {
 
       const returnedMax = budgetValue(returnedBudget, "max_events");
       const returnedMin = budgetValue(returnedBudget, "min_events");
-      const returnedRetained = budgetValue(
+      const returnedRetainedMass = budgetValue(
         returnedBudget,
-        "max_retained",
+        "max_retained_mass",
       );
 
-      if (returnedMax !== undefined) setMaxEvents(String(returnedMax));
-      if (returnedMin !== undefined) setMinEvents(String(returnedMin));
+      if (returnedMax !== undefined) {
+        setMaxEvents(String(returnedMax));
+      }
 
-      if (returnedRetained !== undefined) {
-        setMaxRetained(String(returnedRetained));
+      if (returnedMin !== undefined) {
+        setMinEvents(String(returnedMin));
+      }
+
+      if (returnedRetainedMass !== undefined) {
+        setMaxRetainedMass(String(returnedRetainedMass));
       }
 
       return result;
@@ -427,11 +473,7 @@ export default function EventStorePage() {
     if (!substrate) return undefined;
 
     const interval = window.setInterval(() => {
-      if (
-        !loadingEvents &&
-        !savingBudget &&
-        !creatingDeposit
-      ) {
+      if (!loadingEvents && !savingBudget && !creatingDeposit) {
         loadEvents(substrate, { silent: true });
       }
     }, REFRESH_INTERVAL);
@@ -473,23 +515,30 @@ export default function EventStorePage() {
     let payload;
 
     try {
-      payload = {
-        max_events: integer(maxEvents, "max_events"),
-        min_events: integer(minEvents, "min_events"),
-        max_retained: integer(maxRetained, "max_retained"),
-      };
+      const parsedMinEvents = integer(minEvents, "min_events");
+      const parsedMaxEvents = integer(maxEvents, "max_events");
+      const parsedMaxRetainedMass = unsigned128(
+        maxRetainedMass,
+        "max_retained_mass",
+      );
 
-      if (payload.max_events < 1) {
+      if (parsedMaxEvents < 1) {
         throw new Error("max_events must be at least 1.");
       }
 
-      if (payload.min_events > payload.max_events) {
+      if (parsedMinEvents > parsedMaxEvents) {
         throw new Error("min_events cannot exceed max_events.");
       }
 
-      if (payload.max_retained < 1) {
-        throw new Error("max_retained must be at least 1 byte.");
+      if (BigInt(parsedMaxRetainedMass) < 1n) {
+        throw new Error("max_retained_mass must be at least 1 byte.");
       }
+
+      payload = {
+        min_events: parsedMinEvents,
+        max_events: parsedMaxEvents,
+        max_retained_mass: parsedMaxRetainedMass,
+      };
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Invalid budget values.",
@@ -500,11 +549,22 @@ export default function EventStorePage() {
     setSavingBudget(true);
 
     try {
+      /*
+       * max_retained_mass is a Rust u128. JSON.stringify() on a JavaScript
+       * Number can lose precision, so serialize this validated decimal as
+       * an unquoted JSON integer. The API must deserialize this field as
+       * u128 (or explicitly accept and parse a decimal string).
+       */
+      const body =
+        `{"min_events":${payload.min_events},` +
+        `"max_events":${payload.max_events},` +
+        `"max_retained_mass":${payload.max_retained_mass}}`;
+
       const result = await apiRequest(
         `/wallets/${encodeURIComponent(substrate)}/events/budget`,
         {
           method: "PUT",
-          body: JSON.stringify(payload),
+          body,
         },
       );
 
@@ -514,7 +574,7 @@ export default function EventStorePage() {
       await loadEvents(substrate);
     } catch (err) {
       setError(
-        `${err instanceof Error ? err.message : "Unable to configure the budget."} The Rust API must implement PUT /wallets/:name/events/budget for this action.`,
+        `${err instanceof Error ? err.message : "Unable to configure the budget."} Verify that the deployed Rust API implements PUT /wallets/:name/events/budget and accepts max_retained_mass as a u128-compatible JSON integer.`,
       );
     } finally {
       setSavingBudget(false);
@@ -554,22 +614,22 @@ export default function EventStorePage() {
       }
 
       if (budget && typeof budget === "object") {
-        const cap = Number(configuredMaxEvents);
+        const cap = asBigInt(configuredMaxEvents);
 
         if (
-          Number.isFinite(cap) &&
-          events.length + payload.events > cap
+          cap !== null &&
+          BigInt(events.length) + BigInt(payload.events) > cap
         ) {
           throw new Error(
             "This request exceeds the configured maximum event capacity.",
           );
         }
 
-        const retainedCap = Number(configuredMaxRetained);
+        const retainedCap = asBigInt(configuredMaxRetainedMass);
 
         if (
-          Number.isFinite(retainedCap) &&
-          usedRetained + payload.retained > retainedCap
+          retainedCap !== null &&
+          usedRetainedBigInt + BigInt(payload.retained) > retainedCap
         ) {
           throw new Error(
             "This request exceeds the configured retained-memory budget.",
@@ -735,10 +795,10 @@ export default function EventStorePage() {
             />
 
             <Metric
-              label="Maximum retained"
-              value={configuredMaxRetained}
+              label="Maximum retained mass"
+              value={configuredMaxRetainedMass}
               unit="bytes"
-              note="Configured retained-mass ceiling."
+              note="Configured retained-mass ceiling (u128)."
             />
           </div>
 
@@ -752,13 +812,13 @@ export default function EventStorePage() {
               </h3>
 
               <p className="mt-1 text-sm leading-6 text-zinc-500 dark:text-zinc-400">
-                Values are submitted to the API as{" "}
-                <code className="font-mono">max_events</code>,{" "}
-                <code className="font-mono">min_events</code>, and{" "}
-                <code className="font-mono">max_retained</code>.
-                Responses using the singular{" "}
-                <code className="font-mono">max_event</code> field are
-                also recognized when displaying the current budget.
+                The API receives{" "}
+                <code className="font-mono">min_events</code>,{" "}
+                <code className="font-mono">max_events</code>, and{" "}
+                <code className="font-mono">max_retained_mass</code>.
+                The retained-mass value is kept as a decimal integer so
+                values larger than JavaScript&apos;s safe-integer limit
+                retain their exact precision.
               </p>
             </div>
 
@@ -781,11 +841,11 @@ export default function EventStorePage() {
               />
 
               <NumberInput
-                label="max_retained (bytes)"
-                value={maxRetained}
-                onChange={setMaxRetained}
-                min={1}
-                hint="Maximum retained payload mass."
+                label="max_retained_mass (bytes)"
+                value={maxRetainedMass}
+                onChange={setMaxRetainedMass}
+                type="text"
+                hint="Unsigned u128 retained-mass ceiling."
                 disabled={savingBudget}
               />
             </div>
@@ -897,7 +957,7 @@ export default function EventStorePage() {
               label="Observed retained mass"
               value={usedRetained}
               unit="bytes"
-              note="Sum of retained_mass values returned by the API."
+              note="Exact sum of valid retained_mass values returned by the API."
             />
 
             <Metric
