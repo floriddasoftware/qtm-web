@@ -1,18 +1,15 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 const API_BASE = "https://qtm-api.onrender.com";
 const REFRESH_INTERVAL = 5000;
 const U128_MAX = "340282366920938463463374607431768211455";
-const USD_PER_EVENT = 1;
 async function apiRequest(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     cache: "no-store",
     headers: {
       Accept: "application/json",
-      ...(options.body
-        ? { "Content-Type": "application/json" }
-        : {}),
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
       ...options.headers,
     },
   });
@@ -55,30 +52,22 @@ function text(value, fallback = "—") {
 function integer(value, label) {
   const input = String(value).trim();
   if (!/^\d+$/.test(input)) {
-    throw new Error(
-      `${label} must be a non-negative whole number.`,
-    );
+    throw new Error(`${label} must be a non-negative whole number.`);
   }
   const parsed = Number(input);
   if (!Number.isSafeInteger(parsed) || parsed < 0) {
-    throw new Error(
-      `${label} must be a non-negative safe integer.`,
-    );
+    throw new Error(`${label} must be a non-negative safe integer.`);
   }
   return parsed;
 }
 function unsigned128(value, label) {
   const input = String(value).trim();
   if (!/^\d+$/.test(input)) {
-    throw new Error(
-      `${label} must be a non-negative whole number.`,
-    );
+    throw new Error(`${label} must be a non-negative whole number.`);
   }
   const parsed = BigInt(input);
   if (parsed > BigInt(U128_MAX)) {
-    throw new Error(
-      `${label} exceeds the maximum supported u128 value.`,
-    );
+    throw new Error(`${label} exceeds the maximum supported u128 value.`);
   }
   return parsed.toString();
 }
@@ -89,27 +78,17 @@ function budgetValue(budget, key) {
   const aliases = {
     max_events: ["max_events", "max_event"],
     min_events: ["min_events", "min_event"],
-    max_retained_mass: [
-      "max_retained_mass",
-      "max_retained",
-    ],
+    max_retained_mass: ["max_retained_mass", "max_retained"],
   };
   for (const name of aliases[key] ?? [key]) {
-    if (
-      budget[name] !== undefined &&
-      budget[name] !== null
-    ) {
+    if (budget[name] !== undefined && budget[name] !== null) {
       return budget[name];
     }
   }
   return undefined;
 }
 function asBigInt(value) {
-  if (
-    value === undefined ||
-    value === null ||
-    value === ""
-  ) {
+  if (value === undefined || value === null || value === "") {
     return null;
   }
   try {
@@ -126,13 +105,6 @@ function asBigInt(value) {
     return null;
   }
 }
-/*
- * Canonical retained mass:
- * event.heritage.state.retained_mass
- *
- * The flat fields are compatibility fallbacks for older API
- * responses.
- */
 function eventRetainedMass(event) {
   return (
     event?.heritage?.state?.retained_mass ??
@@ -147,14 +119,6 @@ function totalRetainedMass(events) {
     const amount = asBigInt(eventRetainedMass(event));
     return amount !== null ? sum + amount : sum;
   }, 0n);
-}
-function moneyUSD(amount) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(amount);
 }
 function Panel({
   title,
@@ -205,10 +169,9 @@ function NumberInput({
   label,
   value,
   onChange,
-  min = 0,
   hint,
   disabled = false,
-  type = "number",
+  textInput = false,
 }) {
   return (
     <label className="flex min-w-0 flex-col gap-1.5">
@@ -216,11 +179,11 @@ function NumberInput({
         {label}
       </span>
       <input
-        type={type}
-        inputMode={type === "text" ? "numeric" : undefined}
-        min={type === "number" ? min : undefined}
-        step={type === "number" ? "1" : undefined}
-        pattern={type === "text" ? "[0-9]*" : undefined}
+        type={textInput ? "text" : "number"}
+        inputMode="numeric"
+        min={textInput ? undefined : 0}
+        step={textInput ? undefined : 1}
+        pattern={textInput ? "[0-9]*" : undefined}
         required
         disabled={disabled}
         value={value}
@@ -236,10 +199,7 @@ function NumberInput({
   );
 }
 function Metric({ label, value, unit, note }) {
-  const available =
-    value !== undefined &&
-    value !== null &&
-    value !== "";
+  const available = value !== undefined && value !== null && value !== "";
   return (
     <div className="min-w-0 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
       <p className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
@@ -261,6 +221,29 @@ function Metric({ label, value, unit, note }) {
     </div>
   );
 }
+function ActionButton({
+  children,
+  disabled,
+  onClick,
+  type = "button",
+  primary = false,
+}) {
+  const base =
+    "inline-flex min-h-10 items-center justify-center rounded-lg px-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50";
+  const style = primary
+    ? "bg-zinc-950 px-5 text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
+    : "border border-zinc-300 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800";
+  return (
+    <button
+      type={type}
+      disabled={disabled}
+      onClick={onClick}
+      className={`${base} ${style}`}
+    >
+      {children}
+    </button>
+  );
+}
 function RuntimeValue({ runtime }) {
   if (!runtime) return <>Not reported</>;
   const seconds = Number(runtime.unix_seconds);
@@ -280,104 +263,104 @@ function RuntimeValue({ runtime }) {
     </>
   );
 }
-function ActionButton({
-  children,
-  disabled,
-  onClick,
-  type = "button",
-  primary = false,
-}) {
-  const base =
-    "inline-flex min-h-11 items-center justify-center rounded-lg px-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50";
-  const style = primary
-    ? "bg-zinc-950 px-5 text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
-    : "border border-zinc-300 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800";
-  return (
-    <button
-      type={type}
-      disabled={disabled}
-      onClick={onClick}
-      className={`${base} ${style}`}
-    >
-      {children}
-    </button>
-  );
-}
 function EventValue({ value }) {
-  return (
-    <span className="break-all font-mono">
-      {text(value)}
-    </span>
-  );
+  return <span className="break-all font-mono">{text(value)}</span>;
+}
+function activationFromEvent(event) {
+  const value =
+    event?.activation ??
+    event?.heritage?.state?.activation_count;
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  const parsed = String(value);
+  return /^\d+$/.test(parsed) ? parsed : null;
+}
+function normalizeBudgetResponse(result) {
+  if (Array.isArray(result?.budgets)) {
+    return result.budgets;
+  }
+  return [];
+}
+function budgetKey(activation, networkId) {
+  return `${activation}:${networkId}`;
+}
+function emptyDraft() {
+  return {
+    min_events: "0",
+    max_events: "1024",
+    max_retained_mass: "1048576",
+  };
+}
+function draftFromBudget(budget) {
+  if (!budget || typeof budget !== "object") {
+    return emptyDraft();
+  }
+  return {
+    min_events: String(budgetValue(budget, "min_events") ?? "0"),
+    max_events: String(budgetValue(budget, "max_events") ?? "1024"),
+    max_retained_mass: String(
+      budgetValue(budget, "max_retained_mass") ?? "1048576",
+    ),
+  };
+}
+function normalizeNetwork(network) {
+  if (!network || typeof network.id !== "string") {
+    return null;
+  }
+  return {
+    id: network.id,
+    name: network.name ?? network.id,
+    coin: network.coin,
+    purpose: network.purpose,
+    path: network.path,
+  };
 }
 export default function EventStorePage() {
   const [substrates, setSubstrates] = useState([]);
+  const [networks, setNetworks] = useState([]);
   const [substrate, setSubstrate] = useState("");
+  const [activation, setActivation] = useState("0");
+  const [activationOptions, setActivationOptions] = useState(["0"]);
   const [store, setStore] = useState(null);
+  const [networkBudgets, setNetworkBudgets] = useState([]);
+  const [drafts, setDrafts] = useState({});
+  const [savingKeys, setSavingKeys] = useState({});
   const [loadingList, setLoadingList] = useState(true);
   const [loadingEvents, setLoadingEvents] = useState(false);
-  const [savingBudget, setSavingBudget] = useState(false);
-  const [creatingDeposit, setCreatingDeposit] = useState(false);
+  const [loadingBudgets, setLoadingBudgets] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [maxEvents, setMaxEvents] = useState("1024");
-  const [minEvents, setMinEvents] = useState("0");
-  const [maxRetainedMass, setMaxRetainedMass] =
-    useState("1048576");
-  const [depositEvents, setDepositEvents] = useState("1");
-  const [depositRetained, setDepositRetained] =
-    useState("1024");
-  const [budgetResult, setBudgetResult] = useState(null);
-  const [depositResult, setDepositResult] = useState(null);
+  const [budgetErrors, setBudgetErrors] = useState({});
+  const [budgetNotices, setBudgetNotices] = useState({});
+  const [expandedNetworks, setExpandedNetworks] = useState({});
   const selectedSubstrateRef = useRef("");
-  const requestSequenceRef = useRef(0);
-  const events = Array.isArray(store?.events)
-    ? store.events
-    : [];
-  const budget =
-    store?.budget_store ??
-    store?.budget ??
-    store?.capacity ??
-    store?.event_budget ??
-    null;
-  // Exact retained-mass arithmetic; never convert u128 to Number.
-  const usedRetainedBigInt = totalRetainedMass(events);
+  const selectedActivationRef = useRef("0");
+  const eventRequestRef = useRef(0);
+  const budgetRequestRef = useRef(0);
+  const events = Array.isArray(store?.events) ? store.events : [];
+  const usedRetainedBigInt = useMemo(
+    () => totalRetainedMass(events),
+    [events],
+  );
   const usedRetained = usedRetainedBigInt.toString();
-  const configuredMaxEvents = budgetValue(
-    budget,
-    "max_events",
+  const configuredBudgetCount = networkBudgets.filter(
+    (entry) => entry?.configured && entry?.budget,
+  ).length;
+  const activationLabel = activation;
+  const selectedSubstrateEntry = substrates.find(
+    (entry) => entry.name === substrate,
   );
-  const configuredMinEvents = budgetValue(
-    budget,
-    "min_events",
-  );
-  const configuredMaxRetainedMass = budgetValue(
-    budget,
-    "max_retained_mass",
-  );
-  const maxEventNumber =
-    configuredMaxEvents === undefined
-      ? NaN
-      : Number(configuredMaxEvents);
-  const remainingEvents =
-    configuredMaxEvents !== undefined &&
-    Number.isSafeInteger(maxEventNumber)
-      ? Math.max(0, maxEventNumber - events.length)
-      : undefined;
-  const parsedDepositEvents =
-    /^\d+$/.test(depositEvents.trim())
-      ? BigInt(depositEvents.trim())
-      : 0n;
-  const depositAmountUSD =
-    parsedDepositEvents * BigInt(USD_PER_EVENT);
-  const depositAmountDisplay =
-    depositAmountUSD <=
-    BigInt(Number.MAX_SAFE_INTEGER)
-      ? moneyUSD(Number(depositAmountUSD))
-      : `$${depositAmountUSD.toString()}.00`;
+  const loadNetworks = useCallback(async () => {
+    const result = await apiRequest("/networks");
+    const normalized = Array.isArray(result.networks)
+      ? result.networks.map(normalizeNetwork).filter(Boolean)
+      : [];
+    setNetworks(normalized);
+    return normalized;
+  }, []);
   const loadSubstrates = useCallback(async () => {
     setLoadingList(true);
-    setError("");
     try {
       const result = await apiRequest("/wallets");
       const entries = Array.isArray(result.substrates)
@@ -395,18 +378,16 @@ export default function EventStorePage() {
       const requestedEntry = entries.find(
         (item) => item.name === requested,
       );
-      const current = selectedSubstrateRef.current;
+      const previous = selectedSubstrateRef.current;
       const chosen =
         requestedEntry?.name ??
-        (entries.some((item) => item.name === current)
-          ? current
+        (entries.some((item) => item.name === previous)
+          ? previous
           : entries[0]?.name ?? "");
       selectedSubstrateRef.current = chosen;
       setSubstrate(chosen);
-      if (entries.length === 0) {
-        setError(
-          "The API returned no substrates. Check that GET /wallets returns a JSON object containing a substrates array.",
-        );
+      if (!entries.length) {
+        setError("The API returned no available substrates.");
       }
       return chosen;
     } catch (err) {
@@ -414,330 +395,374 @@ export default function EventStorePage() {
       selectedSubstrateRef.current = "";
       setSubstrate("");
       setError(
-        err instanceof Error
-          ? `Unable to load substrates: ${err.message}. This page currently requires GET /wallets to list available substrates.`
-          : "Unable to load substrates from the Rust API.",
+        `Unable to load substrates: ${
+          err instanceof Error ? err.message : "unknown API error"
+        }`,
       );
       return "";
     } finally {
       setLoadingList(false);
     }
   }, []);
-  const loadEvents = useCallback(
-    async (name, options = {}) => {
-      if (!name) {
-        setStore(null);
-        setError(
-          "Select a substrate before loading its event store.",
-        );
+  const loadEvents = useCallback(async (name, options = {}) => {
+    if (!name) {
+      setStore(null);
+      setError("Select a substrate before loading its event store.");
+      return null;
+    }
+    const requestId = ++eventRequestRef.current;
+    if (!options.silent) {
+      setLoadingEvents(true);
+      setError("");
+    }
+    try {
+      const result = await apiRequest(
+        `/wallets/${encodeURIComponent(name)}/events`,
+      );
+      if (requestId !== eventRequestRef.current) {
         return null;
       }
-      const requestId = ++requestSequenceRef.current;
-      setLoadingEvents(true);
+      if (selectedSubstrateRef.current !== name) {
+        return null;
+      }
+      const nextEvents = Array.isArray(result.events)
+        ? result.events
+        : [];
+      setStore({
+        ...result,
+        events: nextEvents,
+      });
+      const choices = new Set(["0"]);
+      for (const event of nextEvents) {
+        const value = activationFromEvent(event);
+        if (value !== null) choices.add(value);
+      }
+      const reportedActivations = selectedSubstrateEntry?.activations;
+      if (
+        reportedActivations !== undefined &&
+        reportedActivations !== null &&
+        /^\d+$/.test(String(reportedActivations))
+      ) {
+        choices.add(String(reportedActivations));
+      }
+      const sortedChoices = [...choices].sort((a, b) => {
+        const left = BigInt(a);
+        const right = BigInt(b);
+        return left < right ? -1 : left > right ? 1 : 0;
+      });
+      setActivationOptions(sortedChoices);
+      const previousActivation = selectedActivationRef.current;
+      const chosenActivation = choices.has(previousActivation)
+        ? previousActivation
+        : sortedChoices[sortedChoices.length - 1] ?? "0";
+      selectedActivationRef.current = chosenActivation;
+      setActivation(chosenActivation);
+      return result;
+    } catch (err) {
+      if (requestId !== eventRequestRef.current) {
+        return null;
+      }
+      if (selectedSubstrateRef.current === name) {
+        setStore(null);
+        setError(
+          `Unable to load events for "${name}": ${
+            err instanceof Error ? err.message : "unknown API error"
+          }`,
+        );
+      }
+      return null;
+    } finally {
+      if (requestId === eventRequestRef.current) {
+        setLoadingEvents(false);
+      }
+    }
+  }, [selectedSubstrateEntry]);
+  const loadBudgets = useCallback(
+    async (name, activationValue, options = {}) => {
+      if (!name || !/^\d+$/.test(String(activationValue))) {
+        setNetworkBudgets([]);
+        return null;
+      }
+      const requestId = ++budgetRequestRef.current;
       if (!options.silent) {
-        setError("");
-        setNotice("");
+        setLoadingBudgets(true);
       }
       try {
         const result = await apiRequest(
-          `/wallets/${encodeURIComponent(name)}/events`,
+          `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(
+            activationValue,
+          )}/budgets`,
         );
-        if (requestId !== requestSequenceRef.current) {
+        if (requestId !== budgetRequestRef.current) {
           return null;
         }
-        if (selectedSubstrateRef.current !== name) {
+        if (
+          selectedSubstrateRef.current !== name ||
+          selectedActivationRef.current !== String(activationValue)
+        ) {
           return null;
         }
-        setStore(result);
-        const returnedBudget =
-          result.budget_store ??
-          result.budget ??
-          result.capacity ??
-          result.event_budget ??
-          null;
-        const returnedMax = budgetValue(
-          returnedBudget,
-          "max_events",
-        );
-        const returnedMin = budgetValue(
-          returnedBudget,
-          "min_events",
-        );
-        const returnedRetainedMass = budgetValue(
-          returnedBudget,
-          "max_retained_mass",
-        );
-        if (returnedMax !== undefined) {
-          setMaxEvents(String(returnedMax));
-        }
-        if (returnedMin !== undefined) {
-          setMinEvents(String(returnedMin));
-        }
-        /*
-         * The API's explicit budget takes precedence.
-         * Otherwise, initialize from persisted retained mass.
-         */
-        if (returnedRetainedMass !== undefined) {
-          setMaxRetainedMass(
-            String(returnedRetainedMass),
-          );
-        } else {
-          const observedMass = totalRetainedMass(
-            Array.isArray(result.events)
-              ? result.events
-              : [],
-          );
-          setMaxRetainedMass(observedMass.toString());
-        }
+        const entries = normalizeBudgetResponse(result);
+        setNetworkBudgets(entries);
+        setDrafts((current) => {
+          const next = { ...current };
+          for (const entry of entries) {
+            const networkId = entry?.network?.id;
+            if (!networkId) continue;
+            const key = budgetKey(activationValue, networkId);
+            // Refresh saved values without clobbering a card currently
+            // being edited or saved.
+            if (!savingKeys[key]) {
+              next[key] = draftFromBudget(
+                entry.configured ? entry.budget : null,
+              );
+            }
+          }
+          return next;
+        });
         return result;
       } catch (err) {
-        if (requestId !== requestSequenceRef.current) {
+        if (requestId !== budgetRequestRef.current) {
           return null;
         }
-        if (selectedSubstrateRef.current === name) {
-          setStore(null);
-          setError(
-            err instanceof Error
-              ? `Unable to load events for "${name}": ${err.message}`
-              : "Unable to load the event store.",
-          );
-        }
+        setNetworkBudgets([]);
+        setError(
+          `Unable to load budgets for activation ${activationValue}: ${
+            err instanceof Error ? err.message : "unknown API error"
+          }`,
+        );
         return null;
       } finally {
-        if (
-          requestId === requestSequenceRef.current
-        ) {
-          setLoadingEvents(false);
+        if (requestId === budgetRequestRef.current) {
+          setLoadingBudgets(false);
         }
       }
     },
-    [],
+    [savingKeys],
   );
   useEffect(() => {
     let cancelled = false;
     async function initialize() {
-      const chosen = await loadSubstrates();
-      if (!cancelled && chosen) {
-        await loadEvents(chosen);
+      const results = await Promise.allSettled([
+        loadNetworks(),
+        loadSubstrates(),
+      ]);
+      if (cancelled) return;
+      const networkFailure = results[0].status === "rejected";
+      const substrateFailure = results[1].status === "rejected";
+      if (networkFailure) {
+        setError(
+          "Unable to load registered networks. Check GET /networks on qtm-api.",
+        );
+      }
+      if (substrateFailure) {
+        setError("Unable to initialize the event store.");
       }
     }
     initialize();
     return () => {
       cancelled = true;
-      requestSequenceRef.current += 1;
+      eventRequestRef.current += 1;
+      budgetRequestRef.current += 1;
     };
-  }, [loadSubstrates, loadEvents]);
+  }, [loadNetworks, loadSubstrates]);
+  useEffect(() => {
+    if (!substrate) {
+      setStore(null);
+      setNetworkBudgets([]);
+      return;
+    }
+    selectedSubstrateRef.current = substrate;
+    selectedActivationRef.current = activation;
+    loadEvents(substrate);
+  }, [substrate, loadEvents]);
+  useEffect(() => {
+    if (!substrate || !/^\d+$/.test(String(activation))) {
+      setNetworkBudgets([]);
+      return;
+    }
+    selectedActivationRef.current = activation;
+    loadBudgets(substrate, activation);
+  }, [substrate, activation, loadBudgets]);
   useEffect(() => {
     if (!substrate) return undefined;
     const interval = window.setInterval(() => {
-      if (
-        !loadingEvents &&
-        !savingBudget &&
-        !creatingDeposit
-      ) {
+      if (!loadingEvents) {
         loadEvents(substrate, { silent: true });
       }
     }, REFRESH_INTERVAL);
     return () => window.clearInterval(interval);
-  }, [
-    substrate,
-    loadingEvents,
-    savingBudget,
-    creatingDeposit,
-    loadEvents,
-  ]);
+  }, [substrate, loadingEvents, loadEvents]);
   function selectSubstrate(name) {
     selectedSubstrateRef.current = name;
-    requestSequenceRef.current += 1;
+    selectedActivationRef.current = "0";
+    eventRequestRef.current += 1;
+    budgetRequestRef.current += 1;
     setSubstrate(name);
+    setActivation("0");
+    setActivationOptions(["0"]);
     setStore(null);
-    setBudgetResult(null);
-    setDepositResult(null);
+    setNetworkBudgets([]);
     setError("");
     setNotice("");
-    if (name) {
-      loadEvents(name);
-    }
+    setBudgetErrors({});
+    setBudgetNotices({});
   }
-  async function saveBudget(event) {
-    event.preventDefault();
+  function selectActivation(value) {
+    if (!/^\d+$/.test(String(value))) return;
+    selectedActivationRef.current = String(value);
+    budgetRequestRef.current += 1;
+    setActivation(String(value));
+    setNetworkBudgets([]);
     setError("");
     setNotice("");
-    setBudgetResult(null);
+  }
+  function updateDraft(networkId, field, value) {
+    const key = budgetKey(activation, networkId);
+    setDrafts((current) => ({
+      ...current,
+      [key]: {
+        ...(current[key] ?? emptyDraft()),
+        [field]: value,
+      },
+    }));
+    setBudgetErrors((current) => ({
+      ...current,
+      [key]: "",
+    }));
+    setBudgetNotices((current) => ({
+      ...current,
+      [key]: "",
+    }));
+  }
+  async function saveNetworkBudget(event, network) {
+    event.preventDefault();
     if (!substrate) {
-      setError(
-        "Select a substrate before configuring its budget.",
-      );
+      setError("Select a substrate before saving a budget.");
       return;
     }
+    const key = budgetKey(activation, network.id);
+    const draft = drafts[key] ?? emptyDraft();
     let payload;
     try {
-      const parsedMinEvents = integer(
-        minEvents,
-        "min_events",
-      );
-      const parsedMaxEvents = integer(
-        maxEvents,
-        "max_events",
-      );
-      const parsedMaxRetainedMass = unsigned128(
-        maxRetainedMass,
+      const minEvents = integer(draft.min_events, "min_events");
+      const maxEvents = integer(draft.max_events, "max_events");
+      const maxRetainedMass = unsigned128(
+        draft.max_retained_mass,
         "max_retained_mass",
       );
-      if (parsedMaxEvents < 1) {
-        throw new Error(
-          "max_events must be at least 1.",
-        );
+      if (maxEvents < 1) {
+        throw new Error("max_events must be at least 1.");
       }
-      if (parsedMinEvents > parsedMaxEvents) {
-        throw new Error(
-          "min_events cannot exceed max_events.",
-        );
+      if (minEvents > maxEvents) {
+        throw new Error("min_events cannot exceed max_events.");
       }
-      if (BigInt(parsedMaxRetainedMass) < 1n) {
-        throw new Error(
-          "max_retained_mass must be at least 1 byte.",
-        );
+      if (BigInt(maxRetainedMass) < 1n) {
+        throw new Error("max_retained_mass must be at least 1 byte.");
       }
       payload = {
-        min_events: parsedMinEvents,
-        max_events: parsedMaxEvents,
-        max_retained_mass: parsedMaxRetainedMass,
+        min_events: minEvents,
+        max_events: maxEvents,
+        max_retained_mass: maxRetainedMass,
       };
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Invalid budget values.",
-      );
+      setBudgetErrors((current) => ({
+        ...current,
+        [key]: err instanceof Error ? err.message : "Invalid budget.",
+      }));
       return;
     }
-    setSavingBudget(true);
+    setSavingKeys((current) => ({ ...current, [key]: true }));
+    setBudgetErrors((current) => ({ ...current, [key]: "" }));
+    setBudgetNotices((current) => ({ ...current, [key]: "" }));
     try {
       /*
-       * Keep max_retained_mass as a decimal JSON integer.
-       * Do not convert u128 values through Number.
+       * max_retained_mass is u128. Keep it as a decimal JSON integer
+       * rather than passing it through Number or JSON.stringify(BigInt).
        */
       const body =
         `{"min_events":${payload.min_events},` +
         `"max_events":${payload.max_events},` +
         `"max_retained_mass":${payload.max_retained_mass}}`;
       const result = await apiRequest(
-        `/wallets/${encodeURIComponent(substrate)}/events/budget`,
+        `/wallets/${encodeURIComponent(
+          substrate,
+        )}/activations/${encodeURIComponent(
+          activation,
+        )}/budgets/${encodeURIComponent(network.id)}`,
         {
           method: "PUT",
           body,
         },
       );
-      setBudgetResult(result);
-      setNotice(
-        "The API accepted the budget configuration.",
+      setNetworkBudgets((current) =>
+        current.map((entry) =>
+          entry?.network?.id === network.id
+            ? {
+                ...entry,
+                configured: true,
+                budget: result.budget ?? {
+                  min_events: payload.min_events,
+                  max_events: payload.max_events,
+                  max_retained_mass: payload.max_retained_mass,
+                },
+              }
+            : entry,
+        ),
       );
-      await loadEvents(substrate);
+      setBudgetNotices((current) => ({
+        ...current,
+        [key]: `Saved for ${network.id} · activation ${activation}.`,
+      }));
     } catch (err) {
-      setError(
-        `${
-          err instanceof Error
-            ? err.message
-            : "Unable to configure the budget."
-        } Verify that the deployed Rust API implements PUT /wallets/:name/events/budget and accepts max_retained_mass as a u128-compatible JSON integer.`,
-      );
+      setBudgetErrors((current) => ({
+        ...current,
+        [key]: err instanceof Error
+          ? err.message
+          : "Unable to save this network budget.",
+      }));
     } finally {
-      setSavingBudget(false);
+      setSavingKeys((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
     }
   }
-  async function submitDeposit(event) {
-    event.preventDefault();
+  async function refreshAll() {
     setError("");
     setNotice("");
-    setDepositResult(null);
-    if (!substrate) {
-      setError(
-        "Select a substrate before requesting an event deposit.",
-      );
-      return;
-    }
-    let payload;
-    try {
-      payload = {
-        events: integer(depositEvents, "Event slots"),
-        retained: integer(
-          depositRetained,
-          "Retained-memory reservation",
-        ),
-      };
-      if (payload.events < 1) {
-        throw new Error(
-          "Event slots must be at least 1.",
-        );
-      }
-      if (payload.retained < 1) {
-        throw new Error(
-          "Retained-memory reservation must be at least 1 byte.",
-        );
-      }
-      if (budget && typeof budget === "object") {
-        const cap = asBigInt(configuredMaxEvents);
-        if (
-          cap !== null &&
-          BigInt(events.length) +
-            BigInt(payload.events) >
-            cap
-        ) {
-          throw new Error(
-            "This request exceeds the configured maximum event capacity.",
-          );
-        }
-        const retainedCap = asBigInt(
-          configuredMaxRetainedMass,
-        );
-        if (
-          retainedCap !== null &&
-          usedRetainedBigInt +
-            BigInt(payload.retained) >
-            retainedCap
-        ) {
-          throw new Error(
-            "This request exceeds the configured retained-memory budget.",
-          );
-        }
-      }
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Invalid event deposit request.",
-      );
-      return;
-    }
-    setCreatingDeposit(true);
-    try {
-      const result = await apiRequest(
-        `/wallets/${encodeURIComponent(substrate)}/events/deposit`,
-        {
-          method: "POST",
-          body: JSON.stringify(payload),
-        },
-      );
-      setDepositResult(result);
-      setNotice(
-        `The API accepted the request for ${payload.events} event slot(s). The displayed estimate is ${moneyUSD(
-          payload.events * USD_PER_EVENT,
-        )} USD. This is not a confirmed payment.`,
-      );
-      await loadEvents(substrate);
-    } catch (err) {
-      setError(
-        `${
-          err instanceof Error
-            ? err.message
-            : "Unable to submit the event deposit."
-        } Verify that the Rust API implements POST /wallets/:name/events/deposit. No payment is confirmed by this page.`,
-      );
-    } finally {
-      setCreatingDeposit(false);
+    const eventResult = await loadEvents(substrate);
+    if (eventResult) {
+      await loadBudgets(substrate, selectedActivationRef.current);
+      setNotice("Event-store snapshot and selected activation budgets refreshed.");
     }
   }
+  const activationEvents = useMemo(
+    () =>
+      events.filter(
+        (event) => activationFromEvent(event) === String(activation),
+      ),
+    [events, activation],
+  );
+  const activationRetainedMass = useMemo(
+    () => totalRetainedMass(activationEvents).toString(),
+    [activationEvents],
+  );
+  const budgetByNetwork = useMemo(() => {
+    const map = new Map();
+    for (const entry of networkBudgets) {
+      const id = entry?.network?.id;
+      if (id) map.set(id, entry);
+    }
+    return map;
+  }, [networkBudgets]);
+  const renderedNetworks = useMemo(() => {
+    if (networks.length) return networks;
+    return networkBudgets
+      .map((entry) => normalizeNetwork(entry.network))
+      .filter(Boolean);
+  }, [networks, networkBudgets]);
   return (
     <main className="min-h-screen bg-zinc-50 text-zinc-950 dark:bg-black dark:text-zinc-100">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 px-3 py-5 sm:px-6 sm:py-8 lg:px-8">
@@ -750,12 +775,9 @@ export default function EventStorePage() {
               Event Store
             </h1>
             <p className="mt-2 max-w-4xl text-sm leading-6 text-zinc-600 dark:text-zinc-400">
-              Navigate persisted events within the selected
-              substrate, configure event capacity, request event
-              slots, and inspect retained-state measurements.
-              Each store is scoped to one substrate. Budget
-              enforcement and persistence must be implemented
-              by the Rust API.
+              A universal substrate with independently persisted event
+              budgets for each activation and registered network. Every
+              budget is addressed by substrate, activation, and network.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -774,257 +796,85 @@ export default function EventStorePage() {
           </div>
         </header>
         <Panel
-          title="Substrate and event-store snapshot"
-          description="Each substrate has its own persisted event namespace and budget."
+          title="Universal substrate"
+          description="Select one persistent substrate, then select the activation whose network budgets you want to inspect or update."
           action={
             <ActionButton
-              disabled={
-                !substrate ||
-                loadingEvents ||
-                loadingList
-              }
-              onClick={() => loadEvents(substrate)}
+              disabled={!substrate || loadingEvents || loadingBudgets}
+              onClick={refreshAll}
             >
-              {loadingEvents ? "Reading…" : "Refresh store"}
+              {loadingEvents || loadingBudgets ? "Refreshing…" : "Refresh"}
             </ActionButton>
           }
         >
-          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
             <label className="flex min-w-0 flex-col gap-1.5">
               <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
                 Persistent substrate
               </span>
               <select
                 value={substrate}
-                disabled={
-                  loadingList || substrates.length === 0
-                }
-                onChange={(event) =>
-                  selectSubstrate(event.target.value)
-                }
+                disabled={loadingList || substrates.length === 0}
+                onChange={(event) => selectSubstrate(event.target.value)}
                 className="h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-zinc-200 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 dark:focus:ring-zinc-800"
               >
                 <option value="">
-                  {loadingList
-                    ? "Loading substrates…"
-                    : "Select a substrate"}
+                  {loadingList ? "Loading substrates…" : "Select substrate"}
                 </option>
                 {substrates.map((entry) => (
-                  <option
-                    key={entry.name}
-                    value={entry.name}
-                  >
-                    {entry.name} · activation{" "}
-                    {entry.activations ?? "—"}
+                  <option key={entry.name} value={entry.name}>
+                    {entry.name}
                   </option>
                 ))}
               </select>
             </label>
-            <ActionButton
-              disabled={
-                !substrate ||
-                loadingEvents ||
-                loadingList
-              }
-              onClick={() => loadEvents(substrate)}
-            >
-              Load event store
-            </ActionButton>
+            <label className="flex min-w-0 flex-col gap-1.5">
+              <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                Activation
+              </span>
+              <select
+                value={activation}
+                disabled={!substrate || activationOptions.length === 0}
+                onChange={(event) => selectActivation(event.target.value)}
+                className="h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-zinc-200 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 dark:focus:ring-zinc-800"
+              >
+                {activationOptions.map((value) => (
+                  <option key={value} value={value}>
+                    Activation {value}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
-          {loadingList && (
-            <p className="mt-3 text-sm text-zinc-500">
-              Reading the available substrates…
-            </p>
-          )}
+          <dl className="mt-5 grid grid-cols-1 gap-4 border-t border-zinc-200 pt-4 sm:grid-cols-2 xl:grid-cols-4 dark:border-zinc-800">
+            <Field label="Substrate">
+              {text(store?.substrate ?? substrate)}
+            </Field>
+            <Field label="Activation directory">
+              <EventValue
+                value={
+                  substrate
+                    ? `${text(store?.directory)}/event/${activationLabel}`
+                    : "—"
+                }
+              />
+            </Field>
+            <Field label="Persisted events">
+              {events.length}
+            </Field>
+            <Field label="Networks with configured budgets">
+              {configuredBudgetCount} / {renderedNetworks.length}
+            </Field>
+          </dl>
           {store && (
-            <dl className="mt-5 grid grid-cols-1 gap-4 border-t border-zinc-200 pt-4 sm:grid-cols-2 xl:grid-cols-4 dark:border-zinc-800">
-              <Field label="Substrate identifier">
-                {text(store.substrate || substrate)}
-              </Field>
-              <Field label="Event directory">
-                <EventValue value={store.events_directory} />
-              </Field>
-              <Field label="Environment directory">
+            <div className="mt-4 grid grid-cols-1 gap-4 border-t border-zinc-200 pt-4 sm:grid-cols-2 dark:border-zinc-800">
+              <Field label="Substrate directory">
                 <EventValue value={store.directory} />
               </Field>
-              <Field label="Persisted event records">
-                {events.length}
+              <Field label="Events directory">
+                <EventValue value={store.events_directory} />
               </Field>
-            </dl>
-          )}
-        </Panel>
-        <Panel
-          title="Budget Store"
-          description="Set the event-capacity limit and retained-memory ceiling for this substrate."
-        >
-          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <Metric
-              label="Maximum events"
-              value={configuredMaxEvents}
-              unit="events"
-              note="Configured admission ceiling."
-            />
-            <Metric
-              label="Minimum events"
-              value={configuredMinEvents}
-              unit="events"
-              note="Configured lower capacity target."
-            />
-            <Metric
-              label="Maximum retained mass"
-              value={
-                configuredMaxRetainedMass ??
-                maxRetainedMass
-              }
-              unit="bytes"
-              note="Configured u128 ceiling, or observed retained-mass total when no ceiling is returned."
-            />
-          </div>
-          <form
-            onSubmit={saveBudget}
-            className="mt-5 space-y-4 rounded-lg border border-zinc-200 p-3 sm:p-4 dark:border-zinc-800"
-          >
-            <div>
-              <h3 className="text-sm font-semibold">
-                Configure event capacity
-              </h3>
-              <p className="mt-1 text-sm leading-6 text-zinc-500 dark:text-zinc-400">
-                When the API has no configured retained-mass
-                ceiling, the field initializes from the exact
-                sum of event.heritage.state.retained_mass.
-                Existing API budget values take precedence.
-              </p>
             </div>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              <NumberInput
-                label="max_events"
-                value={maxEvents}
-                onChange={setMaxEvents}
-                min={1}
-                hint="Maximum number of admitted events."
-                disabled={savingBudget}
-              />
-              <NumberInput
-                label="min_events"
-                value={minEvents}
-                onChange={setMinEvents}
-                hint="Minimum configured event count."
-                disabled={savingBudget}
-              />
-              <NumberInput
-                label="max_retained_mass (bytes)"
-                value={maxRetainedMass}
-                onChange={setMaxRetainedMass}
-                type="text"
-                hint="Exact non-negative decimal integer, up to u128::MAX."
-                disabled={savingBudget}
-              />
-            </div>
-            <ActionButton
-              type="submit"
-              primary
-              disabled={
-                !substrate ||
-                savingBudget ||
-                loadingEvents
-              }
-            >
-              {savingBudget
-                ? "Applying budget…"
-                : "Set budget"}
-            </ActionButton>
-          </form>
-          {budgetResult && (
-            <details className="mt-4 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-              <summary className="cursor-pointer text-sm font-medium">
-                Budget response details
-              </summary>
-              <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-words text-xs">
-                {JSON.stringify(budgetResult, null, 2)}
-              </pre>
-            </details>
-          )}
-        </Panel>
-        <Panel
-          title="Event admission deposit"
-          description="Each requested event slot is estimated at $1.00 USD. The estimate updates automatically with the event count."
-        >
-          <form
-            onSubmit={submitDeposit}
-            className="mt-4 space-y-4"
-          >
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <NumberInput
-                label="Event slots to deposit"
-                value={depositEvents}
-                onChange={setDepositEvents}
-                min={1}
-                hint="1 event = $1.00 USD."
-                disabled={creatingDeposit}
-              />
-              <NumberInput
-                label="Retained-memory deposit (bytes)"
-                value={depositRetained}
-                onChange={setDepositRetained}
-                min={1}
-                hint="Requested retained-memory allowance."
-                disabled={creatingDeposit}
-              />
-            </div>
-            <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-950">
-              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                Estimated event admission cost
-              </p>
-              <p className="mt-2 break-words font-mono text-3xl font-semibold tracking-tight tabular-nums sm:text-4xl">
-                {depositAmountDisplay}
-                <span className="ml-2 text-sm font-medium text-zinc-500">
-                  USD
-                </span>
-              </p>
-              <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-sm text-zinc-600 dark:text-zinc-400">
-                <span>
-                  {parsedDepositEvents.toString()} event
-                  {parsedDepositEvents === 1n ? "" : "s"}
-                </span>
-                <span>× $1.00 per event</span>
-              </div>
-              <p className="mt-3 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                This is a price estimate only. Submitting an
-                event deposit does not process a USD payment.
-                Actual payment requires an integrated payment
-                provider and server-side confirmation.
-              </p>
-            </div>
-            <p className="rounded-lg border border-zinc-200 bg-white p-3 text-sm leading-6 text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
-              The Rust API must validate and persist deposits
-              atomically. Browser checks are advisory and
-              cannot prevent concurrent requests from exceeding
-              a budget.
-            </p>
-            <ActionButton
-              type="submit"
-              primary
-              disabled={
-                !substrate ||
-                creatingDeposit ||
-                loadingEvents ||
-                parsedDepositEvents < 1n
-              }
-            >
-              {creatingDeposit
-                ? "Submitting deposit…"
-                : `Request ${depositAmountDisplay} event deposit`}
-            </ActionButton>
-          </form>
-          {depositResult && (
-            <details className="mt-4 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-              <summary className="cursor-pointer text-sm font-medium">
-                Deposit response details
-              </summary>
-              <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-words text-xs">
-                {JSON.stringify(depositResult, null, 2)}
-              </pre>
-            </details>
           )}
         </Panel>
         {error && (
@@ -1044,26 +894,210 @@ export default function EventStorePage() {
           </div>
         )}
         <Panel
-          title="Capacity utilization"
-          description="Calculated from the currently loaded event-store snapshot."
+          title={`Network budgets · activation ${activationLabel}`}
+          description="Each card reads and writes only its own budget file. An unconfigured budget remains unconfigured until you save it."
+          action={
+            <span className="text-xs text-zinc-500 dark:text-zinc-400">
+              {renderedNetworks.length} registered networks
+            </span>
+          }
+        >
+          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {renderedNetworks.map((network) => {
+              const entry = budgetByNetwork.get(network.id);
+              const configured = Boolean(entry?.configured && entry?.budget);
+              const budget = entry?.budget ?? null;
+              const key = budgetKey(activation, network.id);
+              const draft = drafts[key] ?? draftFromBudget(budget);
+              const saving = Boolean(savingKeys[key]);
+              const expanded = Boolean(expandedNetworks[key]);
+              const savedMin = budgetValue(budget, "min_events");
+              const savedMax = budgetValue(budget, "max_events");
+              const savedMass = budgetValue(budget, "max_retained_mass");
+              return (
+                <section
+                  key={network.id}
+                  className="flex min-w-0 flex-col rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h3 className="break-words text-sm font-semibold">
+                        {network.name}
+                      </h3>
+                      <p className="mt-1 break-all font-mono text-xs text-zinc-500 dark:text-zinc-400">
+                        {network.id}
+                      </p>
+                    </div>
+                    <span
+                      className={`shrink-0 rounded-full px-2 py-1 text-xs font-semibold ${
+                        configured
+                          ? "bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200"
+                          : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                      }`}
+                    >
+                      {configured ? "Configured" : "Unconfigured"}
+                    </span>
+                  </div>
+                  <div className="mt-4 grid grid-cols-2 gap-3">
+                    <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                        Minimum events
+                      </p>
+                      <p className="mt-1 break-all font-mono text-lg font-semibold">
+                        {text(savedMin, "—")}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                        Maximum events
+                      </p>
+                      <p className="mt-1 break-all font-mono text-lg font-semibold">
+                        {text(savedMax, "—")}
+                      </p>
+                    </div>
+                    <div className="col-span-2 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                        Maximum retained mass
+                      </p>
+                      <p className="mt-1 break-all font-mono text-sm font-semibold">
+                        {text(savedMass, "Not configured")}
+                        {savedMass !== undefined && savedMass !== null && (
+                          <span className="ml-1 text-xs font-normal text-zinc-500">
+                            bytes
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-3 rounded-lg bg-zinc-50 p-3 text-xs leading-5 text-zinc-600 dark:bg-zinc-900 dark:text-zinc-400">
+                    <p>
+                      <span className="font-medium">Activation:</span>{" "}
+                      {activation}
+                    </p>
+                    <p className="mt-1 break-all">
+                      <span className="font-medium">Budget file:</span>{" "}
+                      {substrate
+                        ? `${text(store?.directory)}/event/${activation}/${network.id}/budget`
+                        : "—"}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExpandedNetworks((current) => ({
+                        ...current,
+                        [key]: !current[key],
+                      }))
+                    }
+                    className="mt-4 inline-flex min-h-10 w-full items-center justify-between rounded-lg border border-zinc-200 px-3 text-sm font-medium transition hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-900"
+                    aria-expanded={expanded}
+                  >
+                    <span>
+                      {expanded ? "Close budget editor" : "Edit network budget"}
+                    </span>
+                    <span aria-hidden="true">{expanded ? "−" : "+"}</span>
+                  </button>
+                  {expanded && (
+                    <form
+                      onSubmit={(event) => saveNetworkBudget(event, network)}
+                      className="mt-4 space-y-4 border-t border-zinc-200 pt-4 dark:border-zinc-800"
+                    >
+                      <NumberInput
+                        label="min_events"
+                        value={draft.min_events}
+                        onChange={(value) =>
+                          updateDraft(network.id, "min_events", value)
+                        }
+                        hint="Minimum event capacity."
+                        disabled={saving}
+                      />
+                      <NumberInput
+                        label="max_events"
+                        value={draft.max_events}
+                        onChange={(value) =>
+                          updateDraft(network.id, "max_events", value)
+                        }
+                        hint="Maximum admitted event count."
+                        disabled={saving}
+                      />
+                      <NumberInput
+                        label="max_retained_mass"
+                        value={draft.max_retained_mass}
+                        onChange={(value) =>
+                          updateDraft(network.id, "max_retained_mass", value)
+                        }
+                        textInput
+                        hint="Exact decimal integer, up to u128::MAX."
+                        disabled={saving}
+                      />
+                      {budgetErrors[key] && (
+                        <p
+                          role="alert"
+                          className="break-words rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
+                        >
+                          {budgetErrors[key]}
+                        </p>
+                      )}
+                      {budgetNotices[key] && (
+                        <p
+                          role="status"
+                          className="break-words rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200"
+                        >
+                          {budgetNotices[key]}
+                        </p>
+                      )}
+                      <ActionButton
+                        type="submit"
+                        primary
+                        disabled={!substrate || saving || loadingBudgets}
+                      >
+                        {saving ? "Saving…" : "Save this network budget"}
+                      </ActionButton>
+                      <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                        Saving affects only{" "}
+                        <span className="font-mono">
+                          {activation}/{network.id}/budget
+                        </span>
+                        . Other networks and activations are unchanged.
+                      </p>
+                    </form>
+                  )}
+                </section>
+              );
+            })}
+          </div>
+          {loadingBudgets && (
+            <p className="mt-4 text-sm text-zinc-500 dark:text-zinc-400">
+              Loading budgets for activation {activation}…
+            </p>
+          )}
+          {!loadingBudgets && renderedNetworks.length === 0 && (
+            <p className="mt-4 rounded-lg border border-zinc-200 p-4 text-sm text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+              No registered networks were returned. Check GET /networks.
+            </p>
+          )}
+        </Panel>
+        <Panel
+          title="Activation utilization"
+          description="These measurements describe the selected substrate's persisted event snapshot. They are not a per-network ledger unless the event records themselves identify a network."
         >
           <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
             <Metric
-              label="Persisted events"
+              label="Events in selected activation"
+              value={activationEvents.length}
+              unit="events"
+            />
+            <Metric
+              label="Retained mass in selected activation"
+              value={activationRetainedMass}
+              unit="bytes"
+              note="Exact sum of retained_mass values on matching activation records."
+            />
+            <Metric
+              label="Events in substrate"
               value={events.length}
               unit="events"
-            />
-            <Metric
-              label="Observed retained mass"
-              value={usedRetained}
-              unit="bytes"
-              note="Exact sum of persisted retained_mass values."
-            />
-            <Metric
-              label="Remaining event slots"
-              value={remainingEvents}
-              unit="events"
-              note="Configured maximum minus currently listed records."
+              note="Total records returned by the event-store endpoint."
             />
           </div>
         </Panel>
@@ -1072,8 +1106,7 @@ export default function EventStorePage() {
           description="Records returned by the selected substrate's event store."
           action={
             <span className="text-xs text-zinc-500 dark:text-zinc-400">
-              {events.length} record
-              {events.length === 1 ? "" : "s"}
+              {events.length} record{events.length === 1 ? "" : "s"}
             </span>
           }
           className="p-0"
@@ -1107,27 +1140,22 @@ export default function EventStorePage() {
               </thead>
               <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
                 {events.map((event, index) => {
-                  const heritageState =
-                    event?.heritage?.state;
+                  const heritageState = event?.heritage?.state;
                   const kind = text(event.kind, "event");
-                  const activation =
-                    event.activation ??
-                    heritageState?.activation_count;
+                  const eventActivation =
+                    event.activation ?? heritageState?.activation_count;
                   const dimension =
-                    event.dimension ??
-                    heritageState?.dimension;
+                    event.dimension ?? heritageState?.dimension;
                   const structuralValue =
-                    event.structural_value ??
-                    heritageState?.structural_value;
-                  const retainedMass =
-                    eventRetainedMass(event);
+                    event.structural_value ?? heritageState?.structural_value;
+                  const retainedMass = eventRetainedMass(event);
                   return (
                     <tr
-                      key={`${kind}-${text(activation)}-${text(dimension)}-${index}`}
+                      key={`${kind}-${text(eventActivation)}-${text(dimension)}-${index}`}
                       className="align-top transition hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
                     >
                       <td className="whitespace-nowrap px-4 py-3 font-mono">
-                        {text(activation)}
+                        {text(eventActivation)}
                       </td>
                       <td className="px-4 py-3">
                         <span
@@ -1168,7 +1196,7 @@ export default function EventStorePage() {
                         ? "Loading persisted events…"
                         : store
                           ? "No persisted transit or exile records were returned for this substrate."
-                          : "Load an event store to inspect persisted records."}
+                          : "Load a substrate to inspect persisted records."}
                     </td>
                   </tr>
                 )}
@@ -1185,9 +1213,7 @@ export default function EventStorePage() {
                         Runtime · API snapshot
                       </span>
                       <span className="mt-1 block break-all font-mono text-sm">
-                        <RuntimeValue
-                          runtime={store.runtime}
-                        />
+                        <RuntimeValue runtime={store.runtime} />
                       </span>
                     </th>
                   </tr>
@@ -1197,8 +1223,8 @@ export default function EventStorePage() {
           </div>
         </Panel>
         <footer className="border-t border-zinc-200 pt-4 text-xs leading-5 text-zinc-500 dark:border-zinc-800">
-          QTM Event Store · Substrate-scoped navigation ·
-          Event capacity · Retained-state diagnostics · Rust API
+          QTM Event Store · Universal substrate · Activation-scoped
+          budgets · Network-specific persistence · Rust API
         </footer>
       </div>
     </main>
