@@ -114,8 +114,8 @@ return null;
 
 try {
 const input = String(value);
-
 if (!/^\d+$/.test(input)) return null;
+
 const parsed = BigInt(input);
 if (parsed > BigInt(U128_MAX)) return null;
 return parsed;
@@ -129,8 +129,8 @@ return null;
 
 * Canonical retained mass comes from:
 * event.heritage.state.retained_mass
-* The flat retained_mass fallback preserves compatibility with the
-* existing event-store API response.
+* The flat retained_mass fallback preserves compatibility with
+* the existing event-store API response.
     */
     function eventRetainedMass(event) {
     return (
@@ -171,21 +171,33 @@ return (
 className={min-w-0 rounded-xl border border-zinc-200 bg-white p-4 sm:p-5 dark:border-zinc-800 dark:bg-zinc-900 ${className}}
 >
 {title}
-{description && (
-{description}
-)}
-{action}
-{children}
+      {description && (
+        <p className="mt-1 max-w-3xl text-sm leading-6 text-zinc-500 dark:text-zinc-400">
+          {description}
+        </p>
+      )}
+    </div>
+    {action}
+  </div>
+  {children}
+</section>
+
 );
 }
 
 function Field({ label, children, hint }) {
 return (
 {label}
-{children ?? “—”}
-{hint && (
-{hint}
-)}
+  <dd className="mt-1 break-words text-sm font-medium">
+    {children ?? "—"}
+  </dd>
+  {hint && (
+    <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+      {hint}
+    </p>
+  )}
+</div>
+
 );
 }
 
@@ -200,21 +212,25 @@ type = “number”,
 }) {
 return (
 {label}
-<input
-type={type}
-inputMode={type === “text” ? “numeric” : undefined}
-min={type === “number” ? min : undefined}
-step={type === “number” ? “1” : undefined}
-pattern={type === “text” ? “[0-9]*” : undefined}
-required
-disabled={disabled}
-value={value}
-onChange={(event) => onChange(event.target.value)}
-className=“h-11 w-full min-w-0 rounded-lg border border-zinc-300 bg-white px-3 font-mono text-base outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 disabled:opacity-50 sm:text-sm dark:border-zinc-700 dark:bg-zinc-950 dark:focus:ring-zinc-800”
-/>
-{hint && (
-{hint}
-)}
+  <input
+    type={type}
+    inputMode={type === "text" ? "numeric" : undefined}
+    min={type === "number" ? min : undefined}
+    step={type === "number" ? "1" : undefined}
+    pattern={type === "text" ? "[0-9]*" : undefined}
+    required
+    disabled={disabled}
+    value={value}
+    onChange={(event) => onChange(event.target.value)}
+    className="h-11 w-full min-w-0 rounded-lg border border-zinc-300 bg-white px-3 font-mono text-base outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 disabled:opacity-50 sm:text-sm dark:border-zinc-700 dark:bg-zinc-950 dark:focus:ring-zinc-800"
+  />
+  {hint && (
+    <span className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+      {hint}
+    </span>
+  )}
+</label>
+
 );
 }
 
@@ -224,13 +240,21 @@ value !== undefined && value !== null && value !== “”;
 
 return (
 {label}
-{text(value, “Not configured”)}
-{unit && available && (
-{unit}
-)}
-{note && (
-{note}
-)}
+  <p className="mt-2 break-words font-mono text-xl font-semibold tabular-nums">
+    {text(value, "Not configured")}
+    {unit && available && (
+      <span className="ml-1 text-xs font-normal text-zinc-500">
+        {unit}
+      </span>
+    )}
+  </p>
+  {note && (
+    <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+      {note}
+    </p>
+  )}
+</div>
+
 );
 }
 
@@ -312,7 +336,7 @@ store?.capacity ??
 store?.event_budget ??
 null;
 
-// Sum the canonical nested retained-mass values without Number conversion.
+// Exact retained-mass sum; no conversion through JavaScript Number.
 const usedRetainedBigInt = totalRetainedMass(events);
 const usedRetained = usedRetainedBigInt.toString();
 
@@ -326,16 +350,17 @@ budget,
 const maxEventNumber = Number(configuredMaxEvents);
 
 const remainingEvents =
-configuredMaxEvents !== undefined && Number.isSafeInteger(maxEventNumber)
+configuredMaxEvents !== undefined &&
+Number.isSafeInteger(maxEventNumber)
 ? Math.max(0, maxEventNumber - events.length)
 : undefined;
 
-// Live quote: one event slot costs exactly one USD.
-const parsedDepositEvents = /^\d+$/.test(depositEvents)
-? BigInt(depositEvents)
-: 0n;
+// Live estimate: each event slot costs $1 USD.
+const parsedDepositEvents =
+/^\d+$/.test(depositEvents) ? BigInt(depositEvents) : 0n;
 
-const depositAmountUSD = parsedDepositEvents * BigInt(USD_PER_EVENT);
+const depositAmountUSD =
+parsedDepositEvents * BigInt(USD_PER_EVENT);
 
 const depositAmountDisplay =
 depositAmountUSD <= BigInt(Number.MAX_SAFE_INTEGER)
@@ -407,8 +432,14 @@ try {
     result.capacity ??
     result.event_budget ??
     null;
-  const returnedMax = budgetValue(returnedBudget, "max_events");
-  const returnedMin = budgetValue(returnedBudget, "min_events");
+  const returnedMax = budgetValue(
+    returnedBudget,
+    "max_events",
+  );
+  const returnedMin = budgetValue(
+    returnedBudget,
+    "min_events",
+  );
   const returnedRetainedMass = budgetValue(
     returnedBudget,
     "max_retained_mass",
@@ -423,9 +454,6 @@ try {
    * An explicitly configured API budget takes precedence.
    * Otherwise, autofill from the exact sum of
    * event.heritage.state.retained_mass.
-   *
-   * The next snapshot refresh recalculates this fallback when no
-   * configured max_retained_mass is returned by the API.
    */
   if (returnedRetainedMass !== undefined) {
     setMaxRetainedMass(String(returnedRetainedMass));
@@ -500,24 +528,32 @@ setBudgetResult(null);
 setDepositResult(null);
 setError("");
 setNotice("");
-if (name) loadEvents(name);
+if (name) {
+  loadEvents(name);
+}
 
 }
 
 async function saveBudget(event) {
 event.preventDefault();
-setError(””);
-setNotice(””);
-setBudgetResult(null);
 
+setError("");
+setNotice("");
+setBudgetResult(null);
 if (!substrate) {
   setError("Select a substrate before configuring its budget.");
   return;
 }
 let payload;
 try {
-  const parsedMinEvents = integer(minEvents, "min_events");
-  const parsedMaxEvents = integer(maxEvents, "max_events");
+  const parsedMinEvents = integer(
+    minEvents,
+    "min_events",
+  );
+  const parsedMaxEvents = integer(
+    maxEvents,
+    "max_events",
+  );
   const parsedMaxRetainedMass = unsigned128(
     maxRetainedMass,
     "max_retained_mass",
@@ -529,7 +565,9 @@ try {
     throw new Error("min_events cannot exceed max_events.");
   }
   if (BigInt(parsedMaxRetainedMass) < 1n) {
-    throw new Error("max_retained_mass must be at least 1 byte.");
+    throw new Error(
+      "max_retained_mass must be at least 1 byte.",
+    );
   }
   payload = {
     min_events: parsedMinEvents,
@@ -538,7 +576,9 @@ try {
   };
 } catch (err) {
   setError(
-    err instanceof Error ? err.message : "Invalid budget values.",
+    err instanceof Error
+      ? err.message
+      : "Invalid budget values.",
   );
   return;
 }
@@ -560,7 +600,11 @@ try {
   await loadEvents(substrate);
 } catch (err) {
   setError(
-    `${err instanceof Error ? err.message : "Unable to configure the budget."} Verify that the deployed Rust API implements PUT /wallets/:name/events/budget and accepts max_retained_mass as a u128-compatible JSON integer.`,
+    `${
+      err instanceof Error
+        ? err.message
+        : "Unable to configure the budget."
+    } Verify that the deployed Rust API implements PUT /wallets/:name/events/budget and accepts max_retained_mass as a u128-compatible JSON integer.`,
   );
 } finally {
   setSavingBudget(false);
@@ -570,10 +614,10 @@ try {
 
 async function submitDeposit(event) {
 event.preventDefault();
-setError(””);
-setNotice(””);
-setDepositResult(null);
 
+setError("");
+setNotice("");
+setDepositResult(null);
 if (!substrate) {
   setError("Select a substrate before requesting an event deposit.");
   return;
@@ -605,7 +649,9 @@ try {
         "This request exceeds the configured maximum event capacity.",
       );
     }
-    const retainedCap = asBigInt(configuredMaxRetainedMass);
+    const retainedCap = asBigInt(
+      configuredMaxRetainedMass,
+    );
     if (
       retainedCap !== null &&
       usedRetainedBigInt + BigInt(payload.retained) > retainedCap
@@ -634,12 +680,18 @@ try {
   );
   setDepositResult(result);
   setNotice(
-    `The API accepted the request for ${payload.events} event slot(s). The displayed estimate is ${moneyUSD(payload.events * USD_PER_EVENT)} USD; this is not a confirmed payment.`,
+    `The API accepted the request for ${payload.events} event slot(s). The displayed estimate is ${moneyUSD(
+      payload.events * USD_PER_EVENT,
+    )} USD; this is not a confirmed payment.`,
   );
   await loadEvents(substrate);
 } catch (err) {
   setError(
-    `${err instanceof Error ? err.message : "Unable to submit the event deposit."} The Rust API must implement POST /wallets/:name/events/deposit. No deposit is confirmed by this page until the API returns success.`,
+    `${
+      err instanceof Error
+        ? err.message
+        : "Unable to submit the event deposit."
+    } The Rust API must implement POST /wallets/:name/events/deposit. No deposit is confirmed by this page until the API returns success.`,
   );
 } finally {
   setCreatingDeposit(false);
@@ -649,16 +701,17 @@ try {
 
 return (
 QuantPerm · QTM · Persistent substrate
-      <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-        Event Store
-      </h1>
-      <p className="max-w-4xl text-sm leading-6 text-zinc-600 dark:text-zinc-400">
-        Navigate persisted events within the selected substrate,
-        configure its event budget, request event capacity, and
-        inspect retained-state measurements. The store is scoped to
-        one substrate at a time. Budget enforcement and persistence
-        must be implemented by the Rust API.
-      </p>
+        <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">
+          Event Store
+        </h1>
+        <p className="mt-2 max-w-4xl text-sm leading-6 text-zinc-600 dark:text-zinc-400">
+          Navigate persisted events within the selected substrate,
+          configure its event budget, request event capacity, and
+          inspect retained-state measurements. The store is scoped
+          to one substrate at a time. Budget enforcement and
+          persistence must be implemented by the Rust API.
+        </p>
+      </div>
       <div className="flex flex-wrap gap-2 pt-1">
         <a
           href="/"
@@ -686,7 +739,7 @@ QuantPerm · QTM · Persistent substrate
         </ActionButton>
       }
     >
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+      <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
         <label className="flex min-w-0 flex-col gap-1.5">
           <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
             Persistent substrate
@@ -739,7 +792,7 @@ QuantPerm · QTM · Persistent substrate
       title="Budget Store"
       description="Set the event-capacity limit and retained-memory ceiling for this substrate."
     >
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
         <Metric
           label="Maximum events"
           value={configuredMaxEvents}
@@ -756,7 +809,7 @@ QuantPerm · QTM · Persistent substrate
           label="Maximum retained mass"
           value={configuredMaxRetainedMass ?? maxRetainedMass}
           unit="bytes"
-          note="Configured u128 ceiling, or the observed retained-mass total when no ceiling is returned."
+          note="Configured u128 ceiling, or observed retained-mass total when no ceiling is returned."
         />
       </div>
       <form
@@ -822,7 +875,10 @@ QuantPerm · QTM · Persistent substrate
       title="Event admission deposit"
       description="Each requested event slot is priced at $1.00 USD. The estimate updates automatically with the event count."
     >
-      <form onSubmit={submitDeposit} className="space-y-4">
+      <form
+        onSubmit={submitDeposit}
+        className="mt-4 space-y-4"
+      >
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <NumberInput
             label="Event slots to deposit"
@@ -845,7 +901,7 @@ QuantPerm · QTM · Persistent substrate
           <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
             Estimated event admission cost
           </p>
-          <p className="mt-2 font-mono text-3xl font-semibold tracking-tight tabular-nums sm:text-4xl">
+          <p className="mt-2 break-words font-mono text-3xl font-semibold tracking-tight tabular-nums sm:text-4xl">
             {depositAmountDisplay}
             <span className="ml-2 text-sm font-medium text-zinc-500">
               USD
@@ -917,7 +973,7 @@ QuantPerm · QTM · Persistent substrate
       title="Capacity utilization"
       description="Calculated from the currently loaded event-store snapshot."
     >
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
         <Metric
           label="Persisted events"
           value={events.length}
@@ -947,7 +1003,7 @@ QuantPerm · QTM · Persistent substrate
       }
       className="p-0"
     >
-      <div className="overflow-x-auto">
+      <div className="mt-4 overflow-x-auto">
         <table className="w-full min-w-[900px] border-collapse text-left text-sm">
           <thead className="bg-zinc-100 text-xs uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
             <tr>
@@ -1003,7 +1059,10 @@ QuantPerm · QTM · Persistent substrate
                     {text(event.record)}
                   </td>
                   <td className="break-all px-4 py-3 font-mono">
-                    {text(event.dimension ?? heritageState?.dimension)}
+                    {text(
+                      event.dimension ??
+                        heritageState?.dimension,
+                    )}
                   </td>
                   <td className="break-all px-4 py-3 font-mono">
                     {text(
