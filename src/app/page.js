@@ -2,17 +2,17 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-// The substrate runtime (qtm-api) is a thin HTTP layer over the machine's own
-// ~/.qp/substrates. The console therefore carries no host or port: requests
-// are same-origin paths (/wallets, /networks, ...), and whatever serves this
-// page (a reverse proxy, a Next.js rewrite, or the runtime itself) routes them
-// to the runtime on that machine. NEXT_PUBLIC_QTM_API_BASE is an optional
-// override for setups where the runtime lives on a different origin.
-const API_BASE = (process.env.NEXT_PUBLIC_QTM_API_BASE || "").replace(
-  /\/+$/,
-  ""
-);
-const API_LABEL = API_BASE || "this origin";
+// The substrate runtime (qtm-api) holds all substrate state; the browser keeps
+// none. The console calls the deployed Rust API by default, so a Vercel
+// deployment never sends /wallets or /networks to its own origin. Override
+// with NEXT_PUBLIC_QTM_API_BASE (for example http://127.0.0.1:8080 in
+// .env.local for local development).
+const API_BASE = (
+  process.env.NEXT_PUBLIC_QTM_API_BASE ||
+  "https://qtm-api.onrender.com"
+).replace(/\/+$/, "");
+
+const API_LABEL = API_BASE;
 
 // API_BASE is the HTTP transport only. Substrate state is selected by name
 // and resolved by the Rust API for every state-changing operation.
@@ -139,7 +139,7 @@ async function apiFetch(url, options) {
       cause instanceof Error && cause.message ? cause.message : "network error";
 
     throw new ApiError(
-      `Could not reach the QTM runtime at ${API_LABEL} (${reason}). Make sure qtm-api is running on the machine that holds ~/.qp/substrates and that this origin routes /wallets and /networks to it.`,
+      `Could not reach the QTM runtime at ${API_LABEL} (${reason}). Make sure qtm-api is running at that address, and that this page is allowed to call it (CORS / mixed content). Hosted instances can take about a minute to wake from sleep.`,
       { status: 0, url }
     );
   }
