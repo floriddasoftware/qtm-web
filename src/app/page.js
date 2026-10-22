@@ -2,11 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-// The substrate lives on the machine running qtm-api (~/.qp/substrates), so
-// the console talks to that local runtime rather than a hosted service.
-// Override at build time with NEXT_PUBLIC_QTM_API_BASE.
+// The deployed console (Vercel) must call the hosted QTM API: 127.0.0.1 there
+// would be the visitor's own device. For local development, set
+// NEXT_PUBLIC_QTM_API_BASE=http://127.0.0.1:8080 in .env.local.
+const DEFAULT_API_BASE = "https://qtm-api.onrender.com";
 const API_BASE = (
-  process.env.NEXT_PUBLIC_QTM_API_BASE || "http://127.0.0.1:8080"
+  process.env.NEXT_PUBLIC_QTM_API_BASE || DEFAULT_API_BASE
 ).replace(/\/+$/, "");
 
 // API_BASE is the HTTP transport only. Substrate state is selected by name
@@ -113,25 +114,69 @@ function hasContent(value) {
   );
 }
 
+class ApiError extends Error {
+  constructor(message, details = {}) {
+    super(message);
+    this.name = "ApiError";
+    this.status = details.status ?? 0;
+    this.statusText = details.statusText ?? "";
+    this.url = details.url ?? "";
+    this.body = details.body;
+  }
+}
+
+// fetch() rejects with a bare "Load failed" / "Failed to fetch" when the
+// request never reaches the API. Say where it tried and what to check.
+async function apiFetch(url, options) {
+  try {
+    return await fetch(url, options);
+  } catch (cause) {
+    const reason =
+      cause instanceof Error && cause.message ? cause.message : "network error";
+
+    throw new ApiError(
+      `Could not reach the QTM API at ${API_BASE} (${reason}). Make sure qtm-api is running and reachable from this device, and that this page is allowed to call it (CORS / mixed content).`,
+      { status: 0, url }
+    );
+  }
+}
+
 async function readResponse(response) {
   const bodyText = await response.text();
   let data = {};
+  let parsed = false;
 
   if (bodyText) {
     try {
       data = JSON.parse(bodyText);
+      parsed = true;
     } catch {
       data = { response_text: bodyText };
     }
   }
 
   if (!response.ok) {
-    const message = valueAt(data, ["error", "message", "detail"]);
+    const apiMessage = valueAt(data, ["error", "message", "detail"]);
 
-    throw new Error(
-      `${message ?? `Request failed (${response.status})`}${
-        response.statusText ? ` (${response.statusText})` : ""
-      }`
+    const reason =
+      typeof apiMessage === "string"
+        ? apiMessage
+        : apiMessage !== undefined
+          ? JSON.stringify(apiMessage)
+          : bodyText && !parsed
+            ? bodyText.slice(0, 300)
+            : "no error body returned";
+
+    throw new ApiError(
+      `${reason} [HTTP ${response.status}${
+        response.statusText ? ` ${response.statusText}` : ""
+      }${response.url ? ` · ${response.url}` : ""}]`,
+      {
+        status: response.status,
+        statusText: response.statusText,
+        url: response.url,
+        body: data,
+      }
     );
   }
 
@@ -751,7 +796,7 @@ export default function Home() {
     setListError("");
 
     try {
-      const response = await fetch(makeApiUrl("/wallets"), {
+      const response = await apiFetch(makeApiUrl("/wallets"), {
         method: "GET",
         cache: "no-store",
       });
@@ -808,7 +853,7 @@ export default function Home() {
     setNetworkError("");
 
     try {
-      const response = await fetch(makeApiUrl("/networks"), {
+      const response = await apiFetch(makeApiUrl("/networks"), {
         method: "GET",
         cache: "no-store",
       });
@@ -892,7 +937,7 @@ export default function Home() {
         `/wallets/${encodeURIComponent(substrate)}/events`
       );
 
-      const response = await fetch(url, {
+      const response = await apiFetch(url, {
         method: "GET",
         cache: "no-store",
       });
@@ -1010,6 +1055,12 @@ export default function Home() {
           throw new Error("Enter a substrate name.");
         }
 
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(substrateName)) {
+          throw new Error(
+            "Substrate name must be 1-64 ASCII letters, digits, hyphens, or underscores."
+          );
+        }
+
         let payload;
 
         if (seedSource === "bip39") {
@@ -1055,7 +1106,7 @@ export default function Home() {
           };
         }
 
-        const response = await fetch(makeApiUrl("/wallets"), {
+        const response = await apiFetch(makeApiUrl("/wallets"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -1069,7 +1120,9 @@ export default function Home() {
         setPhrase("");
         setPassphrase("");
 
-        await loadSubstrates(substrateName);
+        // Background discovery refresh: its failure shows in the substrate
+        // card and never affects the Create result or the form.
+        void loadSubstrates(substrateName);
         return;
       }
 
@@ -1090,14 +1143,14 @@ export default function Home() {
           `/wallets/${encodeURIComponent(selectedSubstrate)}`
         );
 
-        const directoryResponse = await fetch(walletUrl, {
+        const directoryResponse = await apiFetch(walletUrl, {
           method: "GET",
           cache: "no-store",
         });
 
         const directory = await readResponse(directoryResponse);
 
-        const receiveResponse = await fetch(`${walletUrl}/receive`, {
+        const receiveResponse = await apiFetch(`${walletUrl}/receive`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           cache: "no-store",
@@ -1148,7 +1201,7 @@ export default function Home() {
           `/wallets/${encodeURIComponent(selectedSubstrate)}/transit`
         );
 
-        const response = await fetch(transitUrl, {
+        const response = await apiFetch(transitUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           cache: "no-store",
@@ -1178,7 +1231,7 @@ export default function Home() {
           `/wallets/${encodeURIComponent(selectedSubstrate)}/exile`
         );
 
-        const response = await fetch(exileUrl, {
+        const response = await apiFetch(exileUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           cache: "no-store",
@@ -1335,10 +1388,11 @@ export default function Home() {
 
           {listError && (
             <p
-              role="alert"
-              className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
+              role="status"
+              className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
             >
-              Unable to load substrates: {listError}
+              Substrate list unavailable: {listError} You can still create a
+              substrate in the Create tab.
             </p>
           )}
 
@@ -1848,8 +1902,7 @@ export default function Home() {
               aria-busy={loading}
               disabled={
                 loading ||
-                listLoading ||
-                (substrateRequired && !selectedSubstrate) ||
+                (substrateRequired && (listLoading || !selectedSubstrate)) ||
                 (tab === "transit" &&
                   (networkLoading || !selectedNetwork))
               }
@@ -1887,7 +1940,7 @@ export default function Home() {
 
         <footer className="mt-5 border-t border-zinc-200 pt-4 text-xs leading-5 text-zinc-500 dark:border-zinc-800">
           QTM substrate console · Active substrate:{" "}
-          {selectedSubstrate || "none"}
+          {selectedSubstrate || "none"} · API: {API_BASE}
         </footer>
       </main>
     </div>
