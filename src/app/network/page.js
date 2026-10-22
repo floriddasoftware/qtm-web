@@ -2,30 +2,68 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+// Prefer NEXT_PUBLIC_QTM_API_BASE when set; otherwise fall back to the public
+// qtm-api deployment so a Vercel (or similar) host never routes /wallets to
+// itself. Substrate storage is owned by the server-side QP runtime;
+// substrate_root() is resolved by Rust, never by the browser.
 const API_BASE = (
-  process.env.NEXT_PUBLIC_QTM_API_BASE || "https://qtm-api.onrender.com"
+  process.env.NEXT_PUBLIC_QTM_API_BASE ||
+  "https://qtm-api-anwp.onrender.com"
 ).replace(/\/+$/, "");
 
-const REFRESH_INTERVAL = 8;
+const REFRESH_INTERVAL_MS = 8000;
 const SUBSTRATE_QUERY_KEY = "substrate";
 
 async function apiRequest(path, signal) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    method: "GET",
-    headers: { Accept: "application/json" },
-    cache: "no-store",
-    signal,
-  });
+  let response;
 
-  const body = await response.json().catch(() => null);
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      signal,
+    });
+  } catch (cause) {
+    if (cause?.name === "AbortError") throw cause;
 
-  if (!response.ok) {
+    const reason =
+      cause instanceof Error && cause.message ? cause.message : "network error";
+
     throw new Error(
-      body?.error || `Request failed with HTTP ${response.status}`,
+      `Could not reach the QTM runtime at ${API_BASE} (${reason}). Make sure qtm-api is running and that this page is allowed to call it (CORS / mixed content). Hosted instances can take about a minute to wake from sleep.`,
     );
   }
 
-  return body;
+  const bodyText = await response.text();
+  let body = null;
+
+  if (bodyText) {
+    try {
+      body = JSON.parse(bodyText);
+    } catch {
+      body = null;
+    }
+  }
+
+  if (!response.ok) {
+    const apiMessage =
+      (body && typeof body === "object" && (body.error || body.message || body.detail)) ||
+      null;
+
+    const reason =
+      typeof apiMessage === "string" && apiMessage.trim()
+        ? apiMessage
+        : bodyText
+          ? bodyText.slice(0, 300)
+          : `Request failed with HTTP ${response.status}`;
+
+    throw new Error(
+      `${reason}${response.status ? ` [HTTP ${response.status}]` : ""}`,
+    );
+  }
+
+  return body ?? {};
 }
 
 function normalizeEntries(result, keys = []) {
@@ -128,7 +166,16 @@ function ErrorMessage({ children }) {
 }
 
 function getEventKey(event, index) {
-  return `${event?.kind ?? "event"}-${event?.activation ?? index}-${event?.record ?? index}`;
+  const record = event?.record ?? event?.record_name ?? event?.id ?? "";
+  const kind = event?.kind ?? event?.type ?? "event";
+  const activation = event?.activation ?? "";
+  const dimension = event?.dimension ?? "";
+
+  if (record || activation || dimension) {
+    return `${kind}-${activation}-${dimension}-${record}`;
+  }
+
+  return `${kind}-${index}`;
 }
 
 function updateSubstrateQuery(name) {
@@ -187,27 +234,48 @@ export default function NetworkPage() {
   const substrateRequestRef = useRef(null);
   const diagnosticsRequestRef = useRef(null);
 
+  // Monotonic ids so a late response from an older request cannot overwrite
+  // newer state (refresh races and substrate switches).
+  const networkRequestIdRef = useRef(0);
+  const substrateRequestIdRef = useRef(0);
+  const diagnosticsRequestIdRef = useRef(0);
+
+  // Tracks the substrate that the latest diagnostics request was started for.
+  const diagnosticsSubstrateRef = useRef("");
+
   // Read the requested substrate once, so refreshes do not override it
   // with whichever substrate happens to be first in the API response.
-  const requestedSubstrateRef = useRef("");
+  const requestedSubstrateRef = useRef(null);
+  const selectedSubstrateRef = useRef("");
 
   useEffect(() => {
-    requestedSubstrateRef.current = getSubstrateQuery();
+    if (requestedSubstrateRef.current === null) {
+      requestedSubstrateRef.current = getSubstrateQuery();
+    }
   }, []);
+
+  useEffect(() => {
+    selectedSubstrateRef.current = selectedSubstrate;
+  }, [selectedSubstrate]);
 
   const loadNetworks = useCallback(async ({ silent = false } = {}) => {
     networkRequestRef.current?.abort();
 
+    const requestId = ++networkRequestIdRef.current;
     const controller = new AbortController();
     networkRequestRef.current = controller;
+
     if (!silent) setNetworkLoading(true);
     setNetworkError("");
+
     try {
       const result = await apiRequest("/networks", controller.signal);
+      if (requestId !== networkRequestIdRef.current) return;
+
       const entries = normalizeEntries(result, ["networks"]).filter((entry) =>
         getPathIdentifier(entry),
       );
-      if (controller.signal.aborted) return;
+
       setNetworks(entries);
       setLastNetworkCheck(new Date());
       setSelectedPath((current) => {
@@ -220,59 +288,78 @@ export default function NetworkPage() {
         return entries.length ? getPathIdentifier(entries[0]) : "";
       });
     } catch (error) {
-      if (error?.name !== "AbortError") {
-        setNetworkError(
-          error instanceof Error
-            ? error.message
-            : "Unable to load registered network paths.",
-        );
-      }
+      if (error?.name === "AbortError") return;
+      if (requestId !== networkRequestIdRef.current) return;
+
+      setNetworkError(
+        error instanceof Error
+          ? error.message
+          : "Unable to load registered network paths.",
+      );
     } finally {
-      if (!controller.signal.aborted) setNetworkLoading(false);
+      if (requestId === networkRequestIdRef.current) {
+        setNetworkLoading(false);
+      }
     }
   }, []);
 
   const loadSubstrates = useCallback(async ({ silent = false } = {}) => {
     substrateRequestRef.current?.abort();
 
+    const requestId = ++substrateRequestIdRef.current;
     const controller = new AbortController();
     substrateRequestRef.current = controller;
+
     if (!silent) setSubstrateLoading(true);
     setSubstrateListError("");
+
     try {
       const result = await apiRequest("/wallets", controller.signal);
+      if (requestId !== substrateRequestIdRef.current) return;
+
       const entries = normalizeEntries(result, ["substrates"]).filter((entry) =>
         getSubstrateName(entry),
       );
-      if (controller.signal.aborted) return;
+
       setSubstrates(entries);
       setLastSubstrateCheck(new Date());
-      const requested = requestedSubstrateRef.current;
+
+      const requested =
+        requestedSubstrateRef.current === null
+          ? ""
+          : requestedSubstrateRef.current;
+
       setSelectedSubstrate((current) => {
-        const preferred = requested || current;
-        if (
-          preferred &&
-          entries.some((entry) => getSubstrateName(entry) === preferred)
-        ) {
-          return preferred;
+        // Priority: explicit URL request (once), current selection, then first.
+        const candidates = [requested, current].filter(Boolean);
+        const wanted = candidates.find((candidate) =>
+          entries.some((entry) => getSubstrateName(entry) === candidate),
+        );
+
+        const next = wanted || (entries.length ? getSubstrateName(entries[0]) : "");
+
+        // Consume the URL request after the first successful resolve so later
+        // refreshes do not keep forcing a substrate that the user left.
+        if (requestedSubstrateRef.current !== null) {
+          requestedSubstrateRef.current = "";
         }
-        const fallback = entries.length ? getSubstrateName(entries[0]) : "";
-        // Keep the URL aligned with the actual substrate selected from
-        // the API, including when the requested substrate no longer exists.
-        requestedSubstrateRef.current = fallback;
-        updateSubstrateQuery(fallback);
-        return fallback;
+
+        updateSubstrateQuery(next);
+        return next;
       });
     } catch (error) {
-      if (error?.name !== "AbortError") {
-        setSubstrateListError(
-          error instanceof Error
-            ? error.message
-            : "Unable to load persisted substrates.",
-        );
-      }
+      if (error?.name === "AbortError") return;
+      if (requestId !== substrateRequestIdRef.current) return;
+
+      setSubstrateListError(
+        error instanceof Error
+          ? error.message
+          : "Unable to load persisted substrates.",
+      );
     } finally {
-      if (!controller.signal.aborted) setSubstrateLoading(false);
+      if (requestId === substrateRequestIdRef.current) {
+        setSubstrateLoading(false);
+      }
     }
   }, []);
 
@@ -280,6 +367,8 @@ export default function NetworkPage() {
     async (name, { silent = false } = {}) => {
       if (!name) {
         diagnosticsRequestRef.current?.abort();
+        diagnosticsRequestIdRef.current += 1;
+        diagnosticsSubstrateRef.current = "";
         setSubstrateState(null);
         setEventStore(null);
         setStateStatus("unknown");
@@ -291,8 +380,18 @@ export default function NetworkPage() {
       }
 
       diagnosticsRequestRef.current?.abort();
+
+      const requestId = ++diagnosticsRequestIdRef.current;
+      diagnosticsSubstrateRef.current = name;
+
       const controller = new AbortController();
       diagnosticsRequestRef.current = controller;
+
+      const isCurrent = () =>
+        requestId === diagnosticsRequestIdRef.current &&
+        diagnosticsSubstrateRef.current === name &&
+        selectedSubstrateRef.current === name;
+
       if (!silent) {
         setSubstrateState(null);
         setEventStore(null);
@@ -308,21 +407,28 @@ export default function NetworkPage() {
           status === "error" ? status : "checking",
         );
       }
+
       setDiagnosticsLoading(true);
+
       const encodedName = encodeURIComponent(name);
+
       // The API reads the selected substrate's persistent state and event
       // directory. No Render filesystem path is constructed by the UI.
       const [stateResult, eventsResult] = await Promise.allSettled([
         apiRequest(`/wallets/${encodedName}`, controller.signal),
         apiRequest(`/wallets/${encodedName}/events`, controller.signal),
       ]);
-      if (controller.signal.aborted) return;
+
+      if (!isCurrent()) return;
+
       if (stateResult.status === "fulfilled") {
         setSubstrateState(stateResult.value);
         setStateStatus("live");
         setStateError("");
       } else {
         const error = stateResult.reason;
+        if (error?.name === "AbortError") return;
+
         setSubstrateState(null);
         setStateStatus("error");
         setStateError(
@@ -331,6 +437,7 @@ export default function NetworkPage() {
             : "Persisted substrate state could not be read.",
         );
       }
+
       if (eventsResult.status === "fulfilled") {
         const result = eventsResult.value;
         setEventStore({
@@ -343,6 +450,8 @@ export default function NetworkPage() {
         setEventStoreError("");
       } else {
         const error = eventsResult.reason;
+        if (error?.name === "AbortError") return;
+
         setEventStore(null);
         setEventStoreStatus("error");
         setEventStoreError(
@@ -351,6 +460,7 @@ export default function NetworkPage() {
             : "Persistent event store could not be read.",
         );
       }
+
       setLastDiagnosticsCheck(new Date());
       setDiagnosticsLoading(false);
     },
@@ -365,21 +475,29 @@ export default function NetworkPage() {
       networkRequestRef.current?.abort();
       substrateRequestRef.current?.abort();
       diagnosticsRequestRef.current?.abort();
+      networkRequestIdRef.current += 1;
+      substrateRequestIdRef.current += 1;
+      diagnosticsRequestIdRef.current += 1;
     };
   }, [loadNetworks, loadSubstrates]);
 
   useEffect(() => {
     if (!selectedSubstrate) {
+      diagnosticsRequestRef.current?.abort();
+      diagnosticsRequestIdRef.current += 1;
+      diagnosticsSubstrateRef.current = "";
       setSubstrateState(null);
       setEventStore(null);
       setStateStatus("unknown");
       setEventStoreStatus("unknown");
       setStateError("");
       setEventStoreError("");
+      setDiagnosticsLoading(false);
       return undefined;
     }
 
     loadHostDiagnostics(selectedSubstrate);
+
     return () => {
       diagnosticsRequestRef.current?.abort();
     };
@@ -391,18 +509,13 @@ export default function NetworkPage() {
     const interval = setInterval(() => {
       loadNetworks({ silent: true });
       loadSubstrates({ silent: true });
-      if (selectedSubstrate) {
-        loadHostDiagnostics(selectedSubstrate, { silent: true });
+      if (selectedSubstrateRef.current) {
+        loadHostDiagnostics(selectedSubstrateRef.current, { silent: true });
       }
-    }, REFRESH_INTERVAL);
+    }, REFRESH_INTERVAL_MS);
+
     return () => clearInterval(interval);
-  }, [
-    autoRefresh,
-    selectedSubstrate,
-    loadNetworks,
-    loadSubstrates,
-    loadHostDiagnostics,
-  ]);
+  }, [autoRefresh, loadNetworks, loadSubstrates, loadHostDiagnostics]);
 
   const selectedNetwork =
     networks.find((entry) => getPathIdentifier(entry) === selectedPath) ??
@@ -415,17 +528,32 @@ export default function NetworkPage() {
     loadNetworks();
     loadSubstrates();
 
-    if (selectedSubstrate) {
-      loadHostDiagnostics(selectedSubstrate);
+    if (selectedSubstrateRef.current) {
+      loadHostDiagnostics(selectedSubstrateRef.current);
     }
   };
 
   const handleSubstrateChange = (event) => {
     const name = event.target.value;
 
-    requestedSubstrateRef.current = name;
+    // Invalidate any in-flight diagnostics for the previous substrate.
+    diagnosticsRequestRef.current?.abort();
+    diagnosticsRequestIdRef.current += 1;
+    diagnosticsSubstrateRef.current = name;
+
+    requestedSubstrateRef.current = "";
+    selectedSubstrateRef.current = name;
     setSelectedSubstrate(name);
     updateSubstrateQuery(name);
+
+    // Clear stale diagnostics immediately so a late response cannot paint
+    // the previous substrate under the new selection.
+    setSubstrateState(null);
+    setEventStore(null);
+    setStateError("");
+    setEventStoreError("");
+    setStateStatus(name ? "checking" : "unknown");
+    setEventStoreStatus(name ? "checking" : "unknown");
   };
 
   const handlePathSelect = (identifier) => {
@@ -514,7 +642,7 @@ export default function NetworkPage() {
               ? `Substrates checked ${lastSubstrateCheck.toLocaleTimeString()}`
               : "Waiting for substrate data"}
             {" · "}
-            {REFRESH_INTERVAL / 1000}s refresh interval
+            {REFRESH_INTERVAL_MS / 1000}s refresh interval
           </p>
         </header>
 
@@ -953,6 +1081,14 @@ export default function NetworkPage() {
               </div>
             </>
           )}
+          {!eventStore &&
+            eventStoreStatus === "error" &&
+            !diagnosticsLoading && (
+              <p className="px-3 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400 sm:px-4 sm:text-sm">
+                Event store is unavailable for this substrate. See the error
+                above.
+              </p>
+            )}
           {!eventStore &&
             eventStoreStatus !== "error" &&
             !diagnosticsLoading && (
