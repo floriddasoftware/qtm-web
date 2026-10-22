@@ -2,20 +2,17 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-// The substrate runtime (qtm-api) holds all substrate state; the browser keeps
-// none. The console calls the deployed Rust API by default, so a Vercel
-// deployment never sends /wallets or /networks to its own origin. Override
-// with NEXT_PUBLIC_QTM_API_BASE (for example http://127.0.0.1:8080 in
-// .env.local for local development).
-const API_BASE = (
+// Substrate state lives in the machine-local ~/.qp/substrates and is operated
+// on by the QP runtime. Inside a native shell (for example Tauri) the console
+// calls that runtime directly through IPC: no HTTP. A plain browser cannot
+// reach the local filesystem, so it uses an optional bridge to a runtime.
+// Prefer NEXT_PUBLIC_QTM_API_BASE when set; otherwise fall back to the public
+// qtm-api deployment so a Vercel (or similar) host never routes /wallets to
+// itself.
+const BRIDGE_BASE = (
   process.env.NEXT_PUBLIC_QTM_API_BASE ||
   "https://qtm-api.onrender.com"
 ).replace(/\/+$/, "");
-
-const API_LABEL = API_BASE;
-
-// API_BASE is the HTTP transport only. Substrate state is selected by name
-// and resolved by the Rust API for every state-changing operation.
 
 const TABS = [
   { id: "create", label: "Create" },
@@ -118,10 +115,10 @@ function hasContent(value) {
   );
 }
 
-class ApiError extends Error {
+class RuntimeError extends Error {
   constructor(message, details = {}) {
     super(message);
-    this.name = "ApiError";
+    this.name = "RuntimeError";
     this.status = details.status ?? 0;
     this.statusText = details.statusText ?? "";
     this.url = details.url ?? "";
@@ -129,23 +126,106 @@ class ApiError extends Error {
   }
 }
 
-// fetch() rejects with a bare "Load failed" / "Failed to fetch" when the
-// request never reaches the API. Say where it tried and what to check.
-async function apiFetch(url, options) {
+// Native IPC entry point, present only inside a native shell.
+function nativeInvoke() {
+  if (typeof window === "undefined") return null;
+
+  return (
+    window.__TAURI__?.core?.invoke ??
+    window.__TAURI_INTERNALS__?.invoke ??
+    null
+  );
+}
+
+const NATIVE_COMMANDS = {
+  listSubstrates: "qtm_list_substrates",
+  listNetworks: "qtm_list_networks",
+  createSubstrate: "qtm_create",
+  openSubstrate: "qtm_open",
+  receive: "qtm_receive",
+  transit: "qtm_transit",
+  exile: "qtm_exile",
+  listEvents: "qtm_events",
+};
+
+// Bridge adapter routes (browser only). Same operations, same payloads.
+const BRIDGE_ROUTES = {
+  listSubstrates: () => ["GET", "/wallets"],
+  listNetworks: () => ["GET", "/networks"],
+  createSubstrate: () => ["POST", "/wallets"],
+  openSubstrate: ({ name }) => ["GET", `/wallets/${encodeURIComponent(name)}`],
+  receive: ({ name }) => [
+    "POST",
+    `/wallets/${encodeURIComponent(name)}/receive`,
+  ],
+  transit: ({ name }) => [
+    "POST",
+    `/wallets/${encodeURIComponent(name)}/transit`,
+  ],
+  exile: ({ name }) => ["POST", `/wallets/${encodeURIComponent(name)}/exile`],
+  listEvents: ({ name }) => [
+    "GET",
+    `/wallets/${encodeURIComponent(name)}/events`,
+  ],
+};
+
+// The runtime's own error text, with no transport details added.
+function directMessage(cause) {
+  if (typeof cause === "string" && cause.trim()) return cause;
+
+  if (cause instanceof Error && cause.message) return cause.message;
+
+  if (isRecord(cause)) {
+    const message = valueAt(cause, ["error", "message", "detail"]);
+    if (typeof message === "string" && message.trim()) return message;
+  }
+
+  return "The QP runtime reported an error.";
+}
+
+async function callRuntime(operation, args = {}) {
+  const invoke = nativeInvoke();
+
+  if (invoke) {
+    try {
+      return await invoke(NATIVE_COMMANDS[operation], args);
+    } catch (cause) {
+      throw new RuntimeError(directMessage(cause));
+    }
+  }
+
+  if (!BRIDGE_BASE) {
+    throw new RuntimeError(
+      "The local QP runtime is not available in this browser. Open the console in the native QP app, or set NEXT_PUBLIC_QTM_API_BASE to a running qtm-api."
+    );
+  }
+
+  const [method, path] = BRIDGE_ROUTES[operation](args);
+  const url = `${BRIDGE_BASE}${path}`;
+
+  let response;
+
   try {
-    return await fetch(url, options);
+    response = await fetch(url, {
+      method,
+      headers:
+        method === "POST" ? { "Content-Type": "application/json" } : undefined,
+      body:
+        method === "POST" && args.request !== undefined
+          ? JSON.stringify(args.request)
+          : undefined,
+      cache: "no-store",
+    });
   } catch (cause) {
     const reason =
       cause instanceof Error && cause.message ? cause.message : "network error";
 
-    throw new ApiError(
-      `Could not reach the QTM runtime at ${API_LABEL} (${reason}). Make sure qtm-api is running at that address, and that this page is allowed to call it (CORS / mixed content). Hosted instances can take about a minute to wake from sleep.`,
+    throw new RuntimeError(
+      `Could not reach the QTM runtime at ${BRIDGE_BASE} (${reason}). Make sure qtm-api is running at that address, and that this page is allowed to call it (CORS / mixed content). Hosted instances can take about a minute to wake from sleep.`,
       { status: 0, url }
     );
   }
-}
 
-async function readResponse(response) {
   const bodyText = await response.text();
   let data = {};
   let parsed = false;
@@ -171,7 +251,7 @@ async function readResponse(response) {
             ? bodyText.slice(0, 300)
             : "no error body returned";
 
-    throw new ApiError(
+    throw new RuntimeError(
       `${reason} [HTTP ${response.status}${
         response.statusText ? ` ${response.statusText}` : ""
       }${response.url ? ` · ${response.url}` : ""}]`,
@@ -712,10 +792,6 @@ function ResultCard({ result, tab, network, path, substrate }) {
   );
 }
 
-function makeApiUrl(path) {
-  return `${API_BASE}${path}`;
-}
-
 export default function Home() {
   const [tab, setTab] = useState("create");
 
@@ -755,6 +831,17 @@ export default function Home() {
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [runtimeMode, setRuntimeMode] = useState("detecting…");
+
+  useEffect(() => {
+    setRuntimeMode(
+      nativeInvoke()
+        ? "local QP runtime (native)"
+        : BRIDGE_BASE
+          ? `bridge ${BRIDGE_BASE}`
+          : "not available in this browser"
+    );
+  }, []);
 
   // Substrate requested by links from /network and /eventstore (?substrate=).
   // Read once (null = not read yet) and consumed by the first resolved load.
@@ -800,12 +887,7 @@ export default function Home() {
     setListError("");
 
     try {
-      const response = await apiFetch(makeApiUrl("/wallets"), {
-        method: "GET",
-        cache: "no-store",
-      });
-
-      const data = await readResponse(response);
+      const data = await callRuntime("listSubstrates");
 
       if (!Array.isArray(data.substrates)) {
         throw new Error(
@@ -857,12 +939,7 @@ export default function Home() {
     setNetworkError("");
 
     try {
-      const response = await apiFetch(makeApiUrl("/networks"), {
-        method: "GET",
-        cache: "no-store",
-      });
-
-      const data = await readResponse(response);
+      const data = await callRuntime("listNetworks");
 
       if (!Array.isArray(data.networks)) {
         throw new Error(
@@ -937,16 +1014,7 @@ export default function Home() {
     setExileRecordsError("");
 
     try {
-      const url = makeApiUrl(
-        `/wallets/${encodeURIComponent(substrate)}/events`
-      );
-
-      const response = await apiFetch(url, {
-        method: "GET",
-        cache: "no-store",
-      });
-
-      const data = await readResponse(response);
+      const data = await callRuntime("listEvents", { name: substrate });
 
       if (!isCurrent()) return;
 
@@ -1110,13 +1178,9 @@ export default function Home() {
           };
         }
 
-        const response = await apiFetch(makeApiUrl("/wallets"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+        const data = await callRuntime("createSubstrate", {
+          request: payload,
         });
-
-        const data = await readResponse(response);
 
         setResult(data);
         setName("");
@@ -1143,28 +1207,14 @@ export default function Home() {
           throw new Error("Select a valid receive flow.");
         }
 
-        const walletUrl = makeApiUrl(
-          `/wallets/${encodeURIComponent(selectedSubstrate)}`
-        );
-
-        const directoryResponse = await apiFetch(walletUrl, {
-          method: "GET",
-          cache: "no-store",
+        const directory = await callRuntime("openSubstrate", {
+          name: selectedSubstrate,
         });
 
-        const directory = await readResponse(directoryResponse);
-
-        const receiveResponse = await apiFetch(`${walletUrl}/receive`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          cache: "no-store",
-          body: JSON.stringify({
-            amount,
-            flow: receiveFlow,
-          }),
+        const receive = await callRuntime("receive", {
+          name: selectedSubstrate,
+          request: { amount, flow: receiveFlow },
         });
-
-        const receive = await readResponse(receiveResponse);
 
         setResult({
           directory,
@@ -1201,22 +1251,14 @@ export default function Home() {
 
         // The selected substrate is the state context for this transition.
         // The network/path configure derivation; they do not replace the substrate.
-        const transitUrl = makeApiUrl(
-          `/wallets/${encodeURIComponent(selectedSubstrate)}/transit`
-        );
-
-        const response = await apiFetch(transitUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          cache: "no-store",
-          body: JSON.stringify({
+        const data = await callRuntime("transit", {
+          name: selectedSubstrate,
+          request: {
             network: selectedNetwork,
             path: path.trim() || undefined,
             ...numeric,
-          }),
+          },
         });
-
-        const data = await readResponse(response);
         setResult(data);
 
         await Promise.all([
@@ -1231,17 +1273,9 @@ export default function Home() {
         // The Rust API decides eligibility and derives the exile depth from
         // this substrate's persisted event history. The browser neither gates
         // the request nor submits a client-created depth snapshot.
-        const exileUrl = makeApiUrl(
-          `/wallets/${encodeURIComponent(selectedSubstrate)}/exile`
-        );
-
-        const response = await apiFetch(exileUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          cache: "no-store",
+        const data = await callRuntime("exile", {
+          name: selectedSubstrate,
         });
-
-        const data = await readResponse(response);
         setResult(data);
 
         await Promise.all([
@@ -1314,7 +1348,8 @@ export default function Home() {
 
           <p className="mt-1 text-xs leading-5 text-zinc-600 dark:text-zinc-400">
             Create and inspect persistent substrates, derive network paths,
-            and transition or exile state through the Rust API.
+            and transition or exile state through the local QP runtime or the
+            configured API bridge.
           </p>
         </header>
 
@@ -1944,7 +1979,7 @@ export default function Home() {
 
         <footer className="mt-5 border-t border-zinc-200 pt-4 text-xs leading-5 text-zinc-500 dark:border-zinc-800">
           QTM substrate console · Active substrate:{" "}
-          {selectedSubstrate || "none"} · Runtime: {API_LABEL}
+          {selectedSubstrate || "none"} · Runtime: {runtimeMode}
         </footer>
       </main>
     </div>
