@@ -2,9 +2,21 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-const API_BASE = "https://qtm-api.onrender.com";
-const REFRESH_INTERVAL = 5000;
+// Substrate is the host. All events and payloads are scoped under it.
+// Prefer NEXT_PUBLIC_QTM_API_BASE; fall back to the public qtm-api deployment.
+const API_BASE = (
+  process.env.NEXT_PUBLIC_QTM_API_BASE ||
+  "https://qtm-api-anwp.onrender.com"
+).replace(/\/+$/, "");
+
+const REFRESH_INTERVAL_MS = 5000;
 const U128_MAX = "340282366920938463463374607431768211455";
+
+// Direction values returned by qtm-api list_event_payloads (record prefix enum).
+const PAYLOAD_DIRECTIONS = {
+  transit_inputs: "transit_inputs",
+  exile_outputs: "exile_outputs",
+};
 
 const INPUT_CLASS =
   "h-11 w-full min-w-0 rounded-xl border border-zinc-200 bg-white px-3 text-sm outline-none transition focus:border-zinc-500 focus:ring-4 focus:ring-zinc-500/10 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950";
@@ -13,15 +25,26 @@ const BUTTON_CLASS =
   "inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium transition hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800";
 
 async function apiRequest(path, options = {}) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    cache: "no-store",
-    headers: {
-      Accept: "application/json",
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      ...options.headers,
-    },
-  });
+  let response;
+
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      cache: "no-store",
+      headers: {
+        Accept: "application/json",
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...options.headers,
+      },
+    });
+  } catch (cause) {
+    if (cause?.name === "AbortError") throw cause;
+    const reason =
+      cause instanceof Error && cause.message ? cause.message : "network error";
+    throw new Error(
+      `Could not reach the QTM runtime at ${API_BASE} (${reason}).`,
+    );
+  }
 
   const raw = await response.text();
   let body = null;
@@ -36,13 +59,12 @@ async function apiRequest(path, options = {}) {
 
   if (!response.ok) {
     const detail =
-      body?.error ||
-      body?.message ||
-      body?.detail ||
-      body?.response_text;
+      body?.error || body?.message || body?.detail || body?.response_text;
 
     throw new Error(
-      detail ? String(detail) : `Request failed with HTTP ${response.status}.`
+      detail
+        ? String(detail)
+        : `Request failed with HTTP ${response.status}.`,
     );
   }
 
@@ -167,7 +189,7 @@ function draftFromBudget(budget) {
     min_events: String(budgetValue(budget, "min_events") ?? "0"),
     max_events: String(budgetValue(budget, "max_events") ?? "1024"),
     max_retained_mass: String(
-      budgetValue(budget, "max_retained_mass") ?? "1048576"
+      budgetValue(budget, "max_retained_mass") ?? "1048576",
     ),
   };
 }
@@ -181,6 +203,7 @@ function normalizeNetwork(network) {
     coin: network.coin,
     purpose: network.purpose,
     path: network.path,
+    registered: network.registered,
   };
 }
 
@@ -196,94 +219,75 @@ function normalizeNetworkBudgets(result) {
 }
 
 /*
- * Payload identity is the full tuple:
- * activation + network ID + persisted path + depth identifier.
- *
- * Direction is taken from returned metadata or the actual persisted path.
- * Unknown records are not silently relabelled as transit or exile.
+ * Direction comes from the API render response (record prefix enum):
+ *   event_*  → transit_inputs
+ *   otherwise → exile_outputs
+ * Client heuristics only fill gaps; unknown values stay unclassified.
  */
-function classifyPayload(entry) {
-  const metadata = [
-    entry?.direction,
-    entry?.kind,
-    entry?.event_type,
-    entry?.record_type,
-    entry?.source,
-    entry?.category,
-  ]
-    .filter((value) => typeof value === "string")
-    .join(" ")
-    .toLowerCase();
+function normalizeDirection(value, record) {
+  const raw = String(value ?? "").toLowerCase().trim();
 
-  const path = String(
-    entry?.path ?? entry?.payload_path ?? entry?.record ?? ""
-  ).toLowerCase();
-
-  const combined = `${metadata} ${path}`;
-
-  if (
-    /exile_outputs|exile[-_/ ]?output|exile/.test(combined)
-  ) {
-    return "exile_outputs";
+  if (raw === PAYLOAD_DIRECTIONS.transit_inputs || raw === "transit") {
+    return PAYLOAD_DIRECTIONS.transit_inputs;
   }
 
-  if (
-    /transit_inputs|transit[-_/ ]?input|event_\d|transit/.test(combined)
-  ) {
-    return "transit_inputs";
+  if (raw === PAYLOAD_DIRECTIONS.exile_outputs || raw === "exile") {
+    return PAYLOAD_DIRECTIONS.exile_outputs;
   }
+
+  const rec = String(record ?? "");
+  if (rec.startsWith("event_")) return PAYLOAD_DIRECTIONS.transit_inputs;
+  if (rec) return PAYLOAD_DIRECTIONS.exile_outputs;
 
   return "unclassified";
 }
 
-function normalizePayloadBudgets(result) {
-  const rows = Array.isArray(result?.payload_budgets)
-    ? result.payload_budgets
-    : Array.isArray(result?.payloads)
-      ? result.payloads
-      : [];
+function normalizePayloadEntry(entry, fallbackRecord = "") {
+  const network = normalizeNetwork(entry?.network);
+  const path = entry?.path ?? entry?.payload_path;
+  const depth =
+    entry?.depth_identifier ?? entry?.depthIdentifier ?? entry?.depth_id;
+  const record = entry?.record ?? fallbackRecord;
 
-  return rows
-    .map((entry) => {
-      const network = normalizeNetwork(entry?.network);
-      const path = entry?.path ?? entry?.payload_path;
-      const depth =
-        entry?.depth_identifier ??
-        entry?.depthIdentifier ??
-        entry?.depth_id;
+  if (
+    !network ||
+    typeof path !== "string" ||
+    path.length === 0 ||
+    depth === undefined ||
+    depth === null ||
+    String(depth).length === 0
+  ) {
+    return null;
+  }
 
-      if (
-        !network ||
-        typeof path !== "string" ||
-        path.length === 0 ||
-        depth === undefined ||
-        depth === null ||
-        String(depth).length === 0
-      ) {
-        return null;
-      }
+  const objects = Array.isArray(entry?.objects) ? entry.objects : [];
 
-      return {
-        ...entry,
-        network,
-        path,
-        depth_identifier: String(depth),
-        direction: classifyPayload({ ...entry, path }),
-        configured: Boolean(entry.configured && entry.budget),
-        budget: entry.budget ?? null,
-      };
-    })
-    .filter(Boolean);
+  return {
+    ...entry,
+    record: String(record),
+    network,
+    path,
+    depth_identifier: String(depth),
+    direction: normalizeDirection(entry?.direction, record),
+    objects,
+    // Extended fields beyond derivation path (render API / depth objects).
+    object_count: objects.length,
+    retained_object_mass: objects
+      .map((obj) => toU128OrNull(obj?.mass))
+      .filter((v) => v !== null)
+      .reduce((a, b) => a + b, 0n)
+      .toString(),
+  };
 }
 
 function networkKey(activation, networkId) {
   return `network:${activation}:${networkId}`;
 }
 
-function payloadKey(activation, networkId, path, depth) {
+function payloadRowKey(record, networkId, path, depth) {
   return JSON.stringify([
     "payload",
-    String(activation),
+    String(record),
     String(networkId),
     String(path),
     String(depth),
@@ -355,6 +359,21 @@ function StatusPill({ configured }) {
   );
 }
 
+function DirectionPill({ direction }) {
+  const label =
+    direction === PAYLOAD_DIRECTIONS.transit_inputs
+      ? "transit_inputs"
+      : direction === PAYLOAD_DIRECTIONS.exile_outputs
+        ? "exile_outputs"
+        : "unclassified";
+
+  return (
+    <span className="inline-flex rounded-full bg-zinc-100 px-2 py-1 text-[10px] font-semibold dark:bg-zinc-800">
+      {label}
+    </span>
+  );
+}
+
 function BudgetSummary({ budget }) {
   return (
     <dl className="mt-4 grid grid-cols-1 gap-3 rounded-xl border border-zinc-100 bg-zinc-50/80 p-3 sm:grid-cols-3 sm:gap-2 dark:border-zinc-800 dark:bg-zinc-950/70">
@@ -367,10 +386,7 @@ function BudgetSummary({ budget }) {
       </Field>
 
       <Field label="Max retained mass">
-        {display(
-          budgetValue(budget, "max_retained_mass"),
-          "Not configured"
-        )}
+        {display(budgetValue(budget, "max_retained_mass"), "Not configured")}
       </Field>
     </dl>
   );
@@ -403,9 +419,7 @@ function BudgetFields({ draft, update, disabled, prefix }) {
           key={`${prefix}-${field.key}`}
           className={`block min-w-0 ${field.exact ? "sm:col-span-2" : ""}`}
         >
-          <span className="mb-1.5 block text-sm font-medium">
-            {field.label}
-          </span>
+          <span className="mb-1.5 block text-sm font-medium">{field.label}</span>
 
           <input
             required
@@ -472,31 +486,9 @@ function Notice({ children, type = "error" }) {
   );
 }
 
-function PayloadCard({
-  entry,
-  activation,
-  store,
-  drafts,
-  savingKeys,
-  expandedPayloads,
-  budgetErrors,
-  budgetNotices,
-  loadingPayloadBudgets,
-  updateDraft,
-  savePayloadBudget,
-  setExpandedPayloads,
-}) {
-  const key = payloadKey(
-    activation,
-    entry.network.id,
-    entry.path,
-    entry.depth_identifier
-  );
-
-  const configured = Boolean(entry.configured && entry.budget);
-  const draft = drafts[key] ?? draftFromBudget(entry.budget);
-  const saving = Boolean(savingKeys[key]);
-  const expanded = Boolean(expandedPayloads[key]);
+function PayloadCard({ entry }) {
+  const [open, setOpen] = useState(false);
+  const objects = Array.isArray(entry.objects) ? entry.objects : [];
 
   return (
     <article className="min-w-0 rounded-xl border border-zinc-200 bg-white p-3 sm:p-4 dark:border-zinc-800 dark:bg-zinc-900">
@@ -508,86 +500,63 @@ function PayloadCard({
           </p>
         </div>
 
-        <StatusPill configured={configured} />
+        <div className="flex flex-wrap items-center gap-2">
+          <DirectionPill direction={entry.direction} />
+          {entry.network.registered === false && (
+            <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+              Unregistered network
+            </span>
+          )}
+        </div>
       </div>
 
-      <dl className="mt-4 grid grid-cols-1 gap-3">
-        <Field label="Persisted payload path">{entry.path}</Field>
+      <dl className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Field label="Event record">{entry.record}</Field>
         <Field label="Depth identifier">{entry.depth_identifier}</Field>
-        <Field label="Activation">{activation}</Field>
+        <Field label="Persisted payload path">{entry.path}</Field>
+        <Field label="Depth objects">{entry.object_count}</Field>
+        <Field label="Object mass sum">{entry.retained_object_mass} bytes</Field>
+        <Field label="Network name">{entry.network.name}</Field>
       </dl>
-
-      <BudgetSummary budget={entry.budget} />
 
       <button
         type="button"
         className={`${BUTTON_CLASS} mt-3 w-full justify-between`}
-        aria-expanded={expanded}
-        onClick={() =>
-          setExpandedPayloads((current) => ({
-            ...current,
-            [key]: !current[key],
-          }))
-        }
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
       >
-        {expanded ? "Close payload editor" : "Edit payload budget"}
-        <span aria-hidden="true">{expanded ? "−" : "+"}</span>
+        {open ? "Hide depth objects" : "Show depth objects"}
+        <span aria-hidden="true">{open ? "−" : "+"}</span>
       </button>
 
-      {expanded && (
-        <form
-          className="mt-4 space-y-4 border-t border-zinc-200 pt-4 dark:border-zinc-800"
-          onSubmit={(event) => savePayloadBudget(event, entry)}
-        >
-          <BudgetFields
-            prefix={key}
-            draft={draft}
-            disabled={saving}
-            update={(field, value) => updateDraft(key, field, value)}
-          />
-
-          {budgetErrors[key] && (
-            <Notice>{budgetErrors[key]}</Notice>
+      {open && (
+        <div className="mt-3 space-y-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+          {objects.length === 0 ? (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              No depth objects were returned for this payload path.
+            </p>
+          ) : (
+            objects.map((obj, index) => (
+              <div
+                key={`${entry.depth_identifier}-${obj?.identifier ?? index}`}
+                className="rounded-lg border border-zinc-100 bg-zinc-50 p-3 text-xs dark:border-zinc-800 dark:bg-zinc-950"
+              >
+                <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  <Field label="Position">{display(obj?.position)}</Field>
+                  <Field label="Identifier">{display(obj?.identifier)}</Field>
+                  <Field label="Mass">{display(obj?.mass)}</Field>
+                  <Field label="From">{display(obj?.from)}</Field>
+                </dl>
+              </div>
+            ))
           )}
-
-          {budgetNotices[key] && (
-            <Notice type="success">{budgetNotices[key]}</Notice>
-          )}
-
-          <button
-            type="submit"
-            className={`${BUTTON_CLASS} w-full bg-zinc-950 text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-950`}
-            disabled={!store?.substrate || saving || loadingPayloadBudgets}
-          >
-            {saving ? "Saving…" : "Save payload budget"}
-          </button>
-
-          <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-            Scoped to activation, network ID, actual payload path, and depth
-            identifier.
-          </p>
-        </form>
+        </div>
       )}
     </article>
   );
 }
 
-function DirectionSection({
-  title,
-  description,
-  entries,
-  activation,
-  store,
-  drafts,
-  savingKeys,
-  expandedPayloads,
-  budgetErrors,
-  budgetNotices,
-  loadingPayloadBudgets,
-  updateDraft,
-  savePayloadBudget,
-  setExpandedPayloads,
-}) {
+function DirectionSection({ title, description, entries }) {
   const [open, setOpen] = useState(true);
 
   return (
@@ -619,32 +588,20 @@ function DirectionSection({
         <div className="border-t border-zinc-200 p-3 dark:border-zinc-800 sm:p-4">
           {entries.length === 0 ? (
             <p className="rounded-lg bg-zinc-50 p-3 text-xs leading-5 text-zinc-500 dark:bg-zinc-950 dark:text-zinc-400">
-              No payload budget records for this direction were returned by
-              the API. This does not prove that the server-side directory is
-              empty.
+              No payload records for this direction were returned by the render
+              API for the loaded event records.
             </p>
           ) : (
             <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
               {entries.map((entry) => (
                 <PayloadCard
-                  key={payloadKey(
-                    activation,
+                  key={payloadRowKey(
+                    entry.record,
                     entry.network.id,
                     entry.path,
-                    entry.depth_identifier
+                    entry.depth_identifier,
                   )}
                   entry={entry}
-                  activation={activation}
-                  store={store}
-                  drafts={drafts}
-                  savingKeys={savingKeys}
-                  expandedPayloads={expandedPayloads}
-                  budgetErrors={budgetErrors}
-                  budgetNotices={budgetNotices}
-                  loadingPayloadBudgets={loadingPayloadBudgets}
-                  updateDraft={updateDraft}
-                  savePayloadBudget={savePayloadBudget}
-                  setExpandedPayloads={setExpandedPayloads}
                 />
               ))}
             </div>
@@ -662,18 +619,17 @@ export default function EventStorePage() {
   const [activation, setActivation] = useState("0");
   const [activationOptions, setActivationOptions] = useState(["0"]);
   const [store, setStore] = useState(null);
+  const [payloads, setPayloads] = useState([]);
 
   const [networkBudgets, setNetworkBudgets] = useState([]);
-  const [payloadBudgets, setPayloadBudgets] = useState([]);
   const [drafts, setDrafts] = useState({});
   const [savingKeys, setSavingKeys] = useState({});
   const [expandedNetworks, setExpandedNetworks] = useState({});
-  const [expandedPayloads, setExpandedPayloads] = useState({});
 
   const [loadingList, setLoadingList] = useState(true);
   const [loadingEvents, setLoadingEvents] = useState(false);
+  const [loadingPayloads, setLoadingPayloads] = useState(false);
   const [loadingBudgets, setLoadingBudgets] = useState(false);
-  const [loadingPayloadBudgets, setLoadingPayloadBudgets] = useState(false);
 
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -683,17 +639,13 @@ export default function EventStorePage() {
   const selectedSubstrateRef = useRef("");
   const selectedActivationRef = useRef("0");
   const eventRequestRef = useRef(0);
-  const budgetRequestRef = useRef(0);
   const payloadRequestRef = useRef(0);
+  const budgetRequestRef = useRef(0);
 
   const events = Array.isArray(store?.events) ? store.events : [];
 
   const configuredNetworkCount = networkBudgets.filter(
-    (entry) => entry.configured && entry.budget
-  ).length;
-
-  const configuredPayloadCount = payloadBudgets.filter(
-    (entry) => entry.configured && entry.budget
+    (entry) => entry.configured && entry.budget,
   ).length;
 
   const loadNetworks = useCallback(async () => {
@@ -714,23 +666,21 @@ export default function EventStorePage() {
       const rows = Array.isArray(result.substrates)
         ? result.substrates.filter(
             (item) =>
-              item &&
-              typeof item.name === "string" &&
-              item.name.length > 0
+              item && typeof item.name === "string" && item.name.length > 0,
           )
         : [];
 
       setSubstrates(rows);
 
       const requested = new URLSearchParams(window.location.search).get(
-        "substrate"
+        "substrate",
       );
 
       const chosen =
         rows.find((item) => item.name === requested)?.name ??
         (rows.some((item) => item.name === selectedSubstrateRef.current)
           ? selectedSubstrateRef.current
-          : rows[0]?.name ?? "");
+          : (rows[0]?.name ?? ""));
 
       selectedSubstrateRef.current = chosen;
       setSubstrate(chosen);
@@ -748,7 +698,7 @@ export default function EventStorePage() {
       setError(
         `Unable to load substrates: ${
           err instanceof Error ? err.message : "unknown API error"
-        }`
+        }`,
       );
 
       return "";
@@ -757,92 +707,166 @@ export default function EventStorePage() {
     }
   }, []);
 
-  const loadEvents = useCallback(async (name, options = {}) => {
-    if (!name) {
-      setStore(null);
-      return null;
+  const loadPayloadsForEvents = useCallback(async (name, eventRows) => {
+    if (!name || !Array.isArray(eventRows) || eventRows.length === 0) {
+      setPayloads([]);
+      return [];
     }
 
-    const requestId = ++eventRequestRef.current;
-
-    if (!options.silent) {
-      setLoadingEvents(true);
-      setError("");
-    }
+    const requestId = ++payloadRequestRef.current;
+    setLoadingPayloads(true);
 
     try {
-      const result = await apiRequest(
-        `/wallets/${encodeURIComponent(name)}/events`
+      const records = [
+        ...new Set(
+          eventRows
+            .map((event) => event?.record)
+            .filter((record) => typeof record === "string" && record.length > 0),
+        ),
+      ];
+
+      const results = await Promise.allSettled(
+        records.map((record) =>
+          apiRequest(
+            `/wallets/${encodeURIComponent(name)}/events/${encodeURIComponent(record)}/payloads`,
+          ),
+        ),
       );
 
       if (
-        requestId !== eventRequestRef.current ||
+        requestId !== payloadRequestRef.current ||
         selectedSubstrateRef.current !== name
       ) {
         return null;
       }
 
-      const nextEvents = Array.isArray(result.events) ? result.events : [];
+      const collected = [];
 
-      setStore({ ...result, events: nextEvents });
+      results.forEach((result, index) => {
+        if (result.status !== "fulfilled") return;
 
-      const choices = new Set(["0"]);
+        const body = result.value;
+        const rows = Array.isArray(body?.payloads) ? body.payloads : [];
+        const fallbackRecord = records[index];
 
-      nextEvents.forEach((event) => {
-        const value = activationFromEvent(event);
-        if (value !== null) choices.add(value);
+        rows.forEach((entry) => {
+          const normalized = normalizePayloadEntry(entry, fallbackRecord);
+          if (normalized) collected.push(normalized);
+        });
       });
 
-      const currentSubstrate = substrates.find(
-        (entry) => entry.name === name
-      );
-
-      const reported = currentSubstrate?.activations;
-
-      if (
-        reported !== undefined &&
-        reported !== null &&
-        /^\d+$/.test(String(reported))
-      ) {
-        choices.add(String(reported));
-      }
-
-      const sorted = [...choices].sort((a, b) => {
-        const x = BigInt(a);
-        const y = BigInt(b);
-        return x < y ? -1 : x > y ? 1 : 0;
-      });
-
-      setActivationOptions(sorted);
-
-      const selected = choices.has(selectedActivationRef.current)
-        ? selectedActivationRef.current
-        : sorted[sorted.length - 1] ?? "0";
-
-      selectedActivationRef.current = selected;
-      setActivation(selected);
-
-      return result;
+      setPayloads(collected);
+      return collected;
     } catch (err) {
       if (
-        requestId === eventRequestRef.current &&
+        requestId === payloadRequestRef.current &&
         selectedSubstrateRef.current === name
       ) {
-        setStore(null);
+        setPayloads([]);
         setError(
-          `Unable to load events for "${name}": ${
+          `Unable to load payload render data: ${
             err instanceof Error ? err.message : "unknown API error"
-          }`
+          }`,
         );
       }
-
       return null;
     } finally {
-      if (requestId === eventRequestRef.current) {
-        setLoadingEvents(false);
+      if (requestId === payloadRequestRef.current) {
+        setLoadingPayloads(false);
       }
     }
-  }, [substrates]);
+  }, []);
+
+  const loadEvents = useCallback(
+    async (name, options = {}) => {
+      if (!name) {
+        setStore(null);
+        setPayloads([]);
+        return null;
+      }
+
+      const requestId = ++eventRequestRef.current;
+
+      if (!options.silent) {
+        setLoadingEvents(true);
+        setError("");
+      }
+
+      try {
+        const result = await apiRequest(
+          `/wallets/${encodeURIComponent(name)}/events`,
+        );
+
+        if (
+          requestId !== eventRequestRef.current ||
+          selectedSubstrateRef.current !== name
+        ) {
+          return null;
+        }
+
+        const nextEvents = Array.isArray(result.events) ? result.events : [];
+        setStore({ ...result, events: nextEvents });
+
+        const choices = new Set(["0"]);
+
+        nextEvents.forEach((event) => {
+          const value = activationFromEvent(event);
+          if (value !== null) choices.add(value);
+        });
+
+        const currentSubstrate = substrates.find((entry) => entry.name === name);
+        const reported = currentSubstrate?.activations;
+
+        if (
+          reported !== undefined &&
+          reported !== null &&
+          /^\d+$/.test(String(reported))
+        ) {
+          choices.add(String(reported));
+        }
+
+        const sorted = [...choices].sort((a, b) => {
+          const x = BigInt(a);
+          const y = BigInt(b);
+          return x < y ? -1 : x > y ? 1 : 0;
+        });
+
+        setActivationOptions(sorted);
+
+        const selected = choices.has(selectedActivationRef.current)
+          ? selectedActivationRef.current
+          : (sorted[sorted.length - 1] ?? "0");
+
+        selectedActivationRef.current = selected;
+        setActivation(selected);
+
+        // Render API: extend each event record with network/path/depth payloads.
+        await loadPayloadsForEvents(name, nextEvents);
+
+        return result;
+      } catch (err) {
+        if (
+          requestId === eventRequestRef.current &&
+          selectedSubstrateRef.current === name
+        ) {
+          setStore(null);
+          setPayloads([]);
+          setError(
+            `Unable to load events for "${name}": ${
+              err instanceof Error ? err.message : "unknown API error"
+            }`,
+          );
+        }
+
+        return null;
+      } finally {
+        if (requestId === eventRequestRef.current) {
+          setLoadingEvents(false);
+        }
+      }
+    },
+    [substrates, loadPayloadsForEvents],
+  );
 
   const loadNetworkBudgets = useCallback(
     async (name, activationValue, options = {}) => {
@@ -857,7 +881,7 @@ export default function EventStorePage() {
 
       try {
         const result = await apiRequest(
-          `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activationValue)}/budgets`
+          `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activationValue)}/budgets`,
         );
 
         if (
@@ -879,7 +903,7 @@ export default function EventStorePage() {
 
             if (!savingKeys[key]) {
               next[key] = draftFromBudget(
-                entry.configured ? entry.budget : null
+                entry.configured ? entry.budget : null,
               );
             }
           });
@@ -894,7 +918,7 @@ export default function EventStorePage() {
           setError(
             `Unable to load network budgets: ${
               err instanceof Error ? err.message : "unknown API error"
-            }`
+            }`,
           );
         }
 
@@ -905,82 +929,7 @@ export default function EventStorePage() {
         }
       }
     },
-    [savingKeys]
-  );
-
-  const loadPayloadBudgets = useCallback(
-    async (name, activationValue, options = {}) => {
-      if (!name || !/^\d+$/.test(String(activationValue))) {
-        setPayloadBudgets([]);
-        return null;
-      }
-
-      const requestId = ++payloadRequestRef.current;
-
-      if (!options.silent) setLoadingPayloadBudgets(true);
-
-      try {
-        const result = await apiRequest(
-          `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activationValue)}/payload-budgets`
-        );
-
-        if (
-          requestId !== payloadRequestRef.current ||
-          selectedSubstrateRef.current !== name ||
-          selectedActivationRef.current !== String(activationValue)
-        ) {
-          return null;
-        }
-
-        const rows = normalizePayloadBudgets(result);
-        setPayloadBudgets(rows);
-
-        setDrafts((current) => {
-          const next = { ...current };
-
-          rows.forEach((entry) => {
-            const key = payloadKey(
-              activationValue,
-              entry.network.id,
-              entry.path,
-              entry.depth_identifier
-            );
-
-            if (!savingKeys[key]) {
-              next[key] = draftFromBudget(
-                entry.configured ? entry.budget : null
-              );
-            }
-          });
-
-          return next;
-        });
-
-        setBudgetErrors((current) => ({
-          ...current,
-          payloadLoad: "",
-        }));
-
-        return result;
-      } catch (err) {
-        if (requestId === payloadRequestRef.current) {
-          setPayloadBudgets([]);
-          setBudgetErrors((current) => ({
-            ...current,
-            payloadLoad: `Unable to load payload budgets: ${
-              err instanceof Error ? err.message : "unknown API error"
-            }`,
-          }));
-        }
-
-        return null;
-      } finally {
-        if (requestId === payloadRequestRef.current) {
-          setLoadingPayloadBudgets(false);
-        }
-      }
-    },
-    [savingKeys]
+    [savingKeys],
   );
 
   useEffect(() => {
@@ -991,7 +940,7 @@ export default function EventStorePage() {
 
       if (results[0].status === "rejected") {
         setError(
-          "Unable to load registered networks. Check GET /networks on qtm-api."
+          "Unable to load registered networks. Check GET /networks on qtm-api.",
         );
       }
 
@@ -1003,16 +952,16 @@ export default function EventStorePage() {
     return () => {
       cancelled = true;
       eventRequestRef.current += 1;
-      budgetRequestRef.current += 1;
       payloadRequestRef.current += 1;
+      budgetRequestRef.current += 1;
     };
   }, [loadNetworks, loadSubstrates]);
 
   useEffect(() => {
     if (!substrate) {
       setStore(null);
+      setPayloads([]);
       setNetworkBudgets([]);
-      setPayloadBudgets([]);
       return;
     }
 
@@ -1023,15 +972,12 @@ export default function EventStorePage() {
   useEffect(() => {
     if (!substrate || !/^\d+$/.test(String(activation))) {
       setNetworkBudgets([]);
-      setPayloadBudgets([]);
       return;
     }
 
     selectedActivationRef.current = activation;
-
     loadNetworkBudgets(substrate, activation);
-    loadPayloadBudgets(substrate, activation);
-  }, [substrate, activation, loadNetworkBudgets, loadPayloadBudgets]);
+  }, [substrate, activation, loadNetworkBudgets]);
 
   useEffect(() => {
     if (!substrate) return undefined;
@@ -1040,7 +986,7 @@ export default function EventStorePage() {
       if (!loadingEvents) {
         loadEvents(substrate, { silent: true });
       }
-    }, REFRESH_INTERVAL);
+    }, REFRESH_INTERVAL_MS);
 
     return () => window.clearInterval(timer);
   }, [substrate, loadingEvents, loadEvents]);
@@ -1050,15 +996,15 @@ export default function EventStorePage() {
     selectedActivationRef.current = "0";
 
     eventRequestRef.current += 1;
-    budgetRequestRef.current += 1;
     payloadRequestRef.current += 1;
+    budgetRequestRef.current += 1;
 
     setSubstrate(name);
     setActivation("0");
     setActivationOptions(["0"]);
     setStore(null);
+    setPayloads([]);
     setNetworkBudgets([]);
-    setPayloadBudgets([]);
     setError("");
     setNotice("");
     setBudgetErrors({});
@@ -1069,13 +1015,10 @@ export default function EventStorePage() {
     if (!/^\d+$/.test(String(value))) return;
 
     selectedActivationRef.current = String(value);
-
     budgetRequestRef.current += 1;
-    payloadRequestRef.current += 1;
 
     setActivation(String(value));
     setNetworkBudgets([]);
-    setPayloadBudgets([]);
     setError("");
     setNotice("");
     setBudgetErrors({});
@@ -1100,7 +1043,7 @@ export default function EventStorePage() {
     const maxEvents = parseSafeInteger(draft.max_events, "max_events");
     const maxRetainedMass = parseU128(
       draft.max_retained_mass,
-      "max_retained_mass"
+      "max_retained_mass",
     );
 
     if (maxEvents < 1) {
@@ -1119,7 +1062,6 @@ export default function EventStorePage() {
   }
 
   function requestBody(payload) {
-    // Keep u128 values as decimal integers in JSON, never convert them to Number.
     return `{"min_events":${payload.minEvents},"max_events":${payload.maxEvents},"max_retained_mass":${payload.maxRetainedMass}}`;
   }
 
@@ -1154,7 +1096,7 @@ export default function EventStorePage() {
         {
           method: "PUT",
           body: requestBody(payload),
-        }
+        },
       );
 
       setNetworkBudgets((current) =>
@@ -1170,8 +1112,8 @@ export default function EventStorePage() {
                     max_retained_mass: payload.maxRetainedMass,
                   },
               }
-            : row
-        )
+            : row,
+        ),
       );
 
       setBudgetNotices((current) => ({
@@ -1195,96 +1137,6 @@ export default function EventStorePage() {
     }
   }
 
-  async function savePayloadBudget(event, entry) {
-    event.preventDefault();
-
-    if (!substrate) {
-      setError("Select a substrate before saving a payload budget.");
-      return;
-    }
-
-    const key = payloadKey(
-      activation,
-      entry.network.id,
-      entry.path,
-      entry.depth_identifier
-    );
-
-    let payload;
-
-    try {
-      payload = validateBudget(
-        drafts[key] ?? draftFromBudget(entry.budget)
-      );
-    } catch (err) {
-      setBudgetErrors((current) => ({
-        ...current,
-        [key]:
-          err instanceof Error ? err.message : "Invalid payload budget.",
-      }));
-      return;
-    }
-
-    setSavingKeys((current) => ({ ...current, [key]: true }));
-    setBudgetErrors((current) => ({ ...current, [key]: "" }));
-    setBudgetNotices((current) => ({ ...current, [key]: "" }));
-
-    try {
-      const endpoint =
-        `/wallets/${encodeURIComponent(substrate)}` +
-        `/activations/${encodeURIComponent(activation)}` +
-        `/payload-budgets/${encodeURIComponent(entry.network.id)}` +
-        `/${encodeURIComponent(entry.path)}` +
-        `/${encodeURIComponent(entry.depth_identifier)}`;
-
-      const result = await apiRequest(endpoint, {
-        method: "PUT",
-        body: requestBody(payload),
-      });
-
-      setPayloadBudgets((current) =>
-        current.map((row) =>
-          payloadKey(
-            activation,
-            row.network.id,
-            row.path,
-            row.depth_identifier
-          ) === key
-            ? {
-                ...row,
-                configured: true,
-                budget:
-                  result.budget ?? {
-                    min_events: payload.minEvents,
-                    max_events: payload.maxEvents,
-                    max_retained_mass: payload.maxRetainedMass,
-                  },
-              }
-            : row
-        )
-      );
-
-      setBudgetNotices((current) => ({
-        ...current,
-        [key]: `Saved payload budget for ${entry.network.id} · activation ${activation}.`,
-      }));
-    } catch (err) {
-      setBudgetErrors((current) => ({
-        ...current,
-        [key]:
-          err instanceof Error
-            ? err.message
-            : "Unable to save this payload budget.",
-      }));
-    } finally {
-      setSavingKeys((current) => {
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-    }
-  }
-
   async function refreshAll() {
     if (!substrate) return;
 
@@ -1294,63 +1146,55 @@ export default function EventStorePage() {
     const result = await loadEvents(substrate);
 
     if (result) {
-      await Promise.all([
-        loadNetworkBudgets(substrate, selectedActivationRef.current),
-        loadPayloadBudgets(substrate, selectedActivationRef.current),
-      ]);
-
-      setNotice("Event snapshot and budgets refreshed.");
+      await loadNetworkBudgets(substrate, selectedActivationRef.current);
+      setNotice("Event snapshot, payload render, and budgets refreshed.");
     }
   }
 
   const activationEvents = useMemo(
     () =>
       events.filter(
-        (event) => activationFromEvent(event) === String(activation)
+        (event) => activationFromEvent(event) === String(activation),
       ),
-    [events, activation]
+    [events, activation],
   );
 
   const activationRetainedMass = useMemo(
     () => totalRetainedMass(activationEvents).toString(),
-    [activationEvents]
+    [activationEvents],
   );
 
   const networkBudgetById = useMemo(
-    () =>
-      new Map(
-        networkBudgets.map((row) => [row?.network?.id, row])
-      ),
-    [networkBudgets]
+    () => new Map(networkBudgets.map((row) => [row?.network?.id, row])),
+    [networkBudgets],
   );
 
   const renderedNetworks = useMemo(() => {
-    const registered = networks.length ? networks : [];
-    const fromBudgets = networkBudgets
-      .map((row) => normalizeNetwork(row.network))
-      .filter(Boolean);
-
     const byId = new Map();
 
-    [...registered, ...fromBudgets].forEach((network) => {
+    networks.forEach((network) => {
       if (!byId.has(network.id)) byId.set(network.id, network);
     });
 
-    // Include networks present in persisted payload rows, even if a budget
-    // endpoint omits an otherwise registered network.
-    payloadBudgets.forEach((entry) => {
+    networkBudgets.forEach((row) => {
+      const network = normalizeNetwork(row.network);
+      if (network && !byId.has(network.id)) byId.set(network.id, network);
+    });
+
+    // Networks discovered only via payload render (beyond registered list).
+    payloads.forEach((entry) => {
       if (!byId.has(entry.network.id)) {
         byId.set(entry.network.id, entry.network);
       }
     });
 
     return [...byId.values()];
-  }, [networks, networkBudgets, payloadBudgets]);
+  }, [networks, networkBudgets, payloads]);
 
   const payloadGroups = useMemo(() => {
     const groups = new Map();
 
-    payloadBudgets.forEach((entry) => {
+    payloads.forEach((entry) => {
       const id = entry.network.id;
 
       if (!groups.has(id)) {
@@ -1365,9 +1209,9 @@ export default function EventStorePage() {
       const group = groups.get(id);
       const direction = entry.direction;
 
-      if (direction === "transit_inputs") {
+      if (direction === PAYLOAD_DIRECTIONS.transit_inputs) {
         group.transit_inputs.push(entry);
-      } else if (direction === "exile_outputs") {
+      } else if (direction === PAYLOAD_DIRECTIONS.exile_outputs) {
         group.exile_outputs.push(entry);
       } else {
         group.unclassified.push(entry);
@@ -1375,7 +1219,7 @@ export default function EventStorePage() {
     });
 
     return groups;
-  }, [payloadBudgets]);
+  }, [payloads]);
 
   return (
     <main className="min-h-screen bg-[#f7f8fa] px-3 py-4 text-zinc-950 sm:px-5 sm:py-6 lg:px-8 dark:bg-zinc-950 dark:text-zinc-100">
@@ -1383,7 +1227,7 @@ export default function EventStorePage() {
         <header className="flex flex-col gap-4 rounded-2xl border border-zinc-200/80 bg-white/80 p-4 shadow-sm sm:flex-row sm:items-end sm:justify-between sm:p-5 dark:border-zinc-800 dark:bg-zinc-900/70">
           <div className="min-w-0">
             <p className="text-[10px] font-semibold uppercase tracking-[0.17em] text-zinc-500 sm:text-xs dark:text-zinc-400">
-              QuantPerm · QTM · Persistent substrate
+              QuantPerm · QTM · Persistent substrate host
             </p>
 
             <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">
@@ -1391,9 +1235,10 @@ export default function EventStorePage() {
             </h1>
 
             <p className="mt-2 max-w-2xl text-xs leading-5 text-zinc-500 sm:text-sm sm:leading-6 dark:text-zinc-400">
-              Inspect persisted transit inputs and exile outputs inside each
-              network. Network and payload budgets remain independently
-              scoped to the selected activation.
+              The substrate is the host. Each event record is rendered through
+              the payloads API to expose network identity, direction enum,
+              payload path, depth identifier, and depth objects beyond the
+              derivation path alone.
             </p>
           </div>
 
@@ -1408,8 +1253,8 @@ export default function EventStorePage() {
         </header>
 
         <Panel
-          title="Universal substrate"
-          description="Choose a persistent substrate and activation to inspect its network-specific payload records."
+          title="Substrate host"
+          description="Choose the persistent substrate and activation. Payloads are loaded per event record from the render API."
           action={
             <button
               type="button"
@@ -1418,13 +1263,11 @@ export default function EventStorePage() {
                 !substrate ||
                 loadingEvents ||
                 loadingBudgets ||
-                loadingPayloadBudgets
+                loadingPayloads
               }
               onClick={refreshAll}
             >
-              {loadingEvents ||
-              loadingBudgets ||
-              loadingPayloadBudgets
+              {loadingEvents || loadingBudgets || loadingPayloads
                 ? "Refreshing…"
                 : "Refresh"}
             </button>
@@ -1475,32 +1318,26 @@ export default function EventStorePage() {
           </div>
 
           <dl className="mt-5 grid grid-cols-2 gap-4 border-t border-zinc-200 pt-4 sm:grid-cols-4 dark:border-zinc-800">
-            <Field label="Substrate">
+            <Field label="Substrate host">
               {display(store?.substrate ?? substrate)}
             </Field>
-
             <Field label="Selected activation">{activation}</Field>
-
             <Field label="Persisted events">{events.length}</Field>
-
-            <Field label="Registered networks">
-              {renderedNetworks.length}
-            </Field>
+            <Field label="Rendered payloads">{payloads.length}</Field>
           </dl>
 
           <dl className="mt-4 grid grid-cols-2 gap-4 border-t border-zinc-200 pt-4 sm:grid-cols-4 dark:border-zinc-800">
             <Field label="Configured network budgets">
               {configuredNetworkCount} / {renderedNetworks.length}
             </Field>
-
-            <Field label="Configured payload budgets">
-              {configuredPayloadCount} / {payloadBudgets.length}
+            <Field label="Known networks">{renderedNetworks.length}</Field>
+            <Field label="Payload render">
+              {loadingPayloads
+                ? "Loading"
+                : payloads.length
+                  ? "Loaded"
+                  : "Empty"}
             </Field>
-
-            <Field label="Distinct payload records">
-              {payloadBudgets.length}
-            </Field>
-
             <Field label="Event snapshot">
               {loadingEvents ? "Refreshing" : store ? "Loaded" : "Not loaded"}
             </Field>
@@ -1511,7 +1348,6 @@ export default function EventStorePage() {
               <Field label="Substrate directory">
                 {display(store.directory)}
               </Field>
-
               <Field label="Events directory">
                 {display(store.events_directory)}
               </Field>
@@ -1520,40 +1356,34 @@ export default function EventStorePage() {
         </Panel>
 
         {error && <Notice>{error}</Notice>}
-
-        {budgetErrors.payloadLoad && (
-          <Notice type="warning">{budgetErrors.payloadLoad}</Notice>
-        )}
-
         {notice && <Notice type="success">{notice}</Notice>}
 
         <Panel
           title={`Network hierarchy · activation ${activation}`}
-          description="Every network identifier has its own container. Transit inputs and exile outputs are nested beneath that network, with each returned payload path and depth identifier preserved as a separate record."
+          description="Each network identifier is a container under the substrate host. transit_inputs and exile_outputs come from the API direction enum on each rendered payload."
           action={
             <span className="text-xs text-zinc-500 dark:text-zinc-400">
               {renderedNetworks.length} networks
             </span>
           }
         >
-          {loadingPayloadBudgets && (
+          {loadingPayloads && (
             <p className="mt-4 text-xs text-zinc-500 dark:text-zinc-400">
-              Loading payload records for activation {activation}…
+              Rendering payload records for each event…
             </p>
           )}
 
           {renderedNetworks.length === 0 && !loadingBudgets ? (
             <p className="mt-4 rounded-xl border border-zinc-200 p-4 text-sm text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-              No registered networks were returned. Check GET /networks.
+              No registered networks or rendered payload networks were
+              returned.
             </p>
           ) : (
             <div className="mt-4 space-y-3">
               {renderedNetworks.map((network) => {
                 const networkEntry = networkBudgetById.get(network.id);
                 const budget = networkEntry?.budget ?? null;
-                const configured = Boolean(
-                  networkEntry?.configured && budget
-                );
+                const configured = Boolean(networkEntry?.configured && budget);
 
                 const key = networkKey(activation, network.id);
                 const draft = drafts[key] ?? draftFromBudget(budget);
@@ -1591,18 +1421,11 @@ export default function EventStorePage() {
                       </div>
 
                       <dl className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                        <Field label="Coin">
-                          {display(network.coin)}
-                        </Field>
-
-                        <Field label="Purpose">
-                          {display(network.purpose)}
-                        </Field>
-
+                        <Field label="Coin">{display(network.coin)}</Field>
+                        <Field label="Purpose">{display(network.purpose)}</Field>
                         <Field label="Derivation path">
                           {display(network.path)}
                         </Field>
-
                         <Field label="Payload records">
                           {group.transit_inputs.length +
                             group.exile_outputs.length +
@@ -1631,10 +1454,7 @@ export default function EventStorePage() {
                           {expanded
                             ? "Close network budget editor"
                             : "Edit network budget"}
-
-                          <span aria-hidden="true">
-                            {expanded ? "−" : "+"}
-                          </span>
+                          <span aria-hidden="true">{expanded ? "−" : "+"}</span>
                         </button>
 
                         {expanded && (
@@ -1666,20 +1486,10 @@ export default function EventStorePage() {
                             <button
                               type="submit"
                               className={`${BUTTON_CLASS} w-full bg-zinc-950 text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-950`}
-                              disabled={
-                                !substrate || saving || loadingBudgets
-                              }
+                              disabled={!substrate || saving || loadingBudgets}
                             >
                               {saving ? "Saving…" : "Save network budget"}
                             </button>
-
-                            <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                              This budget is scoped to network{" "}
-                              <span className="break-all font-mono">
-                                {network.id}
-                              </span>{" "}
-                              at activation {activation}.
-                            </p>
                           </form>
                         )}
                       </div>
@@ -1688,54 +1498,21 @@ export default function EventStorePage() {
                     <div className="space-y-3 border-t border-zinc-200 bg-white p-3 sm:p-4 dark:border-zinc-800 dark:bg-zinc-900">
                       <DirectionSection
                         title="transit_inputs"
-                        description="Persisted input payload records associated with this network."
+                        description="Payloads rendered from event_* records for this network."
                         entries={group.transit_inputs}
-                        activation={activation}
-                        store={store}
-                        drafts={drafts}
-                        savingKeys={savingKeys}
-                        expandedPayloads={expandedPayloads}
-                        budgetErrors={budgetErrors}
-                        budgetNotices={budgetNotices}
-                        loadingPayloadBudgets={loadingPayloadBudgets}
-                        updateDraft={updateDraft}
-                        savePayloadBudget={savePayloadBudget}
-                        setExpandedPayloads={setExpandedPayloads}
                       />
 
                       <DirectionSection
                         title="exile_outputs"
-                        description="Persisted output payload records associated with this network."
+                        description="Payloads rendered from exile records for this network."
                         entries={group.exile_outputs}
-                        activation={activation}
-                        store={store}
-                        drafts={drafts}
-                        savingKeys={savingKeys}
-                        expandedPayloads={expandedPayloads}
-                        budgetErrors={budgetErrors}
-                        budgetNotices={budgetNotices}
-                        loadingPayloadBudgets={loadingPayloadBudgets}
-                        updateDraft={updateDraft}
-                        savePayloadBudget={savePayloadBudget}
-                        setExpandedPayloads={setExpandedPayloads}
                       />
 
                       {group.unclassified.length > 0 && (
                         <DirectionSection
                           title="Unclassified persisted payloads"
-                          description="Returned records without enough direction metadata to classify as transit inputs or exile outputs."
+                          description="Returned records without a recognized direction enum value."
                           entries={group.unclassified}
-                          activation={activation}
-                          store={store}
-                          drafts={drafts}
-                          savingKeys={savingKeys}
-                          expandedPayloads={expandedPayloads}
-                          budgetErrors={budgetErrors}
-                          budgetNotices={budgetNotices}
-                          loadingPayloadBudgets={loadingPayloadBudgets}
-                          updateDraft={updateDraft}
-                          savePayloadBudget={savePayloadBudget}
-                          setExpandedPayloads={setExpandedPayloads}
                         />
                       )}
                     </div>
@@ -1754,7 +1531,7 @@ export default function EventStorePage() {
 
         <Panel
           title="Activation utilization"
-          description="Aggregate measurements from the event snapshot. These are substrate-level totals, not a per-network ledger unless individual records identify their network."
+          description="Aggregate measurements from the event snapshot for the selected activation on this substrate host."
         >
           <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div className="rounded-xl border border-zinc-100 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-950">
@@ -1767,26 +1544,17 @@ export default function EventStorePage() {
               <Field label="Retained mass in selected activation">
                 {activationRetainedMass} bytes
               </Field>
-              <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                Sum of valid retained_mass values on matching activation
-                records.
-              </p>
             </div>
 
             <div className="rounded-xl border border-zinc-100 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-950">
-              <Field label="Events in substrate">
-                {events.length} events
-              </Field>
-              <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                Total records returned by the event-store endpoint.
-              </p>
+              <Field label="Events in substrate">{events.length} events</Field>
             </div>
           </div>
         </Panel>
 
         <Panel
           title="Persisted event diagnostics"
-          description="Event records returned by the selected substrate's API snapshot."
+          description="Event records returned by the selected substrate host."
           action={
             <span className="text-xs text-zinc-500 dark:text-zinc-400">
               {events.length} record{events.length === 1 ? "" : "s"}
@@ -1836,29 +1604,23 @@ export default function EventStorePage() {
                       <td className="whitespace-nowrap px-4 py-3 font-mono">
                         {display(eventActivation)}
                       </td>
-
                       <td className="px-4 py-3">
                         <span className="inline-flex rounded-full bg-zinc-100 px-2 py-1 text-xs font-semibold dark:bg-zinc-800">
                           {kind}
                         </span>
                       </td>
-
                       <td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500 dark:text-zinc-400">
                         {display(event.record)}
                       </td>
-
                       <td className="break-all px-4 py-3 font-mono">
                         {display(dimension)}
                       </td>
-
                       <td className="break-all px-4 py-3 font-mono">
                         {display(structuralValue)}
                       </td>
-
                       <td className="px-4 py-3 tabular-nums">
                         {display(event.depth_objects)}
                       </td>
-
                       <td className="break-all px-4 py-3 font-mono">
                         {display(retainedMass(event))}
                       </td>
@@ -1893,7 +1655,6 @@ export default function EventStorePage() {
                       <span className="block text-[10px] uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                         Runtime · API snapshot
                       </span>
-
                       <span className="mt-1 block break-all font-mono text-sm">
                         <RuntimeValue runtime={store.runtime} />
                       </span>
@@ -1906,8 +1667,9 @@ export default function EventStorePage() {
         </Panel>
 
         <footer className="border-t border-zinc-200 pt-4 text-xs leading-5 text-zinc-500 dark:border-zinc-800">
-          QTM Event Store · Persistent substrate · Activation-scoped budgets ·
-          Network-scoped payloads · Distinct payload paths and depth identifiers
+          QTM Event Store · Substrate host · Render API payloads · Direction
+          enum · Network-scoped depth objects · Activation-scoped budgets ·{" "}
+          {API_BASE}
         </footer>
       </div>
     </main>
