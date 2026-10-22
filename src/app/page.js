@@ -2,13 +2,17 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-// The deployed console (Vercel) must call the hosted QTM API: 127.0.0.1 there
-// would be the visitor's own device. For local development, set
-// NEXT_PUBLIC_QTM_API_BASE=http://127.0.0.1:8080 in .env.local.
-const DEFAULT_API_BASE = "https://qtm-api.onrender.com";
-const API_BASE = (
-  process.env.NEXT_PUBLIC_QTM_API_BASE || DEFAULT_API_BASE
-).replace(/\/+$/, "");
+// The substrate runtime (qtm-api) is a thin HTTP layer over the machine's own
+// ~/.qp/substrates. The console therefore carries no host or port: requests
+// are same-origin paths (/wallets, /networks, ...), and whatever serves this
+// page (a reverse proxy, a Next.js rewrite, or the runtime itself) routes them
+// to the runtime on that machine. NEXT_PUBLIC_QTM_API_BASE is an optional
+// override for setups where the runtime lives on a different origin.
+const API_BASE = (process.env.NEXT_PUBLIC_QTM_API_BASE || "").replace(
+  /\/+$/,
+  ""
+);
+const API_LABEL = API_BASE || "this origin";
 
 // API_BASE is the HTTP transport only. Substrate state is selected by name
 // and resolved by the Rust API for every state-changing operation.
@@ -135,7 +139,7 @@ async function apiFetch(url, options) {
       cause instanceof Error && cause.message ? cause.message : "network error";
 
     throw new ApiError(
-      `Could not reach the QTM API at ${API_BASE} (${reason}). Make sure qtm-api is running and reachable from this device, and that this page is allowed to call it (CORS / mixed content).`,
+      `Could not reach the QTM runtime at ${API_LABEL} (${reason}). Make sure qtm-api is running on the machine that holds ~/.qp/substrates and that this origin routes /wallets and /networks to it.`,
       { status: 0, url }
     );
   }
@@ -1940,7 +1944,7 @@ export default function Home() {
 
         <footer className="mt-5 border-t border-zinc-200 pt-4 text-xs leading-5 text-zinc-500 dark:border-zinc-800">
           QTM substrate console · Active substrate:{" "}
-          {selectedSubstrate || "none"} · API: {API_BASE}
+          {selectedSubstrate || "none"} · Runtime: {API_LABEL}
         </footer>
       </main>
     </div>
