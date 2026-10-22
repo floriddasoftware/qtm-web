@@ -11,7 +11,7 @@ const API_BASE = (
   "https://qtm-api-anwp.onrender.com"
 ).replace(/\/+$/, "");
 
-const REFRESH_INTERVAL_MS = 8000;
+const REFRESH_INTERVAL_MS = 80000;
 const SUBSTRATE_QUERY_KEY = "substrate";
 
 async function apiRequest(path, signal) {
