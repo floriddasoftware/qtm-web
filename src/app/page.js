@@ -1,8 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-const API_BASE = "https://qtm-api.onrender.com";
+// The substrate lives on the machine running qtm-api (~/.qp/substrates), so
+// the console talks to that local runtime rather than a hosted service.
+// Override at build time with NEXT_PUBLIC_QTM_API_BASE.
+const API_BASE = (
+  process.env.NEXT_PUBLIC_QTM_API_BASE || "http://127.0.0.1:8080"
+).replace(/\/+$/, "");
 
 // API_BASE is the HTTP transport only. Substrate state is selected by name
 // and resolved by the Rust API for every state-changing operation.
@@ -401,89 +406,6 @@ function recordNameOf(record) {
   return "";
 }
 
-function recordKind(record) {
-  const explicit = String(
-    valueAt(record, [
-      "kind",
-      "type",
-      "record_type",
-      "recordType",
-      "operation",
-    ]) ?? ""
-  ).toLowerCase();
-
-  const name =
-    recordNameOf(record).toLowerCase().split(/[\\/]/).pop() || "";
-
-  if (explicit.includes("exil") || name.startsWith("exile_")) {
-    return "exile";
-  }
-
-  if (
-    explicit.includes("transit") ||
-    explicit.includes("event") ||
-    name.startsWith("event_")
-  ) {
-    return "transit";
-  }
-
-  return "other";
-}
-
-function recordIdentity(record) {
-  const activation = valueAt(record, [
-    "activation",
-    "activation_count",
-    "activationCount",
-  ]);
-
-  const dimension = valueAt(record, ["dimension"]);
-
-  if (activation !== undefined && dimension !== undefined) {
-    return `${String(activation)}:${String(dimension)}`;
-  }
-
-  const name =
-    recordNameOf(record).toLowerCase().split(/[\\/]/).pop() || "";
-
-  const match = name.match(/^(?:event|exile)[_-]?(\d+)[_-](\d+)(?:\.[^.]+)?$/);
-
-  return match ? `${match[1]}:${match[2]}` : "";
-}
-
-function pendingEventRecords(records) {
-  const exiled = new Set(
-    records
-      .filter((record) => recordKind(record) === "exile")
-      .map(recordIdentity)
-      .filter(Boolean)
-  );
-
-  return records.filter((record) => {
-    if (recordKind(record) !== "transit") return false;
-
-    if (
-      record.exiled === true ||
-      record.is_exiled === true ||
-      record.isExiled === true
-    ) {
-      return false;
-    }
-
-    const status = String(
-      valueAt(record, ["status", "state"]) ?? ""
-    ).toLowerCase();
-
-    if (["exiled", "settled", "consumed"].includes(status)) {
-      return false;
-    }
-
-    const identity = recordIdentity(record);
-
-    return !identity || !exiled.has(identity);
-  });
-}
-
 function OpenResults({ result }) {
   const directory = result?.directory;
   const receive = result?.receive;
@@ -785,15 +707,23 @@ export default function Home() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // Keep the selected substrate aligned with links from /network and /eventstore.
-  const [requestedSubstrate, setRequestedSubstrate] = useState("");
+  // Substrate requested by links from /network and /eventstore (?substrate=).
+  // Read once (null = not read yet) and consumed by the first resolved load.
+  const requestedSubstrateRef = useRef(null);
+  const listRequestRef = useRef(0);
+  const exileRequestRef = useRef(0);
+  const selectedRef = useRef("");
+  const [selectionReady, setSelectionReady] = useState(false);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    setRequestedSubstrate(params.get("substrate") || "");
-  }, []);
+    selectedRef.current = selectedSubstrate;
+  }, [selectedSubstrate]);
 
+  // Do not touch the URL until the first list load has resolved the
+  // selection; otherwise the requested ?substrate= would be stripped.
   useEffect(() => {
+    if (!selectionReady) return;
+
     const url = new URL(window.location.href);
 
     if (selectedSubstrate) {
@@ -807,52 +737,71 @@ export default function Home() {
       "",
       `${url.pathname}${url.search}${url.hash}`
     );
-  }, [selectedSubstrate]);
+  }, [selectedSubstrate, selectionReady]);
 
-  const loadSubstrates = useCallback(
-    async (preferred = "") => {
-      setListLoading(true);
-      setListError("");
+  const loadSubstrates = useCallback(async (preferred = "") => {
+    const requestId = ++listRequestRef.current;
 
-      try {
-        const response = await fetch(makeApiUrl("/wallets"), {
-          method: "GET",
-          cache: "no-store",
-        });
+    if (requestedSubstrateRef.current === null) {
+      requestedSubstrateRef.current =
+        new URLSearchParams(window.location.search).get("substrate") || "";
+    }
 
-        const data = await readResponse(response);
+    setListLoading(true);
+    setListError("");
 
-        if (!Array.isArray(data.substrates)) {
-          throw new Error(
-            "The API response did not contain a substrates list."
-          );
-        }
+    try {
+      const response = await fetch(makeApiUrl("/wallets"), {
+        method: "GET",
+        cache: "no-store",
+      });
 
-        const valid = data.substrates.filter(
-          (item) => item && typeof item.name === "string"
+      const data = await readResponse(response);
+
+      if (!Array.isArray(data.substrates)) {
+        throw new Error(
+          "The API response did not contain a substrates list."
+        );
+      }
+
+      // A newer list request has started; this response is stale.
+      if (requestId !== listRequestRef.current) return;
+
+      const valid = data.substrates.filter(
+        (item) => item && typeof item.name === "string"
+      );
+
+      const requested = requestedSubstrateRef.current;
+      requestedSubstrateRef.current = "";
+
+      setSubstrates(valid);
+
+      // Priority: explicit choice, the user's current selection, the URL
+      // request, then the first substrate only if none of those exist.
+      setSelectedSubstrate((current) => {
+        const wanted = [preferred, current, requested].find(
+          (candidate) =>
+            candidate && valid.some((item) => item.name === candidate)
         );
 
-        setSubstrates(valid);
+        return wanted || valid[0]?.name || "";
+      });
 
-        setSelectedSubstrate((current) => {
-          const wanted = preferred || requestedSubstrate || current;
+      setSelectionReady(true);
+    } catch (err) {
+      if (requestId !== listRequestRef.current) return;
 
-          return wanted && valid.some((item) => item.name === wanted)
-            ? wanted
-            : valid[0]?.name || "";
-        });
-      } catch (err) {
-        setListError(
-          err instanceof Error
-            ? err.message
-            : "Unable to load substrates."
-        );
-      } finally {
+      setListError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load substrates."
+      );
+    } finally {
+      if (requestId === listRequestRef.current) {
         setListLoading(false);
       }
-    },
-    [requestedSubstrate]
-  );
+    }
+  }, []);
 
   const loadNetworks = useCallback(async () => {
     setNetworkLoading(true);
@@ -918,8 +867,17 @@ export default function Home() {
   }, []);
 
   const loadExileRecords = useCallback(async () => {
-    if (!selectedSubstrate) {
+    const substrate = selectedSubstrate;
+    const requestId = ++exileRequestRef.current;
+
+    // Only the latest request for the still-selected substrate may update state.
+    const isCurrent = () =>
+      requestId === exileRequestRef.current &&
+      selectedRef.current === substrate;
+
+    if (!substrate) {
       setExileRecords([]);
+      setExileRecordsLoading(false);
       setExileRecordsError(
         "Select a substrate before loading its persisted events."
       );
@@ -931,7 +889,7 @@ export default function Home() {
 
     try {
       const url = makeApiUrl(
-        `/wallets/${encodeURIComponent(selectedSubstrate)}/events`
+        `/wallets/${encodeURIComponent(substrate)}/events`
       );
 
       const response = await fetch(url, {
@@ -940,6 +898,9 @@ export default function Home() {
       });
 
       const data = await readResponse(response);
+
+      if (!isCurrent()) return;
+
       const records = eventRecordsOf(data);
 
       const recognizedList =
@@ -960,13 +921,9 @@ export default function Home() {
       }
 
       setExileRecords(records);
-
-      if (!pendingEventRecords(records).length) {
-        setExileRecordsError(
-          "No persisted transit events are currently identified as pending exile for this substrate."
-        );
-      }
     } catch (err) {
+      if (!isCurrent()) return;
+
       setExileRecords([]);
 
       setExileRecordsError(
@@ -975,7 +932,9 @@ export default function Home() {
           : "Unable to load persisted event records."
       );
     } finally {
-      setExileRecordsLoading(false);
+      if (requestId === exileRequestRef.current) {
+        setExileRecordsLoading(false);
+      }
     }
   }, [selectedSubstrate]);
 
@@ -999,12 +958,11 @@ export default function Home() {
     [networks, selectedNetwork]
   );
 
-  const pendingRecords = useMemo(
-    () => pendingEventRecords(exileRecords),
-    [exileRecords]
-  );
-
   function handleSubstrateChange(value) {
+    selectedRef.current = value;
+    // Invalidate in-flight exile-record loads for the previous substrate.
+    exileRequestRef.current += 1;
+    setExileRecordsLoading(false);
     setSelectedSubstrate(value);
     setResult(null);
     setError("");
@@ -1205,7 +1163,7 @@ export default function Home() {
         setResult(data);
 
         await Promise.all([
-          loadSubstrates(selectedSubstrate),
+          loadSubstrates(),
           loadExileRecords(),
         ]);
 
@@ -1213,14 +1171,9 @@ export default function Home() {
       }
 
       if (tab === "exile") {
-        if (!pendingRecords.length) {
-          throw new Error(
-            "There are no persisted transit event records identified as pending exile. Refresh the event list after recording a transit event."
-          );
-        }
-
-        // The Rust API derives the exile depth from this substrate's persisted
-        // event history. Do not submit a client-created depth snapshot.
+        // The Rust API decides eligibility and derives the exile depth from
+        // this substrate's persisted event history. The browser neither gates
+        // the request nor submits a client-created depth snapshot.
         const exileUrl = makeApiUrl(
           `/wallets/${encodeURIComponent(selectedSubstrate)}/exile`
         );
@@ -1236,7 +1189,7 @@ export default function Home() {
 
         await Promise.all([
           loadExileRecords(),
-          loadSubstrates(selectedSubstrate),
+          loadSubstrates(),
         ]);
       }
     } catch (err) {
@@ -1316,7 +1269,7 @@ export default function Home() {
 
             <button
               type="button"
-              onClick={() => loadSubstrates(selectedSubstrate)}
+              onClick={() => loadSubstrates()}
               disabled={listLoading}
               className="rounded-md px-2.5 py-1.5 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-800"
             >
@@ -1330,7 +1283,7 @@ export default function Home() {
             onChange={(event) =>
               handleSubstrateChange(event.target.value)
             }
-            disabled={listLoading || !substrates.length}
+            disabled={listLoading || loading || !substrates.length}
             className="h-9 w-full rounded-md border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-950 dark:focus:ring-zinc-800"
           >
             {!substrates.length && (
@@ -1493,7 +1446,7 @@ export default function Home() {
                 "Apply a network derivation request in the selected substrate's state context."}
 
               {tab === "exile" &&
-                "Exile eligible transit records using the selected substrate's persisted event history."}
+                "Request exile for the selected substrate. The API decides eligibility from its persisted event history."}
             </p>
           </div>
 
@@ -1802,7 +1755,7 @@ export default function Home() {
               <section className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
                 <div>
                   <h3 className="text-xs font-semibold">
-                    Persisted events pending exile
+                    Persisted event history
                   </h3>
 
                   <p className="mt-1 break-all font-mono text-xs text-zinc-600 dark:text-zinc-300">
@@ -1811,8 +1764,9 @@ export default function Home() {
 
                   <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
                     Exile reads the selected substrate's persisted event
-                    history. The Rust API derives the exile depth; the
-                    client does not submit an in-memory depth snapshot.
+                    history. The Rust API decides eligibility and derives
+                    the exile depth; the browser neither gates the request
+                    nor submits an in-memory depth snapshot.
                   </p>
                 </div>
 
@@ -1820,7 +1774,7 @@ export default function Home() {
                   <span className="text-xs text-zinc-600 dark:text-zinc-300">
                     {exileRecordsLoading
                       ? "Loading persisted events…"
-                      : `${pendingRecords.length} transit record(s) pending exile`}
+                      : `${exileRecords.length} persisted record(s)`}
                   </span>
 
                   <button
@@ -1860,16 +1814,9 @@ export default function Home() {
                     </p>
                   ) : (
                     exileRecords.map((record, index) => {
-                      const kind = recordKind(record);
-                      const pending = pendingRecords.includes(record);
-
                       return (
                         <div
-                          key={`${
-                            recordNameOf(record) ||
-                            recordIdentity(record) ||
-                            "record"
-                          }-${index}`}
+                          key={`${recordNameOf(record) || "record"}-${index}`}
                           className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900"
                         >
                           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1879,13 +1826,9 @@ export default function Home() {
                             </p>
 
                             <span className="rounded-md border border-zinc-200 px-2 py-1 text-[10px] font-medium dark:border-zinc-700">
-                              {kind === "transit"
-                                ? pending
-                                  ? "Pending exile"
-                                  : "Transit record"
-                                : kind === "exile"
-                                  ? "Exile record"
-                                  : "Persisted record"}
+                              {formatKey(
+                                valueAt(record, ["kind", "type"]) ?? "record"
+                              )}
                             </span>
                           </div>
 
@@ -1908,9 +1851,7 @@ export default function Home() {
                 listLoading ||
                 (substrateRequired && !selectedSubstrate) ||
                 (tab === "transit" &&
-                  (networkLoading || !selectedNetwork)) ||
-                (tab === "exile" &&
-                  (pendingRecords.length === 0 || exileRecordsLoading))
+                  (networkLoading || !selectedNetwork))
               }
               className="mt-1 inline-flex min-h-10 items-center justify-center rounded-md bg-zinc-950 px-5 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
             >
