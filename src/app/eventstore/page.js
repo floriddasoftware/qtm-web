@@ -9,7 +9,7 @@ const API_BASE = (
   "https://qtm-api-anwp.onrender.com"
 ).replace(/\/+$/, "");
 
-const REFRESH_INTERVAL_MS = 5000;
+const REFRESH_INTERVAL_MS = 8000;
 const U128_MAX = "340282366920938463463374607431768211455";
 
 // Direction values returned by qtm-api list_event_payloads (record prefix enum).
