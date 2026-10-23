@@ -1,11 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-// Prefer NEXT_PUBLIC_QTM_API_BASE when set; otherwise fall back to the public
-// qtm-api deployment so a Vercel (or similar) host never routes /wallets to
-// itself. Substrate storage is owned by the server-side QP runtime;
-// substrate_root() is resolved by Rust, never by the browser.
+// Single transport to the QP runtime. Substrate storage and substrate_root()
+// live entirely in the Rust runtime — the browser never resolves or emulates
+// the substrate directory.
 const API_BASE = (
   process.env.NEXT_PUBLIC_QTM_API_BASE ||
   "https://qtm-api-anwp.onrender.com"
@@ -14,13 +13,18 @@ const API_BASE = (
 const REFRESH_INTERVAL_MS = 80000;
 const SUBSTRATE_QUERY_KEY = "substrate";
 
-async function apiRequest(path, signal) {
+async function apiRequest(path, signal, options = {}) {
+  const method = options.method || "GET";
   let response;
 
   try {
     response = await fetch(`${API_BASE}${path}`, {
-      method: "GET",
-      headers: { Accept: "application/json" },
+      method,
+      headers: {
+        Accept: "application/json",
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
       cache: "no-store",
       signal,
     });
@@ -48,7 +52,9 @@ async function apiRequest(path, signal) {
 
   if (!response.ok) {
     const apiMessage =
-      (body && typeof body === "object" && (body.error || body.message || body.detail)) ||
+      (body &&
+        typeof body === "object" &&
+        (body.error || body.message || body.detail)) ||
       null;
 
     const reason =
@@ -101,8 +107,25 @@ function getPathIdentifier(entry) {
   );
 }
 
+function getNetworkId(entry) {
+  return String(entry?.id ?? entry?.name ?? "").trim();
+}
+
 function getSubstrateName(entry) {
   return String(entry?.name ?? "");
+}
+
+function isBitcoinNetwork(entry) {
+  const id = getNetworkId(entry).toLowerCase();
+  const name = String(entry?.name ?? "").toLowerCase();
+  const coin = entry?.coin;
+
+  return (
+    coin === 0 ||
+    id.includes("bitcoin") ||
+    id === "btc" ||
+    name.includes("bitcoin")
+  );
 }
 
 function formatTimestamp(value) {
@@ -118,6 +141,12 @@ function formatTimestamp(value) {
     : date.toLocaleString();
 }
 
+function parseActivation(value) {
+  if (value === null || value === undefined || value === "") return 0;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+}
+
 function diagnosticClass(status) {
   if (status === "live") {
     return "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300";
@@ -129,6 +158,10 @@ function diagnosticClass(status) {
 
   if (status === "checking") {
     return "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300";
+  }
+
+  if (status === "running") {
+    return "border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-300";
   }
 
   return "border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300";
@@ -200,17 +233,45 @@ function getSubstrateQuery() {
   );
 }
 
+function electrumEndpoint(listenPort) {
+  if (listenPort === null || listenPort === undefined || listenPort === "") {
+    return null;
+  }
+  // Electrum host:port is distinct from the QTM API transport.
+  if (typeof window === "undefined") {
+    return `host:${listenPort}`;
+  }
+  return `${window.location.hostname}:${listenPort}`;
+}
+
+function resolvePreferredSubstrate(entries, preferred, current) {
+  const names = entries.map(getSubstrateName).filter(Boolean);
+  if (preferred && names.includes(preferred)) return preferred;
+  if (current && names.includes(current)) return current;
+  return names[0] || "";
+}
+
 export default function NetworkPage() {
   const [networks, setNetworks] = useState([]);
   const [substrates, setSubstrates] = useState([]);
 
-  // The network path is a derivation context, not an independent host.
-  // All persistent state and events belong to the selected substrate.
+  // Substrate host owns persistent state. Paths are derivation context.
+  // Observation is scoped to selected substrate + activation + network.
   const [selectedPath, setSelectedPath] = useState("");
   const [selectedSubstrate, setSelectedSubstrate] = useState("");
+  const [selectedActivation, setSelectedActivation] = useState(0);
 
   const [substrateState, setSubstrateState] = useState(null);
   const [eventStore, setEventStore] = useState(null);
+
+  const [observation, setObservation] = useState(null);
+  const [observationList, setObservationList] = useState([]);
+  const [observationLoading, setObservationLoading] = useState(false);
+  const [observationActionLoading, setObservationActionLoading] =
+    useState(false);
+  const [observationError, setObservationError] = useState("");
+  const [observationStatus, setObservationStatus] = useState("unknown");
+  const [lastObservationCheck, setLastObservationCheck] = useState(null);
 
   const [networkLoading, setNetworkLoading] = useState(true);
   const [substrateLoading, setSubstrateLoading] = useState(true);
@@ -233,20 +294,23 @@ export default function NetworkPage() {
   const networkRequestRef = useRef(null);
   const substrateRequestRef = useRef(null);
   const diagnosticsRequestRef = useRef(null);
+  const observationRequestRef = useRef(null);
 
-  // Monotonic ids so a late response from an older request cannot overwrite
-  // newer state (refresh races and substrate switches).
   const networkRequestIdRef = useRef(0);
   const substrateRequestIdRef = useRef(0);
   const diagnosticsRequestIdRef = useRef(0);
+  const observationRequestIdRef = useRef(0);
 
-  // Tracks the substrate that the latest diagnostics request was started for.
   const diagnosticsSubstrateRef = useRef("");
+  const observationContextRef = useRef("");
 
-  // Read the requested substrate once, so refreshes do not override it
-  // with whichever substrate happens to be first in the API response.
+  // URL preference is consumed once on first successful substrate list.
   const requestedSubstrateRef = useRef(null);
   const selectedSubstrateRef = useRef("");
+  const selectedPathRef = useRef("");
+  const selectedActivationRef = useRef(0);
+  // Track whether activation was user-chosen vs auto-initialized.
+  const activationInitializedRef = useRef(false);
 
   useEffect(() => {
     if (requestedSubstrateRef.current === null) {
@@ -257,6 +321,20 @@ export default function NetworkPage() {
   useEffect(() => {
     selectedSubstrateRef.current = selectedSubstrate;
   }, [selectedSubstrate]);
+
+  useEffect(() => {
+    selectedPathRef.current = selectedPath;
+  }, [selectedPath]);
+
+  useEffect(() => {
+    selectedActivationRef.current = selectedActivation;
+  }, [selectedActivation]);
+
+  const setActivationSynced = useCallback((value) => {
+    const next = parseActivation(value);
+    selectedActivationRef.current = next;
+    setSelectedActivation(next);
+  }, []);
 
   const loadNetworks = useCallback(async ({ silent = false } = {}) => {
     networkRequestRef.current?.abort();
@@ -278,15 +356,19 @@ export default function NetworkPage() {
 
       setNetworks(entries);
       setLastNetworkCheck(new Date());
-      setSelectedPath((current) => {
-        if (
-          current &&
-          entries.some((entry) => getPathIdentifier(entry) === current)
-        ) {
-          return current;
-        }
-        return entries.length ? getPathIdentifier(entries[0]) : "";
-      });
+
+      // Preserve current path when still valid; otherwise first entry.
+      const current = selectedPathRef.current;
+      const stillValid =
+        current &&
+        entries.some((entry) => getPathIdentifier(entry) === current);
+      const next = stillValid
+        ? current
+        : entries.length
+          ? getPathIdentifier(entries[0])
+          : "";
+      selectedPathRef.current = next;
+      setSelectedPath(next);
     } catch (error) {
       if (error?.name === "AbortError") return;
       if (requestId !== networkRequestIdRef.current) return;
@@ -324,29 +406,25 @@ export default function NetworkPage() {
       setSubstrates(entries);
       setLastSubstrateCheck(new Date());
 
-      const requested =
+      // Resolve preferred substrate outside any state updater.
+      const preferred =
         requestedSubstrateRef.current === null
           ? ""
           : requestedSubstrateRef.current;
+      const resolved = resolvePreferredSubstrate(
+        entries,
+        preferred,
+        selectedSubstrateRef.current,
+      );
 
-      setSelectedSubstrate((current) => {
-        // Priority: explicit URL request (once), current selection, then first.
-        const candidates = [requested, current].filter(Boolean);
-        const wanted = candidates.find((candidate) =>
-          entries.some((entry) => getSubstrateName(entry) === candidate),
-        );
+      // Consume URL preference once after first successful resolve.
+      if (requestedSubstrateRef.current !== null) {
+        requestedSubstrateRef.current = "";
+      }
 
-        const next = wanted || (entries.length ? getSubstrateName(entries[0]) : "");
-
-        // Consume the URL request after the first successful resolve so later
-        // refreshes do not keep forcing a substrate that the user left.
-        if (requestedSubstrateRef.current !== null) {
-          requestedSubstrateRef.current = "";
-        }
-
-        updateSubstrateQuery(next);
-        return next;
-      });
+      selectedSubstrateRef.current = resolved;
+      setSelectedSubstrate(resolved);
+      updateSubstrateQuery(resolved);
     } catch (error) {
       if (error?.name === "AbortError") return;
       if (requestId !== substrateRequestIdRef.current) return;
@@ -412,60 +490,295 @@ export default function NetworkPage() {
 
       const encodedName = encodeURIComponent(name);
 
-      // The API reads the selected substrate's persistent state and event
-      // directory. No Render filesystem path is constructed by the UI.
-      const [stateResult, eventsResult] = await Promise.allSettled([
-        apiRequest(`/wallets/${encodedName}`, controller.signal),
-        apiRequest(`/wallets/${encodedName}/events`, controller.signal),
-      ]);
+      try {
+        // Substrate-level diagnostics only — independent of path selection.
+        const [stateResult, eventsResult] = await Promise.allSettled([
+          apiRequest(`/wallets/${encodedName}`, controller.signal),
+          apiRequest(`/wallets/${encodedName}/events`, controller.signal),
+        ]);
 
-      if (!isCurrent()) return;
+        if (!isCurrent()) return;
 
-      if (stateResult.status === "fulfilled") {
-        setSubstrateState(stateResult.value);
-        setStateStatus("live");
-        setStateError("");
-      } else {
-        const error = stateResult.reason;
-        if (error?.name === "AbortError") return;
+        const stateAborted =
+          stateResult.status === "rejected" &&
+          stateResult.reason?.name === "AbortError";
+        const eventsAborted =
+          eventsResult.status === "rejected" &&
+          eventsResult.reason?.name === "AbortError";
 
-        setSubstrateState(null);
-        setStateStatus("error");
-        setStateError(
-          error instanceof Error
-            ? error.message
-            : "Persisted substrate state could not be read.",
-        );
+        if (stateAborted || eventsAborted) return;
+
+        if (stateResult.status === "fulfilled") {
+          setSubstrateState(stateResult.value);
+          setStateStatus("live");
+          setStateError("");
+        } else {
+          setSubstrateState(null);
+          setStateStatus("error");
+          setStateError(
+            stateResult.reason instanceof Error
+              ? stateResult.reason.message
+              : "Persisted substrate state could not be read.",
+          );
+        }
+
+        if (eventsResult.status === "fulfilled") {
+          const result = eventsResult.value;
+          const events = normalizeEntries(result, ["events"]);
+          setEventStore({
+            ...result,
+            events,
+          });
+          setEventStoreStatus("live");
+          setEventStoreError("");
+
+          // Preserve user activation on routine refresh. Only auto-pick when
+          // initializing or when the current activation is no longer present.
+          const fromEvents = events
+            .map((e) => parseActivation(e?.activation))
+            .filter((n) => Number.isFinite(n));
+          const unique = Array.from(new Set(fromEvents));
+          const current = selectedActivationRef.current;
+
+          if (!activationInitializedRef.current && unique.length > 0) {
+            activationInitializedRef.current = true;
+            setActivationSynced(Math.max(...unique));
+          } else if (
+            unique.length > 0 &&
+            !unique.includes(current)
+          ) {
+            setActivationSynced(Math.max(...unique));
+          }
+        } else {
+          setEventStore(null);
+          setEventStoreStatus("error");
+          setEventStoreError(
+            eventsResult.reason instanceof Error
+              ? eventsResult.reason.message
+              : "Persistent event store could not be read.",
+          );
+        }
+
+        setLastDiagnosticsCheck(new Date());
+      } finally {
+        if (isCurrent()) {
+          setDiagnosticsLoading(false);
+        }
       }
-
-      if (eventsResult.status === "fulfilled") {
-        const result = eventsResult.value;
-        setEventStore({
-          ...result,
-          events: normalizeEntries(result, ["events"]),
-        });
-        // An empty event list can still mean that the event endpoint is
-        // readable; it does not imply that records exist.
-        setEventStoreStatus("live");
-        setEventStoreError("");
-      } else {
-        const error = eventsResult.reason;
-        if (error?.name === "AbortError") return;
-
-        setEventStore(null);
-        setEventStoreStatus("error");
-        setEventStoreError(
-          error instanceof Error
-            ? error.message
-            : "Persistent event store could not be read.",
-        );
-      }
-
-      setLastDiagnosticsCheck(new Date());
-      setDiagnosticsLoading(false);
     },
-    [],
+    [setActivationSynced],
   );
+
+  const selectedNetwork = useMemo(
+    () =>
+      networks.find((entry) => getPathIdentifier(entry) === selectedPath) ??
+      null,
+    [networks, selectedPath],
+  );
+
+  const selectedNetworkId = selectedNetwork
+    ? getNetworkId(selectedNetwork)
+    : "";
+
+  const observationSupportsPath = selectedNetwork
+    ? isBitcoinNetwork(selectedNetwork)
+    : false;
+
+  const loadObservation = useCallback(
+    async ({ silent = false } = {}) => {
+      const name = selectedSubstrateRef.current;
+      const networkId = selectedNetworkId;
+      const activation = selectedActivationRef.current;
+      const pathId = selectedPathRef.current;
+
+      observationRequestRef.current?.abort();
+
+      if (!name || !networkId || !pathId || !observationSupportsPath) {
+        observationRequestIdRef.current += 1;
+        observationContextRef.current = "";
+        setObservation(null);
+        setObservationList([]);
+        setObservationError("");
+        setObservationStatus("unknown");
+        setObservationLoading(false);
+        return;
+      }
+
+      const requestId = ++observationRequestIdRef.current;
+      const contextKey = `${name}:${activation}:${networkId}`;
+      observationContextRef.current = contextKey;
+
+      const controller = new AbortController();
+      observationRequestRef.current = controller;
+
+      const isCurrent = () =>
+        requestId === observationRequestIdRef.current &&
+        observationContextRef.current === contextKey &&
+        selectedSubstrateRef.current === name &&
+        selectedPathRef.current === pathId &&
+        selectedActivationRef.current === activation;
+
+      if (!silent) {
+        setObservation(null);
+        setObservationList([]);
+        setObservationError("");
+        setObservationStatus("checking");
+      } else {
+        setObservationStatus((status) =>
+          status === "error" ? status : "checking",
+        );
+      }
+
+      setObservationLoading(true);
+
+      const encodedName = encodeURIComponent(name);
+      const encodedNetwork = encodeURIComponent(networkId);
+
+      try {
+        // Existing observation routes only.
+        const [statusResult, listResult] = await Promise.allSettled([
+          apiRequest(
+            `/wallets/${encodedName}/activations/${activation}/networks/${encodedNetwork}/observation`,
+            controller.signal,
+          ),
+          apiRequest(
+            `/wallets/${encodedName}/activations/${activation}/observations`,
+            controller.signal,
+          ),
+        ]);
+
+        if (!isCurrent()) return;
+
+        const listAborted =
+          listResult.status === "rejected" &&
+          listResult.reason?.name === "AbortError";
+        const statusAborted =
+          statusResult.status === "rejected" &&
+          statusResult.reason?.name === "AbortError";
+
+        if (listAborted || statusAborted) return;
+
+        if (listResult.status === "fulfilled") {
+          setObservationList(
+            normalizeEntries(listResult.value, ["pipelines", "observations"]),
+          );
+        } else {
+          setObservationList([]);
+        }
+
+        if (statusResult.status === "fulfilled") {
+          // Report what the runtime says — do not infer from HTTP success alone.
+          const payload = statusResult.value;
+          setObservation(payload);
+          setObservationStatus(payload?.running ? "running" : "live");
+          setObservationError("");
+        } else {
+          const error = statusResult.reason;
+          const message =
+            error instanceof Error
+              ? error.message
+              : "Observation status unavailable.";
+          const notFound =
+            typeof message === "string" &&
+            (message.includes("[HTTP 404]") ||
+              message.toLowerCase().includes("no live"));
+
+          // Missing pipeline is "not started", not a host failure.
+          setObservation(null);
+          setObservationStatus(notFound ? "unknown" : "error");
+          setObservationError(notFound ? "" : message);
+        }
+
+        setLastObservationCheck(new Date());
+      } catch (error) {
+        if (error?.name === "AbortError") return;
+        if (!isCurrent()) return;
+        setObservation(null);
+        setObservationStatus("error");
+        setObservationError(
+          error instanceof Error
+            ? error.message
+            : "Observation status unavailable.",
+        );
+      } finally {
+        if (isCurrent()) {
+          setObservationLoading(false);
+        }
+      }
+    },
+    [observationSupportsPath, selectedNetworkId],
+  );
+
+  const startObservation = useCallback(async () => {
+    const name = selectedSubstrateRef.current;
+    const networkId = selectedNetworkId;
+    const activation = selectedActivationRef.current;
+    const pathHint = selectedNetwork?.path || selectedPathRef.current;
+
+    if (!name || !networkId) return;
+
+    setObservationActionLoading(true);
+    setObservationError("");
+
+    try {
+      const encodedName = encodeURIComponent(name);
+      const encodedNetwork = encodeURIComponent(networkId);
+      const body = {};
+      if (pathHint) body.path = pathHint;
+
+      // Start, then reload status — do not assume running from HTTP success.
+      await apiRequest(
+        `/wallets/${encodedName}/activations/${activation}/networks/${encodedNetwork}/observation`,
+        undefined,
+        { method: "POST", body },
+      );
+      await loadObservation({ silent: true });
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      setObservationError(
+        error instanceof Error
+          ? error.message
+          : "Unable to start observation pipeline.",
+      );
+      setObservationStatus("error");
+    } finally {
+      setObservationActionLoading(false);
+    }
+  }, [loadObservation, selectedNetwork, selectedNetworkId]);
+
+  const stopObservation = useCallback(async () => {
+    const name = selectedSubstrateRef.current;
+    const networkId = selectedNetworkId;
+    const activation = selectedActivationRef.current;
+
+    if (!name || !networkId) return;
+
+    setObservationActionLoading(true);
+    setObservationError("");
+
+    try {
+      const encodedName = encodeURIComponent(name);
+      const encodedNetwork = encodeURIComponent(networkId);
+
+      // Stop, then reload status — do not assume stopped from HTTP success.
+      await apiRequest(
+        `/wallets/${encodedName}/activations/${activation}/networks/${encodedNetwork}/observation`,
+        undefined,
+        { method: "DELETE" },
+      );
+      await loadObservation({ silent: true });
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      setObservationError(
+        error instanceof Error
+          ? error.message
+          : "Unable to stop observation pipeline.",
+      );
+      setObservationStatus("error");
+    } finally {
+      setObservationActionLoading(false);
+    }
+  }, [loadObservation, selectedNetworkId]);
 
   useEffect(() => {
     loadNetworks();
@@ -475,9 +788,11 @@ export default function NetworkPage() {
       networkRequestRef.current?.abort();
       substrateRequestRef.current?.abort();
       diagnosticsRequestRef.current?.abort();
+      observationRequestRef.current?.abort();
       networkRequestIdRef.current += 1;
       substrateRequestIdRef.current += 1;
       diagnosticsRequestIdRef.current += 1;
+      observationRequestIdRef.current += 1;
     };
   }, [loadNetworks, loadSubstrates]);
 
@@ -486,6 +801,7 @@ export default function NetworkPage() {
       diagnosticsRequestRef.current?.abort();
       diagnosticsRequestIdRef.current += 1;
       diagnosticsSubstrateRef.current = "";
+      activationInitializedRef.current = false;
       setSubstrateState(null);
       setEventStore(null);
       setStateStatus("unknown");
@@ -496,12 +812,27 @@ export default function NetworkPage() {
       return undefined;
     }
 
+    // New substrate selection — allow activation re-init for this host.
+    activationInitializedRef.current = false;
     loadHostDiagnostics(selectedSubstrate);
 
     return () => {
       diagnosticsRequestRef.current?.abort();
     };
   }, [selectedSubstrate, loadHostDiagnostics]);
+
+  useEffect(() => {
+    loadObservation();
+    return () => {
+      observationRequestRef.current?.abort();
+    };
+  }, [
+    selectedSubstrate,
+    selectedPath,
+    selectedActivation,
+    selectedNetworkId,
+    loadObservation,
+  ]);
 
   useEffect(() => {
     if (!autoRefresh) return undefined;
@@ -512,52 +843,91 @@ export default function NetworkPage() {
       if (selectedSubstrateRef.current) {
         loadHostDiagnostics(selectedSubstrateRef.current, { silent: true });
       }
+      loadObservation({ silent: true });
     }, REFRESH_INTERVAL_MS);
 
     return () => clearInterval(interval);
-  }, [autoRefresh, loadNetworks, loadSubstrates, loadHostDiagnostics]);
-
-  const selectedNetwork =
-    networks.find((entry) => getPathIdentifier(entry) === selectedPath) ??
-    null;
+  }, [
+    autoRefresh,
+    loadNetworks,
+    loadSubstrates,
+    loadHostDiagnostics,
+    loadObservation,
+  ]);
 
   const persistedEvents = eventStore?.events ?? [];
   const runtime = eventStore?.runtime ?? null;
 
+  const activationOptions = useMemo(() => {
+    const set = new Set();
+    const host = substrates.find(
+      (entry) => getSubstrateName(entry) === selectedSubstrate,
+    );
+    set.add(parseActivation(host?.activations));
+    for (const event of persistedEvents) {
+      set.add(parseActivation(event?.activation));
+    }
+    set.add(selectedActivation);
+    return Array.from(set)
+      .filter((n) => Number.isFinite(n))
+      .sort((a, b) => a - b);
+  }, [substrates, selectedSubstrate, persistedEvents, selectedActivation]);
+
   const refreshAll = () => {
     loadNetworks();
     loadSubstrates();
-
     if (selectedSubstrateRef.current) {
       loadHostDiagnostics(selectedSubstrateRef.current);
     }
+    loadObservation();
   };
 
   const handleSubstrateChange = (event) => {
     const name = event.target.value;
 
-    // Invalidate any in-flight diagnostics for the previous substrate.
     diagnosticsRequestRef.current?.abort();
     diagnosticsRequestIdRef.current += 1;
     diagnosticsSubstrateRef.current = name;
 
+    observationRequestRef.current?.abort();
+    observationRequestIdRef.current += 1;
+    observationContextRef.current = "";
+
     requestedSubstrateRef.current = "";
     selectedSubstrateRef.current = name;
+    activationInitializedRef.current = false;
     setSelectedSubstrate(name);
     updateSubstrateQuery(name);
 
-    // Clear stale diagnostics immediately so a late response cannot paint
-    // the previous substrate under the new selection.
     setSubstrateState(null);
     setEventStore(null);
     setStateError("");
     setEventStoreError("");
     setStateStatus(name ? "checking" : "unknown");
     setEventStoreStatus(name ? "checking" : "unknown");
+
+    setObservation(null);
+    setObservationList([]);
+    setObservationError("");
+    setObservationStatus("unknown");
   };
 
   const handlePathSelect = (identifier) => {
+    // Keep ref in sync immediately so observation does not use the prior path.
+    selectedPathRef.current = identifier;
+    observationRequestRef.current?.abort();
+    observationRequestIdRef.current += 1;
     setSelectedPath(identifier);
+    setObservation(null);
+    setObservationList([]);
+    setObservationError("");
+    setObservationStatus(
+      identifier && observationSupportsPath ? "checking" : "unknown",
+    );
+  };
+
+  const handleActivationChange = (event) => {
+    setActivationSynced(event.target.value);
   };
 
   const selectedHostEntry = substrates.find(
@@ -574,6 +944,10 @@ export default function NetworkPage() {
         ? "checking"
         : "unknown";
 
+  const observationRunning = Boolean(observation?.running);
+  const listenPort = observation?.listen_port;
+  const electrumAddress = electrumEndpoint(listenPort);
+
   return (
     <main className="min-h-screen bg-zinc-50 text-zinc-950 dark:bg-zinc-950 dark:text-zinc-50">
       <div className="mx-auto max-w-6xl px-3 py-5 sm:px-4 sm:py-8">
@@ -585,9 +959,10 @@ export default function NetworkPage() {
             Network
           </h1>
           <p className="mt-2 max-w-3xl text-xs leading-5 text-zinc-600 dark:text-zinc-400 sm:text-sm sm:leading-6">
-            Network paths are derivation contexts. The selected substrate is
-            the persistent environment: its saved state and event store are
-            read from the QTM API.
+            The substrate is the persistent host. Network paths are derivation
+            contexts. Observation is scoped to the selected substrate,
+            activation, and path. Electrum listen ports are separate from the
+            API transport and can be used by Birch Wallet and similar clients.
           </p>
           <div className="mt-3.5 flex flex-wrap items-center gap-2">
             <button
@@ -625,12 +1000,35 @@ export default function NetworkPage() {
             </DiagnosticBadge>
             <DiagnosticBadge status={hostStatus}>
               {hostLive
-                ? "Substrate and event store reachable"
+                ? "Substrate reachable"
                 : hostStatus === "error"
                   ? "Substrate check failed"
                   : hostStatus === "checking"
                     ? "Checking substrate"
-                    : "Substrate liveness not confirmed"}
+                    : "Substrate not confirmed"}
+            </DiagnosticBadge>
+            <DiagnosticBadge
+              status={
+                observationRunning
+                  ? "running"
+                  : observationStatus === "error"
+                    ? "error"
+                    : observationStatus === "checking"
+                      ? "checking"
+                      : observationStatus === "live"
+                        ? "live"
+                        : "unknown"
+              }
+            >
+              {observationRunning
+                ? "Observation running"
+                : observationStatus === "checking"
+                  ? "Observation checking"
+                  : observationStatus === "error"
+                    ? "Observation error"
+                    : observation
+                      ? "Observation idle"
+                      : "Observation not started"}
             </DiagnosticBadge>
           </div>
           <p className="mt-2 text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
@@ -659,9 +1057,8 @@ export default function NetworkPage() {
                 Substrate environment
               </h2>
               <p className="mt-1 text-[11px] leading-5 text-zinc-500 dark:text-zinc-400 sm:text-xs">
-                Choose the persistent substrate to inspect. This selection is
-                shared with the main QTM page through the substrate URL
-                parameter.
+                Persistent host for state and events. Shared with the main QTM
+                page through the substrate URL parameter.
               </p>
             </div>
             <DiagnosticBadge status={hostStatus}>
@@ -674,7 +1071,7 @@ export default function NetworkPage() {
                     : "Not checked"}
             </DiagnosticBadge>
           </div>
-          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,8rem)_auto]">
             <label className="block min-w-0">
               <span className="mb-1.5 block text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
                 Substrate
@@ -700,6 +1097,23 @@ export default function NetworkPage() {
                     </option>
                   );
                 })}
+              </select>
+            </label>
+            <label className="block min-w-0">
+              <span className="mb-1.5 block text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                Activation
+              </span>
+              <select
+                value={selectedActivation}
+                onChange={handleActivationChange}
+                disabled={!selectedSubstrate}
+                className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 sm:text-sm"
+              >
+                {activationOptions.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
               </select>
             </label>
             <div className="flex items-end">
@@ -732,9 +1146,6 @@ export default function NetworkPage() {
                         : "Not checked"}
                 </DiagnosticBadge>
               </div>
-              <p className="mt-1 break-all text-[10px] leading-5 text-zinc-500 dark:text-zinc-400">
-                GET /wallets/{selectedSubstrate || ":name"}
-              </p>
               {stateError && (
                 <p className="mt-2 break-words text-xs text-red-700 dark:text-red-300">
                   {stateError}
@@ -754,9 +1165,6 @@ export default function NetworkPage() {
                         : "Not checked"}
                 </DiagnosticBadge>
               </div>
-              <p className="mt-1 break-all text-[10px] leading-5 text-zinc-500 dark:text-zinc-400">
-                GET /wallets/{selectedSubstrate || ":name"}/events
-              </p>
               {eventStoreError && (
                 <p className="mt-2 break-words text-xs text-red-700 dark:text-red-300">
                   {eventStoreError}
@@ -812,8 +1220,8 @@ export default function NetworkPage() {
               />
             </div>
             <p className="px-3 pb-3 text-[10px] leading-5 text-zinc-500 dark:text-zinc-400 sm:px-4">
-              Entropy content is intentionally not displayed. This diagnostic
-              reports whether the field exists without exposing its value.
+              Entropy content is not displayed. This report only indicates
+              whether the field is present.
             </p>
           </section>
         )}
@@ -825,8 +1233,8 @@ export default function NetworkPage() {
                 Registered network paths
               </h2>
               <p className="mt-1 text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
-                Select a path to inspect its derivation context. Persisted
-                events remain scoped to the selected substrate.
+                Derivation contexts. Select a path to scope observation.
+                Persisted events stay on the substrate.
               </p>
             </div>
             <span className="text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
@@ -849,6 +1257,7 @@ export default function NetworkPage() {
                 {networks.map((network, index) => {
                   const identifier = getPathIdentifier(network);
                   const selected = identifier === selectedPath;
+                  const bitcoin = isBitcoinNetwork(network);
                   return (
                     <tr
                       key={`${network.id ?? identifier}-${index}`}
@@ -858,6 +1267,11 @@ export default function NetworkPage() {
                     >
                       <td className="px-3 py-2.5 font-medium sm:px-4">
                         {displayValue(network.name ?? identifier)}
+                        {bitcoin && (
+                          <span className="ml-2 text-[10px] font-normal text-sky-600 dark:text-sky-400">
+                            observation
+                          </span>
+                        )}
                       </td>
                       <td className="px-3 py-2.5 font-mono text-[10px] text-zinc-500 sm:px-4 sm:text-xs">
                         {displayValue(network.id)}
@@ -890,7 +1304,7 @@ export default function NetworkPage() {
                       colSpan={6}
                       className="px-3 py-8 text-center text-xs text-zinc-500 sm:px-4 sm:text-sm"
                     >
-                      No registered paths were returned by the API.
+                      No registered paths were returned.
                     </td>
                   </tr>
                 )}
@@ -916,11 +1330,283 @@ export default function NetworkPage() {
                 {getPathIdentifier(selectedNetwork)}
               </p>
               <p className="mt-1 text-[10px] leading-5 text-zinc-500 dark:text-zinc-400 sm:text-xs">
-                This is a registered path context. It does not create a
-                separate host or independent event directory; records are
-                read from the selected substrate.
+                Derivation context only. Observation for supported Bitcoin
+                paths is below; event records remain on the selected substrate.
               </p>
             </div>
+          )}
+        </section>
+
+        <section className="mt-4 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
+            <div className="min-w-0 flex-1">
+              <h2 className="text-sm font-semibold sm:text-base">
+                Network observation
+              </h2>
+              <p className="mt-1 text-[10px] leading-5 text-zinc-500 dark:text-zinc-400 sm:text-xs">
+                Scoped to the selected substrate, activation, and network path.
+                Status reflects what the runtime reports. Electrum listen ports
+                (for Birch Wallet) are distinct from the API transport.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <DiagnosticBadge
+                status={
+                  observationRunning
+                    ? "running"
+                    : observationStatus === "error"
+                      ? "error"
+                      : observationStatus === "checking"
+                        ? "checking"
+                        : observation
+                          ? "live"
+                          : "unknown"
+                }
+              >
+                {observationRunning
+                  ? "Running"
+                  : observationStatus === "checking"
+                    ? "Checking"
+                    : observationStatus === "error"
+                      ? "Error"
+                      : observation
+                        ? "Idle"
+                        : "Not started"}
+              </DiagnosticBadge>
+              {observationSupportsPath ? (
+                <DiagnosticBadge status="unknown">Bitcoin path</DiagnosticBadge>
+              ) : (
+                <DiagnosticBadge status="unknown">
+                  Observation N/A
+                </DiagnosticBadge>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-2 border-b border-zinc-200 p-3 dark:border-zinc-800 sm:grid-cols-3 sm:p-4">
+            <DiagnosticValue
+              label="Substrate"
+              value={selectedSubstrate || "—"}
+            />
+            <DiagnosticValue label="Activation" value={selectedActivation} />
+            <DiagnosticValue
+              label="Network id"
+              value={selectedNetworkId || "—"}
+            />
+            <DiagnosticValue
+              label="Registered path"
+              value={
+                selectedNetwork
+                  ? getPathIdentifier(selectedNetwork)
+                  : selectedPath || "—"
+              }
+            />
+            <DiagnosticValue
+              label="Last check"
+              value={
+                lastObservationCheck
+                  ? lastObservationCheck.toLocaleTimeString()
+                  : "—"
+              }
+            />
+          </div>
+
+          {!observationSupportsPath && selectedNetwork && (
+            <p className="px-3 py-4 text-xs text-zinc-500 dark:text-zinc-400 sm:px-4">
+              Observation is available for Bitcoin paths only. Select
+              bitcoin-legacy or bitcoin-native-segwit.
+            </p>
+          )}
+
+          {observationSupportsPath && (
+            <div className="flex flex-wrap items-center gap-2 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
+              <button
+                type="button"
+                onClick={startObservation}
+                disabled={
+                  !selectedSubstrate ||
+                  !selectedNetworkId ||
+                  observationActionLoading ||
+                  observationRunning
+                }
+                className="inline-flex h-9 items-center justify-center rounded-md bg-zinc-950 px-3.5 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950"
+              >
+                {observationActionLoading && !observationRunning
+                  ? "Starting…"
+                  : "Start observation"}
+              </button>
+              <button
+                type="button"
+                onClick={stopObservation}
+                disabled={
+                  !selectedSubstrate ||
+                  !selectedNetworkId ||
+                  observationActionLoading ||
+                  !observationRunning
+                }
+                className="inline-flex h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+              >
+                {observationActionLoading && observationRunning
+                  ? "Stopping…"
+                  : "Stop observation"}
+              </button>
+              <button
+                type="button"
+                onClick={() => loadObservation()}
+                disabled={
+                  !selectedSubstrate ||
+                  !selectedNetworkId ||
+                  observationLoading
+                }
+                className="inline-flex h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+              >
+                {observationLoading ? "Refreshing…" : "Refresh status"}
+              </button>
+            </div>
+          )}
+
+          {observationError && (
+            <div className="p-3 sm:p-4">
+              <ErrorMessage>{observationError}</ErrorMessage>
+            </div>
+          )}
+
+          {observation && (
+            <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-3 sm:p-4 lg:grid-cols-4">
+              <DiagnosticValue
+                label="Running"
+                value={observation.running ? "yes" : "no"}
+              />
+              <DiagnosticValue
+                label="Commitment"
+                value={observation.commitment}
+              />
+              <DiagnosticValue
+                label="Electrum listen port"
+                value={listenPort}
+              />
+              <DiagnosticValue
+                label="Electrum endpoint"
+                value={electrumAddress}
+              />
+              <DiagnosticValue label="Path hint" value={observation.path} />
+              <DiagnosticValue label="Message" value={observation.message} />
+              <DiagnosticValue
+                label="Runtime"
+                value={
+                  observation.runtime?.unix_seconds !== undefined
+                    ? formatTimestamp(observation.runtime.unix_seconds)
+                    : "—"
+                }
+              />
+              <DiagnosticValue
+                label="Clips"
+                value={
+                  Array.isArray(observation.clips)
+                    ? observation.clips.length
+                    : 0
+                }
+              />
+            </div>
+          )}
+
+          {observation?.clips?.length > 0 && (
+            <div className="border-t border-zinc-200 dark:border-zinc-800">
+              <div className="px-3 py-2.5 sm:px-4">
+                <h3 className="text-xs font-semibold sm:text-sm">
+                  Observation clips
+                </h3>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[480px] border-collapse text-left text-xs">
+                  <thead className="bg-zinc-100 text-[10px] uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                    <tr>
+                      <th className="px-3 py-2 sm:px-4">Substrate</th>
+                      <th className="px-3 py-2 sm:px-4">Active</th>
+                      <th className="px-3 py-2 sm:px-4">Direction</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                    {observation.clips.map((clip, index) => (
+                      <tr key={`${clip.substrate ?? "clip"}-${index}`}>
+                        <td className="px-3 py-2 font-mono text-[10px] sm:px-4">
+                          {displayValue(clip.substrate)}
+                        </td>
+                        <td className="px-3 py-2 sm:px-4">
+                          {clip.active ? "yes" : "no"}
+                        </td>
+                        <td className="px-3 py-2 sm:px-4">
+                          {displayValue(clip.direction)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {observationList.length > 0 && (
+            <div className="border-t border-zinc-200 dark:border-zinc-800">
+              <div className="px-3 py-2.5 sm:px-4">
+                <h3 className="text-xs font-semibold sm:text-sm">
+                  Activation observation list
+                </h3>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[640px] border-collapse text-left text-xs">
+                  <thead className="bg-zinc-100 text-[10px] uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                    <tr>
+                      <th className="px-3 py-2 sm:px-4">Network</th>
+                      <th className="px-3 py-2 sm:px-4">Commitment</th>
+                      <th className="px-3 py-2 sm:px-4">Port</th>
+                      <th className="px-3 py-2 sm:px-4">Running</th>
+                      <th className="px-3 py-2 sm:px-4">Path</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                    {observationList.map((row, index) => (
+                      <tr
+                        key={`${row.network}-${row.commitment}-${index}`}
+                        className="align-top"
+                      >
+                        <td className="px-3 py-2 font-medium sm:px-4">
+                          {displayValue(row.network)}
+                        </td>
+                        <td className="max-w-[180px] break-all px-3 py-2 font-mono text-[10px] sm:px-4">
+                          {displayValue(row.commitment)}
+                        </td>
+                        <td className="px-3 py-2 tabular-nums sm:px-4">
+                          {displayValue(row.listen_port)}
+                        </td>
+                        <td className="px-3 py-2 sm:px-4">
+                          {row.running ? "yes" : "no"}
+                        </td>
+                        <td className="break-all px-3 py-2 font-mono text-[10px] sm:px-4">
+                          {displayValue(row.path)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {observationSupportsPath &&
+            !observation &&
+            !observationLoading &&
+            !observationError && (
+              <p className="px-3 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400 sm:px-4">
+                No live observation for this path. Start one to bind an
+                Electrum listen port from the substrate commitment.
+              </p>
+            )}
+
+          {observationLoading && !observation && (
+            <p className="px-3 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400 sm:px-4">
+              Loading observation status…
+            </p>
           )}
         </section>
 
@@ -1059,8 +1745,8 @@ export default function NetworkPage() {
                             colSpan={7}
                             className="px-3 py-8 text-center text-zinc-500 dark:text-zinc-400"
                           >
-                            The event endpoint is reachable, but no persisted
-                            event records were returned for this substrate.
+                            Event store is reachable, but no records were
+                            returned for this substrate.
                           </td>
                         </tr>
                       )}
@@ -1099,8 +1785,8 @@ export default function NetworkPage() {
         </section>
 
         <footer className="mt-6 border-t border-zinc-200 pt-3.5 text-[10px] leading-5 text-zinc-500 dark:border-zinc-800 sm:mt-8 sm:pt-4 sm:text-xs">
-          QTM Network · Substrate-scoped diagnostics · Persistent event-store
-          liveness · qtm-api
+          QTM Network · Substrate host · Path-scoped observation · Electrum
+          endpoints · Event-store diagnostics · qtm-api
         </footer>
       </div>
     </main>
