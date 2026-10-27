@@ -150,11 +150,11 @@ function DiagnosticBadge({ status, children }) {
 
 function DiagnosticValue({ label, value }) {
   return (
-    <div>
-      <p className="text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+    <div className="min-w-0 overflow-hidden">
+      <p className="break-words text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400 [overflow-wrap:anywhere]">
         {label}
       </p>
-      <p className="mt-0.5 break-all text-xs font-medium">
+      <p className="mt-0.5 min-w-0 break-words text-xs font-medium [overflow-wrap:anywhere]">
         {displayValue(value)}
       </p>
     </div>
@@ -452,12 +452,13 @@ export default function NetworkPage() {
   const selectedNetworkId = selectedNetwork ? getNetworkId(selectedNetwork) : "";
   const observationSupportsPath = selectedNetwork ? isBitcoinNetwork(selectedNetwork) : false;
 
-  const loadObservation = useCallback(
+      const loadObservation = useCallback(
     async ({ silent = false } = {}) => {
       const name = selectedSubstrateRef.current;
       const networkId = selectedNetworkId;
       const activation = selectedActivationRef.current;
       const pathId = selectedPathRef.current;
+
       observationRequestRef.current?.abort();
 
       if (!name || !networkId || !pathId || !observationSupportsPath) {
@@ -472,10 +473,12 @@ export default function NetworkPage() {
       }
 
       const requestId = ++observationRequestIdRef.current;
-      const contextKey = `${name}:${activation}:${networkId}`;
+      const contextKey = `${name}:${activation}:${networkId}:${pathId}`;
       observationContextRef.current = contextKey;
+
       const controller = new AbortController();
       observationRequestRef.current = controller;
+
       const isCurrent = () =>
         requestId === observationRequestIdRef.current &&
         observationContextRef.current === contextKey &&
@@ -489,24 +492,48 @@ export default function NetworkPage() {
         setObservationError("");
         setObservationStatus("checking");
       } else {
-        setObservationStatus((status) => status === "error" ? status : "checking");
+        setObservationStatus((status) =>
+          status === "error" ? status : "checking",
+        );
       }
+
       setObservationLoading(true);
 
       const encodedName = encodeURIComponent(name);
       const encodedNetwork = encodeURIComponent(networkId);
+      const basePath =
+        `/wallets/${encodedName}/activations/${activation}`;
+
       try {
         const [statusResult, listResult] = await Promise.allSettled([
-          apiRequest(`/wallets/${encodedName}/activations/${activation}/networks/${encodedNetwork}/observation`, controller.signal),
-          apiRequest(`/wallets/${encodedName}/activations/${activation}/observations`, controller.signal),
+          apiRequest(
+            `${basePath}/networks/${encodedNetwork}/observation`,
+            controller.signal,
+          ),
+          apiRequest(
+            `${basePath}/observations`,
+            controller.signal,
+          ),
         ]);
+
         if (!isCurrent()) return;
-        const listAborted = listResult.status === "rejected" && listResult.reason?.name === "AbortError";
-        const statusAborted = statusResult.status === "rejected" && statusResult.reason?.name === "AbortError";
-        if (listAborted || statusAborted) return;
+
+        const statusAborted =
+          statusResult.status === "rejected" &&
+          statusResult.reason?.name === "AbortError";
+        const listAborted =
+          listResult.status === "rejected" &&
+          listResult.reason?.name === "AbortError";
+
+        if (statusAborted || listAborted) return;
 
         if (listResult.status === "fulfilled") {
-          setObservationList(normalizeEntries(listResult.value, ["pipelines", "observations"]));
+          setObservationList(
+            normalizeEntries(listResult.value, [
+              "pipelines",
+              "observations",
+            ]),
+          );
         } else {
           setObservationList([]);
         }
@@ -518,25 +545,40 @@ export default function NetworkPage() {
           setObservationError("");
         } else {
           const error = statusResult.reason;
-          const message = error instanceof Error ? error.message : "Observation status unavailable.";
-          const notFound = message.includes("[HTTP 404]") || message.toLowerCase().includes("no live");
+          const message =
+            error instanceof Error
+              ? error.message
+              : "Observation status unavailable.";
+
+          const notFound =
+            message.includes("[HTTP 404]") ||
+            message.toLowerCase().includes("no live") ||
+            message.toLowerCase().includes("not found");
+
           setObservation(null);
           setObservationStatus(notFound ? "unknown" : "error");
           setObservationError(notFound ? "" : message);
         }
+
         setLastObservationCheck(new Date());
       } catch (error) {
         if (error?.name === "AbortError" || !isCurrent()) return;
+
         setObservation(null);
         setObservationStatus("error");
-        setObservationError(error instanceof Error ? error.message : "Observation status unavailable.");
+        setObservationError(
+          error instanceof Error
+            ? error.message
+            : "Observation status unavailable.",
+        );
       } finally {
-        if (isCurrent()) setObservationLoading(false);
+        if (isCurrent()) {
+          setObservationLoading(false);
+        }
       }
     },
     [observationSupportsPath, selectedNetworkId],
   );
-
   const loadBitMinerRefresh = useCallback(
     async ({ silent = false } = {}) => {
       const name = selectedSubstrateRef.current;
@@ -588,59 +630,87 @@ export default function NetworkPage() {
   );
 
   const startObservation = useCallback(async () => {
-    const name = selectedSubstrateRef.current;
-    const networkId = selectedNetworkId;
-    const activation = selectedActivationRef.current;
-    const pathHint = selectedNetwork?.path || selectedPathRef.current;
-    if (!name || !networkId) return;
-    setObservationActionLoading(true);
-    setObservationError("");
+  const name = selectedSubstrateRef.current;
+  const networkId = selectedNetworkId;
+  const activation = selectedActivationRef.current;
+  const pathHint = selectedNetwork?.path || selectedPathRef.current;
 
-    try {
-      const encodedName = encodeURIComponent(name);
-      const encodedNetwork = encodeURIComponent(networkId);
-      const body = {};
-      if (pathHint) body.path = pathHint;
-      await apiRequest(
-        `/wallets/${encodedName}/activations/${activation}/networks/${encodedNetwork}/observation`,
-        undefined,
-        { method: "POST", body },
-      );
-      await loadObservation({ silent: true });
-    } catch (error) {
-      if (error?.name === "AbortError") return;
-      setObservationError(error instanceof Error ? error.message : "Unable to start observation pipeline.");
-      setObservationStatus("error");
-    } finally {
-      setObservationActionLoading(false);
-    }
-  }, [loadObservation, selectedNetwork, selectedNetworkId]);
+  if (!name || !networkId) return;
 
-  const stopObservation = useCallback(async () => {
-    const name = selectedSubstrateRef.current;
-    const networkId = selectedNetworkId;
-    const activation = selectedActivationRef.current;
-    if (!name || !networkId) return;
-    setObservationActionLoading(true);
-    setObservationError("");
+  setObservationActionLoading(true);
+  setObservationError("");
 
-    try {
-      const encodedName = encodeURIComponent(name);
-      const encodedNetwork = encodeURIComponent(networkId);
-      await apiRequest(
-        `/wallets/${encodedName}/activations/${activation}/networks/${encodedNetwork}/observation`,
-        undefined,
-        { method: "DELETE" },
-      );
-      await loadObservation({ silent: true });
-    } catch (error) {
-      if (error?.name === "AbortError") return;
-      setObservationError(error instanceof Error ? error.message : "Unable to stop observation pipeline.");
-      setObservationStatus("error");
-    } finally {
-      setObservationActionLoading(false);
-    }
-  }, [loadObservation, selectedNetworkId]);
+  try {
+    const encodedName = encodeURIComponent(name);
+    const encodedNetwork = encodeURIComponent(networkId);
+    const body = {};
+
+    if (pathHint) body.path = pathHint;
+
+    const started = await apiRequest(
+      `/wallets/${encodedName}/activations/${activation}/networks/${encodedNetwork}/observation`,
+      undefined,
+      { method: "POST", body },
+    );
+
+    setObservation(started);
+    setObservationStatus(started?.running ? "running" : "live");
+    setLastObservationCheck(new Date());
+
+    await loadObservation({ silent: true });
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+
+    setObservationError(
+      error instanceof Error
+        ? error.message
+        : "Unable to start observation pipeline.",
+    );
+    setObservationStatus("error");
+  } finally {
+    setObservationActionLoading(false);
+  }
+}, [loadObservation, selectedNetwork, selectedNetworkId]);
+
+const stopObservation = useCallback(async () => {
+  const name = selectedSubstrateRef.current;
+  const networkId = selectedNetworkId;
+  const activation = selectedActivationRef.current;
+
+  if (!name || !networkId) return;
+
+  setObservationActionLoading(true);
+  setObservationError("");
+
+  try {
+    const encodedName = encodeURIComponent(name);
+    const encodedNetwork = encodeURIComponent(networkId);
+
+    const stopped = await apiRequest(
+      `/wallets/${encodedName}/activations/${activation}/networks/${encodedNetwork}/observation`,
+      undefined,
+      { method: "DELETE" },
+    );
+
+    // Preserve the API's stop response instead of immediately replacing it
+    // with a GET that can return 404 after the registry entry is removed.
+    setObservation({ ...stopped, running: false });
+    setObservationStatus("live");
+    setObservationList([]);
+    setLastObservationCheck(new Date());
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+
+    setObservationError(
+      error instanceof Error
+        ? error.message
+        : "Unable to stop observation pipeline.",
+    );
+    setObservationStatus("error");
+  } finally {
+    setObservationActionLoading(false);
+  }
+}, [selectedNetworkId]);
 
   useEffect(() => {
     loadNetworks();
