@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -105,19 +104,6 @@ function getSubstrateName(entry) {
   return String(entry?.name ?? "");
 }
 
-// Retained as a general utility; observation availability does not depend on it.
-function isBitcoinNetwork(entry) {
-  const id = getNetworkId(entry).toLowerCase();
-  const name = String(entry?.name ?? "").toLowerCase();
-
-  return (
-    entry?.coin === 0 ||
-    id.includes("bitcoin") ||
-    id === "btc" ||
-    name.includes("bitcoin")
-  );
-}
-
 function formatTimestamp(value) {
   if (value === null || value === undefined || value === "") return "—";
 
@@ -158,7 +144,7 @@ function diagnosticClass(status) {
 function DiagnosticBadge({ status, children }) {
   return (
     <span
-      className={`inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-medium ${diagnosticClass(status)}`}
+      className={`inline-flex max-w-full items-center rounded-full border px-2 py-1 text-[10px] font-medium [overflow-wrap:anywhere] ${diagnosticClass(status)}`}
     >
       {children}
     </span>
@@ -182,7 +168,7 @@ function ErrorMessage({ children }) {
   if (!children) return null;
 
   return (
-    <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+    <div className="min-w-0 break-words rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300 [overflow-wrap:anywhere]">
       {children}
     </div>
   );
@@ -237,6 +223,24 @@ function resolvePreferredSubstrate(entries, preferred, current) {
   if (current && names.includes(current)) return current;
 
   return names[0] || "";
+}
+
+function getRefreshPath(result) {
+  const path = result?.refresh_path;
+
+  return typeof path === "string" && path.trim().length > 0
+    ? path.trim()
+    : "Unavailable";
+}
+
+function isUnavailableError(error) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+
+  return (
+    message.includes("[HTTP 404]") ||
+    message.toLowerCase().includes("not found") ||
+    message.toLowerCase().includes("unavailable")
+  );
 }
 
 export default function NetworkPage() {
@@ -634,10 +638,7 @@ export default function NetworkPage() {
             `${basePath}/networks/${encodedNetwork}/observation`,
             controller.signal,
           ),
-          apiRequest(
-            `${basePath}/observations`,
-            controller.signal,
-          ),
+          apiRequest(`${basePath}/observations`, controller.signal),
         ]);
 
         if (!isCurrent()) return;
@@ -705,7 +706,7 @@ export default function NetworkPage() {
     [selectedNetworkId],
   );
 
-  // This request only checks the activation-scoped refresh path.
+  // This request checks only the activation-scoped refresh-path endpoint.
   // It does not start, stop, or refresh the miner's internal pipeline.
   const loadBitMinerRefresh = useCallback(
     async ({ silent = false } = {}) => {
@@ -719,7 +720,7 @@ export default function NetworkPage() {
         setBitMinerRefresh(null);
         setBitMinerRefreshError("");
         setBitMinerRefreshLoading(false);
-
+        setLastBitMinerRefreshCheck(null);
         return;
       }
 
@@ -750,18 +751,26 @@ export default function NetworkPage() {
 
         setBitMinerRefresh(result);
         setBitMinerRefreshError("");
-        setLastBitMinerRefreshCheck(new Date());
       } catch (error) {
         if (error?.name === "AbortError" || !isCurrent()) return;
 
         setBitMinerRefresh(null);
-        setBitMinerRefreshError(
+
+        const message =
           error instanceof Error
             ? error.message
-            : "Unable to read the bit-miner refresh path.",
+            : "Refresh-path check unavailable.";
+
+        setBitMinerRefreshError(
+          isUnavailableError(error)
+            ? `Refresh-path check unavailable: ${message}`
+            : message,
         );
       } finally {
-        if (isCurrent()) setBitMinerRefreshLoading(false);
+        if (isCurrent()) {
+          setLastBitMinerRefreshCheck(new Date());
+          setBitMinerRefreshLoading(false);
+        }
       }
     },
     [],
@@ -791,6 +800,8 @@ export default function NetworkPage() {
 
       const body = pathHint ? { path: pathHint } : {};
 
+      // POST requests observation start. Pipeline execution remains
+      // owned by bit-miner/src/main.rs.
       const started = await apiRequest(basePath, undefined, {
         method: "POST",
         body,
@@ -834,6 +845,7 @@ export default function NetworkPage() {
         `/wallets/${encodedName}/activations/${activation}` +
         `/networks/${encodedNetwork}/observation`;
 
+      // DELETE requests observation stop.
       const stopped = await apiRequest(basePath, undefined, {
         method: "DELETE",
       });
@@ -1013,6 +1025,7 @@ export default function NetworkPage() {
 
     setBitMinerRefresh(null);
     setBitMinerRefreshError("");
+    setLastBitMinerRefreshCheck(null);
   };
 
   const handlePathSelect = (identifier) => {
@@ -1028,7 +1041,7 @@ export default function NetworkPage() {
     setObservationError("");
 
     setObservationStatus(
-      identifier && observationHasNetworkContext ? "checking" : "unknown",
+      identifier && selectedNetwork ? "checking" : "unknown",
     );
   };
 
@@ -1054,9 +1067,17 @@ export default function NetworkPage() {
   const listenPort = observation?.listen_port;
   const electrumAddress = electrumEndpoint(listenPort);
 
+  const refreshStatus = bitMinerRefreshError
+    ? "error"
+    : bitMinerRefreshLoading
+      ? "checking"
+      : bitMinerRefresh
+        ? "live"
+        : "unknown";
+
   return (
-    <main className="min-h-screen bg-zinc-50 text-zinc-950 dark:bg-zinc-950 dark:text-zinc-50">
-      <div className="mx-auto max-w-6xl px-3 py-5 sm:px-4 sm:py-8">
+    <main className="min-h-screen w-full min-w-0 overflow-x-hidden bg-zinc-50 text-zinc-950 dark:bg-zinc-950 dark:text-zinc-50">
+      <div className="mx-auto w-full min-w-0 max-w-7xl px-3 py-4 sm:px-5 sm:py-7 lg:px-8">
         <header className="mb-5 sm:mb-6">
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
             QuantPerm · QTM
@@ -1070,7 +1091,7 @@ export default function NetworkPage() {
             The substrate is the persistent host. Network paths are derivation
             contexts. Observation is scoped to the selected substrate,
             activation, and path. Electrum listen ports are separate from the
-            API transport and can be used by Birch Wallet and similar clients.
+            API transport and can be used by compatible wallet clients.
           </p>
 
           <div className="mt-3.5 flex flex-wrap items-center gap-2">
@@ -1078,7 +1099,7 @@ export default function NetworkPage() {
               type="button"
               onClick={refreshAll}
               disabled={networkLoading || substrateLoading}
-              className="inline-flex h-9 items-center justify-center rounded-md bg-zinc-950 px-3.5 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 sm:text-sm"
+              className="inline-flex min-h-9 items-center justify-center rounded-md bg-zinc-950 px-3.5 py-2 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 sm:text-sm"
             >
               {networkLoading || substrateLoading ? "Loading…" : "Refresh"}
             </button>
@@ -1086,7 +1107,7 @@ export default function NetworkPage() {
             <button
               type="button"
               onClick={() => setAutoRefresh((value) => !value)}
-              className="inline-flex h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 text-xs font-medium dark:border-zinc-700 sm:text-sm"
+              className="inline-flex min-h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 py-2 text-xs font-medium dark:border-zinc-700 sm:text-sm"
             >
               Live updates: {autoRefresh ? "On" : "Off"}
             </button>
@@ -1097,7 +1118,7 @@ export default function NetworkPage() {
                   ? `/?substrate=${encodeURIComponent(selectedSubstrate)}`
                   : "/"
               }
-              className="inline-flex h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 text-xs font-medium dark:border-zinc-700 sm:text-sm"
+              className="inline-flex min-h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 py-2 text-xs font-medium dark:border-zinc-700 sm:text-sm"
             >
               Back to QTM
             </a>
@@ -1147,7 +1168,7 @@ export default function NetworkPage() {
             </DiagnosticBadge>
           </div>
 
-          <p className="mt-2 text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
+          <p className="mt-2 break-words text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
             {lastNetworkCheck
               ? `Paths checked ${lastNetworkCheck.toLocaleTimeString()}`
               : "Waiting for network data"}
@@ -1166,7 +1187,7 @@ export default function NetworkPage() {
           </div>
         )}
 
-        <section className="mb-4 rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900 sm:p-4">
+        <section className="mb-4 min-w-0 rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900 sm:p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
               <h2 className="text-sm font-semibold sm:text-base">
@@ -1190,7 +1211,7 @@ export default function NetworkPage() {
             </DiagnosticBadge>
           </div>
 
-          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,8rem)_auto]">
+          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,8rem)] lg:grid-cols-[minmax(0,1fr)_minmax(0,8rem)_auto]">
             <label className="block min-w-0">
               <span className="mb-1.5 block text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
                 Substrate
@@ -1200,7 +1221,7 @@ export default function NetworkPage() {
                 value={selectedSubstrate}
                 onChange={handleSubstrateChange}
                 disabled={substrateLoading || substrates.length === 0}
-                className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 sm:text-sm"
+                className="h-10 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 sm:text-sm"
               >
                 {substrates.length === 0 && (
                   <option value="">
@@ -1231,7 +1252,7 @@ export default function NetworkPage() {
                 value={selectedActivation}
                 onChange={handleActivationChange}
                 disabled={!selectedSubstrate}
-                className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 sm:text-sm"
+                className="h-10 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 sm:text-sm"
               >
                 {activationOptions.map((value) => (
                   <option key={value} value={value}>
@@ -1241,12 +1262,12 @@ export default function NetworkPage() {
               </select>
             </label>
 
-            <div className="flex items-end">
+            <div className="flex items-end sm:col-span-2 lg:col-span-1">
               <button
                 type="button"
                 onClick={() => loadHostDiagnostics(selectedSubstrate)}
                 disabled={!selectedSubstrate || diagnosticsLoading}
-                className="h-10 w-full rounded-md border border-zinc-300 px-3 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800 sm:w-auto sm:text-sm"
+                className="h-10 w-full rounded-md border border-zinc-300 px-3 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800 sm:text-sm lg:w-auto"
               >
                 {diagnosticsLoading ? "Checking…" : "Check substrate"}
               </button>
@@ -1260,7 +1281,7 @@ export default function NetworkPage() {
           )}
 
           <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-            <div className="rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
+            <div className="min-w-0 rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-xs font-semibold">Persisted system state</p>
 
@@ -1276,13 +1297,13 @@ export default function NetworkPage() {
               </div>
 
               {stateError && (
-                <p className="mt-2 break-words text-xs text-red-700 dark:text-red-300">
+                <p className="mt-2 break-words text-xs text-red-700 dark:text-red-300 [overflow-wrap:anywhere]">
                   {stateError}
                 </p>
               )}
             </div>
 
-            <div className="rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
+            <div className="min-w-0 rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-xs font-semibold">Persistent event store</p>
 
@@ -1298,7 +1319,7 @@ export default function NetworkPage() {
               </div>
 
               {eventStoreError && (
-                <p className="mt-2 break-words text-xs text-red-700 dark:text-red-300">
+                <p className="mt-2 break-words text-xs text-red-700 dark:text-red-300 [overflow-wrap:anywhere]">
                   {eventStoreError}
                 </p>
               )}
@@ -1313,7 +1334,7 @@ export default function NetworkPage() {
         </section>
 
         {substrateState && (
-          <section className="mb-4 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+          <section className="mb-4 min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
             <div className="border-b border-zinc-200 px-3 py-2.5 dark:border-zinc-800 sm:px-4">
               <h2 className="text-sm font-semibold sm:text-base">
                 Substrate system state
@@ -1324,7 +1345,7 @@ export default function NetworkPage() {
               </p>
             </div>
 
-            <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-3 sm:p-4 lg:grid-cols-4">
+            <div className="grid grid-cols-1 gap-3 p-3 min-[420px]:grid-cols-2 sm:grid-cols-3 sm:p-4 lg:grid-cols-4">
               <DiagnosticValue label="Substrate" value={selectedSubstrate} />
               <DiagnosticValue label="Dimension" value={substrateState.dimension} />
               <DiagnosticValue label="Commitment" value={substrateState.commitment} />
@@ -1355,9 +1376,9 @@ export default function NetworkPage() {
           </section>
         )}
 
-        <section className="overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+        <section className="min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 px-3 py-2.5 dark:border-zinc-800 sm:px-4">
-            <div>
+            <div className="min-w-0">
               <h2 className="text-sm font-semibold sm:text-base">
                 Registered network paths
               </h2>
@@ -1373,8 +1394,8 @@ export default function NetworkPage() {
             </span>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[680px] border-collapse text-left text-xs sm:text-sm">
+          <div className="w-full min-w-0 overflow-x-auto">
+            <table className="w-full min-w-[640px] border-collapse text-left text-xs sm:text-sm">
               <thead className="bg-zinc-100 text-[10px] uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300 sm:text-xs">
                 <tr>
                   <th className="px-3 py-2.5 sm:px-4">Network</th>
@@ -1476,9 +1497,9 @@ export default function NetworkPage() {
           )}
         </section>
 
-        <section className="mt-4 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
-            <div>
+        <section className="mt-4 min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
+          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
+            <div className="min-w-0 flex-1">
               <h2 className="text-sm font-semibold sm:text-base">
                 bit-miner refresh status
               </h2>
@@ -1490,17 +1511,7 @@ export default function NetworkPage() {
               </p>
             </div>
 
-            <DiagnosticBadge
-              status={
-                bitMinerRefreshError
-                  ? "error"
-                  : bitMinerRefreshLoading
-                    ? "checking"
-                    : bitMinerRefresh
-                      ? "live"
-                      : "unknown"
-              }
-            >
+            <DiagnosticBadge status={refreshStatus}>
               {bitMinerRefreshError
                 ? "Unavailable"
                 : bitMinerRefreshLoading
@@ -1511,40 +1522,37 @@ export default function NetworkPage() {
             </DiagnosticBadge>
           </div>
 
-          <div className="grid grid-cols-1 gap-3 p-3 sm:grid-cols-2 sm:p-4">
+          <div className="grid grid-cols-1 gap-4 p-3 min-[420px]:grid-cols-2 sm:p-4 lg:grid-cols-3">
             <DiagnosticValue
               label="Substrate"
               value={selectedSubstrate || "—"}
             />
 
             <DiagnosticValue
-              label="Activation entry"
+              label="Activation"
               value={selectedActivation}
             />
 
             <DiagnosticValue
-              label="Entrypoint"
-              value={bitMinerRefresh?.entrypoint ?? "bit-miner/src/main.rs"}
+              label="Execution owner"
+              value="bit-miner/src/main.rs"
             />
 
             <DiagnosticValue
               label="Refresh path"
-              value={
-                bitMinerRefresh?.refresh_path ??
-                "src/refresh/bitcoin/transAction"
-              }
+              value={getRefreshPath(bitMinerRefresh)}
             />
 
             <DiagnosticValue
               label="Activation path"
-              value={bitMinerRefresh?.activation_path}
+              value={bitMinerRefresh?.activation_path ?? "Unavailable"}
             />
 
             <DiagnosticValue
-              label="Execution ownership"
+              label="Execution status"
               value={
                 bitMinerRefresh?.independently_run === true
-                  ? "Independent bit-miner execution"
+                  ? "Independent execution reported"
                   : "Not confirmed by runtime"
               }
             />
@@ -1564,12 +1572,16 @@ export default function NetworkPage() {
               type="button"
               onClick={() => loadBitMinerRefresh()}
               disabled={!selectedSubstrate || bitMinerRefreshLoading}
-              className="inline-flex h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+              className="inline-flex min-h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 py-2 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
             >
               {bitMinerRefreshLoading
                 ? "Checking path…"
                 : "Check refresh path"}
             </button>
+
+            <span className="min-w-0 text-[10px] leading-5 text-zinc-500 dark:text-zinc-400 sm:text-xs">
+              Status/path check only. Does not launch or refresh the miner.
+            </span>
           </div>
 
           {bitMinerRefreshError && (
@@ -1579,9 +1591,9 @@ export default function NetworkPage() {
           )}
         </section>
 
-        <section className="mt-4 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
-            <div>
+        <section className="mt-4 min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
+          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
+            <div className="min-w-0 flex-1">
               <h2 className="text-sm font-semibold sm:text-base">
                 Network observation
               </h2>
@@ -1589,8 +1601,7 @@ export default function NetworkPage() {
               <p className="mt-1 text-[10px] leading-5 text-zinc-500 dark:text-zinc-400 sm:text-xs">
                 Scoped to the selected substrate, activation, and network
                 path. Status reflects what the runtime reports. Electrum
-                listen ports (for Birch Wallet) are distinct from the API
-                transport.
+                listen ports are distinct from the API transport.
               </p>
             </div>
 
@@ -1627,7 +1638,7 @@ export default function NetworkPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-2 border-b border-zinc-200 p-3 dark:border-zinc-800 sm:grid-cols-3 sm:p-4">
+          <div className="grid grid-cols-1 gap-4 border-b border-zinc-200 p-3 min-[420px]:grid-cols-2 sm:grid-cols-3 sm:p-4 lg:grid-cols-4">
             <DiagnosticValue
               label="Substrate"
               value={selectedSubstrate || "—"}
@@ -1639,7 +1650,7 @@ export default function NetworkPage() {
             />
 
             <DiagnosticValue
-              label="Network id"
+              label="Network ID"
               value={selectedNetworkId || "—"}
             />
 
@@ -1673,7 +1684,7 @@ export default function NetworkPage() {
                   observationActionLoading ||
                   observationRunning
                 }
-                className="inline-flex h-9 items-center justify-center rounded-md bg-zinc-950 px-3.5 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950"
+                className="inline-flex min-h-9 items-center justify-center rounded-md bg-zinc-950 px-3.5 py-2 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950"
               >
                 {observationActionLoading && !observationRunning
                   ? "Starting…"
@@ -1689,7 +1700,7 @@ export default function NetworkPage() {
                   observationActionLoading ||
                   !observationRunning
                 }
-                className="inline-flex h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                className="inline-flex min-h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 py-2 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
               >
                 {observationActionLoading && observationRunning
                   ? "Stopping…"
@@ -1704,7 +1715,7 @@ export default function NetworkPage() {
                   !selectedNetworkId ||
                   observationLoading
                 }
-                className="inline-flex h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                className="inline-flex min-h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 py-2 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
               >
                 {observationLoading ? "Refreshing…" : "Refresh status"}
               </button>
@@ -1718,7 +1729,7 @@ export default function NetworkPage() {
           )}
 
           {observation && (
-            <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-3 sm:p-4 lg:grid-cols-4">
+            <div className="grid grid-cols-1 gap-4 p-3 min-[420px]:grid-cols-2 sm:grid-cols-3 sm:p-4 lg:grid-cols-4">
               <DiagnosticValue
                 label="Running"
                 value={observation.running ? "yes" : "no"}
@@ -1777,8 +1788,8 @@ export default function NetworkPage() {
                 </h3>
               </div>
 
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[480px] border-collapse text-left text-xs">
+              <div className="w-full min-w-0 overflow-x-auto">
+                <table className="w-full min-w-[440px] border-collapse text-left text-xs">
                   <thead className="bg-zinc-100 text-[10px] uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
                     <tr>
                       <th className="px-3 py-2 sm:px-4">Substrate</th>
@@ -1817,8 +1828,8 @@ export default function NetworkPage() {
                 </h3>
               </div>
 
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[640px] border-collapse text-left text-xs">
+              <div className="w-full min-w-0 overflow-x-auto">
+                <table className="w-full min-w-[600px] border-collapse text-left text-xs">
                   <thead className="bg-zinc-100 text-[10px] uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
                     <tr>
                       <th className="px-3 py-2 sm:px-4">Network</th>
@@ -1879,14 +1890,14 @@ export default function NetworkPage() {
           )}
         </section>
 
-        <section className="mt-4 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
-            <div>
+        <section className="mt-4 min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
+          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
+            <div className="min-w-0 flex-1">
               <h2 className="text-sm font-semibold sm:text-base">
                 Persistent event store
               </h2>
 
-              <p className="mt-1 break-all text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
+              <p className="mt-1 break-all text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs [overflow-wrap:anywhere]">
                 {eventStore?.events_directory ??
                   (selectedSubstrate
                     ? `Substrate: ${selectedSubstrate}`
@@ -1919,7 +1930,7 @@ export default function NetworkPage() {
 
           {eventStore && (
             <>
-              <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-3 sm:p-4">
+              <div className="grid grid-cols-1 gap-4 p-3 min-[420px]:grid-cols-2 sm:grid-cols-3 sm:p-4 lg:grid-cols-4">
                 <DiagnosticValue label="Substrate" value={eventStore.substrate} />
                 <DiagnosticValue label="Event directory" value={eventStore.events_directory} />
                 <DiagnosticValue label="Substrate directory" value={eventStore.directory} />
@@ -1956,8 +1967,8 @@ export default function NetworkPage() {
                 </span>
               </div>
 
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[780px] border-collapse text-left text-xs">
+              <div className="w-full min-w-0 overflow-x-auto">
+                <table className="w-full min-w-[740px] border-collapse text-left text-xs">
                   <thead className="bg-zinc-100 text-[10px] uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
                     <tr>
                       <th className="px-3 py-2.5 sm:px-4">Kind</th>
