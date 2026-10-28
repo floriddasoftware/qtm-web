@@ -436,16 +436,6 @@ function getSubstrateQuery() {
   );
 }
 
-function electrumEndpoint(listenPort) {
-  if (listenPort === null || listenPort === undefined || listenPort === "") {
-    return null;
-  }
-
-  if (typeof window === "undefined") return `host:${listenPort}`;
-
-  return `${window.location.hostname}:${listenPort}`;
-}
-
 function resolvePreferredSubstrate(entries, preferred, current) {
   const names = entries.map(getSubstrateName).filter(Boolean);
 
@@ -1468,8 +1458,6 @@ export default function NetworkPage() {
   });
 
   const observationRunning = Boolean(scopedObservation?.running);
-  const listenPort = scopedObservation?.listen_port;
-  const electrumAddress = electrumEndpoint(listenPort);
 
   const observationBadge = observationError
     ? { status: "error", label: "Error" }
@@ -2132,30 +2120,15 @@ export default function NetworkPage() {
 
           {scopedObservation && (
             <div className="min-w-0 space-y-2 border-t border-zinc-200 p-2 dark:border-zinc-800 sm:p-2.5">
-              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4 lg:grid-cols-8">
+              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
                 <CompactValue
                   label="Running"
                   value={scopedObservation.running ? "yes" : "no"}
                 />
 
                 <CompactValue
-                  label="Electrum listen port"
-                  value={listenPort}
-                />
-
-                <CompactValue
-                  label="Electrum endpoint"
-                  value={electrumAddress}
-                />
-
-                <CompactValue
                   label="Path hint"
                   value={scopedObservation.path}
-                />
-
-                <CompactValue
-                  label="Message"
-                  value={scopedObservation.message}
                 />
 
                 <CompactValue
