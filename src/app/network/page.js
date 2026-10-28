@@ -135,119 +135,6 @@ function buildScopeKey(name, activation, networkId, pathId) {
   return `${name}:${activation}:${networkId}:${pathId}`;
 }
 
-
-
-const EVENT_COMMITMENT_UNAVAILABLE = "Unavailable";
-
-function normalizeEventValue(value) {
-  return value == null ? "" : String(value).trim();
-}
-
-function getEventCommitment(persistedEvent) {
-  const commitment = normalizeEventValue(persistedEvent?.commitment);
-  return commitment.length > 0 ? commitment : null;
-}
-
-function findMatchingPersistedEvent(
-  persistedEvents,
-  directionFrame,
-  selectedActivation,
-) {
-  const events = Array.isArray(persistedEvents)
-    ? persistedEvents
-    : [];
-
-  const activation = normalizeEventValue(selectedActivation);
-  const coordinate = normalizeEventValue(
-    directionFrame?.qtm?.qtm?.coordinate,
-  );
-
-  // The event context comes from DirectionFrameResponse.event.
-  const eventContext = directionFrame?.event;
-  const eventPath = normalizeEventValue(eventContext?.depth?.path);
-
-  if (!activation) {
-    return null;
-  }
-
-  const activationMatches = events.filter(
-    (item) =>
-      normalizeEventValue(item?.activation) === activation,
-  );
-
-  if (activationMatches.length === 0) {
-    return null;
-  }
-
-  // Coordinate is the strongest shared event identifier available
-  // in the supplied frame and persisted summary structures.
-  if (coordinate) {
-    const coordinateMatches = activationMatches.filter(
-      (item) =>
-        normalizeEventValue(item?.coordinate) === coordinate,
-    );
-
-    if (coordinateMatches.length === 1) {
-      return coordinateMatches[0];
-    }
-
-    // Do not select an arbitrary event when the match is ambiguous.
-    if (coordinateMatches.length > 1) {
-      return null;
-    }
-  }
-
-  // If the coordinate is unavailable, accept only an unambiguous
-  // activation match. Never guess among multiple persisted events.
-  if (activationMatches.length === 1) {
-    return activationMatches[0];
-  }
-
-  // The supplied PersistedEventSummary has no path field, so the
-  // DirectionFrameResponse event path cannot safely disambiguate
-  // multiple summaries for the same activation.
-  void eventPath;
-
-  return null;
-}
-
-function resolveEventCommitment(
-  persistedEvents,
-  directionFrame,
-  selectedActivation,
-) {
-  const persistedEvent = findMatchingPersistedEvent(
-    persistedEvents,
-    directionFrame,
-    selectedActivation,
-  );
-
-  const value = getEventCommitment(persistedEvent);
-
-  return {
-    value,
-    persistedEvent,
-    source: value ? "persisted-event-summary" : null,
-  };
-}
-
-function describeEventCommitment(info) {
-  if (!info?.value) {
-    return "No unambiguous persisted event summary matched this activation and coordinate.";
-  }
-
-  const event = info.persistedEvent;
-
-  return [
-    "Commitment from the persisted event summary.",
-    `Kind: ${event?.kind ?? "unknown"}`,
-    `Record: ${event?.record ?? "unknown"}`,
-    `Activation: ${event?.activation ?? "unknown"}`,
-    `Coordinate: ${event?.coordinate ?? "unknown"}`,
-  ].join("\n");
-}
-
-
 function getPathIdentifier(entry) {
   return String(
     entry?.path ??
@@ -1520,7 +1407,7 @@ export default function NetworkPage() {
     setLastBitMinerRefreshCheck(null);
   };
 
-     
+
   const handlePathSelect = (identifier) => {
     // Re-selecting the current path must not discard its observation.
     if (identifier === selectedPathRef.current) return;
@@ -1572,32 +1459,14 @@ export default function NetworkPage() {
   const scopedObservation = scopeMatches ? observation : null;
   const scopedObservationList = scopeMatches ? observationList : [];
 
-  // Keep the observation response intact. Its top-level commitment may
-  // describe the substrate, so it is not used as the event commitment.
+  // Strip the domain commitment and event fields from list rows; the
+  // Network observation card does not surface an event commitment lookup.
   const observationListRows = scopedObservationList.map((row) => {
     if (!isPlainObject(row)) return row;
-
-    const { commitment: _domainCommitment, event, ...rest } = row;
-
-    return {
-      ...rest,
-      event_commitment: eventCommitmentLabel(event),
-    };
+    const { commitment: _domainCommitment, event: _event, ...rest } = row;
+    return rest;
   });
 
-
-
-  const directionFrame =
-  scopedObservation?.frame ??
-  scopedObservation?.directionFrame ??
-  scopedObservation?.direction_frame ??
-  null;
-
-const eventCommitmentInfo = resolveEventCommitment(
-  persistedEvents,
-  directionFrame,
-  selectedActivation,
-);
   const observationRunning = Boolean(scopedObservation?.running);
   const listenPort = scopedObservation?.listen_port;
   const electrumAddress = electrumEndpoint(listenPort);
@@ -2270,15 +2139,6 @@ const eventCommitmentInfo = resolveEventCommitment(
                 />
 
                 <CompactValue
-                  label="Event commitment"
-                  mono
-                  value={
-                    eventCommitmentInfo.value ?? EVENT_COMMITMENT_UNAVAILABLE
-                  }
-                  title={describeEventCommitment(eventCommitmentInfo)}
-                />
-
-                <CompactValue
                   label="Electrum listen port"
                   value={listenPort}
                 />
@@ -2368,13 +2228,7 @@ const eventCommitmentInfo = resolveEventCommitment(
               <div className="min-w-0 px-3 pb-2 sm:px-4">
                 <ObjectTable
                   rows={observationListRows}
-                  columns={[
-                    "network",
-                    "event_commitment",
-                    "listen_port",
-                    "running",
-                    "path",
-                  ]}
+                  columns={["network", "listen_port", "running", "path"]}
                 />
               </div>
             </div>
