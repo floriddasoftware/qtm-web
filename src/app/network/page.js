@@ -1,4 +1,4 @@
-"use client";
+i"use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -1594,9 +1594,17 @@ export default function NetworkPage() {
     scopedObservation?.direction_frame ??
     null;
 
-  const persistedEvents = Array.isArray(eventStore?.events)
-    ? eventStore.events
-    : [];
+  const directionFrame =
+  scopedObservation?.frame ??
+  scopedObservation?.directionFrame ??
+  scopedObservation?.direction_frame ??
+  null;
+
+const eventCommitmentInfo = resolveEventCommitment(
+  persistedEvents,
+  directionFrame,
+  selectedActivation,
+);
 
   const eventCommitmentInfo = resolveEventCommitment(
     persistedEvents,
