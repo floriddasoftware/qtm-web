@@ -1587,12 +1587,17 @@ export default function NetworkPage() {
 
 
 
-  const eventCommitmentInfo = resolveEventCommitment(
-    persistedEvents,
-    directionFrame,
-    selectedActivation,
-  );
+  const directionFrame =
+  scopedObservation?.frame ??
+  scopedObservation?.directionFrame ??
+  scopedObservation?.direction_frame ??
+  null;
 
+const eventCommitmentInfo = resolveEventCommitment(
+  persistedEvents,
+  directionFrame,
+  selectedActivation,
+);
   const observationRunning = Boolean(scopedObservation?.running);
   const listenPort = scopedObservation?.listen_port;
   const electrumAddress = electrumEndpoint(listenPort);
