@@ -193,7 +193,7 @@ function diagnosticClass(status) {
 function DiagnosticBadge({ status, children }) {
   return (
     <span
-      className={`inline-flex max-w-full items-center rounded-full border px-2 py-1 text-[10px] font-medium [overflow-wrap:anywhere] ${diagnosticClass(status)}`}
+      className={`inline-flex max-w-full items-center whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-medium leading-4 ${diagnosticClass(status)}`}
     >
       {children}
     </span>
@@ -208,6 +208,27 @@ function DiagnosticValue({ label, value }) {
       </p>
       <p className="mt-0.5 min-w-0 break-words text-xs font-medium [overflow-wrap:anywhere]">
         {displayValue(value)}
+      </p>
+    </div>
+  );
+}
+
+// Compact, centered, single-line value used inside the observation box.
+// Long values truncate (full text in the tooltip and raw response) instead
+// of wrapping character by character.
+function CompactValue({ label, value }) {
+  const text = displayValue(value);
+
+  return (
+    <div className="min-w-0 rounded-lg bg-zinc-50 px-2 py-1.5 text-center dark:bg-zinc-950/60">
+      <p className="truncate whitespace-nowrap text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+        {label}
+      </p>
+      <p
+        title={text}
+        className="mt-0.5 truncate whitespace-nowrap text-xs font-medium"
+      >
+        {text}
       </p>
     </div>
   );
@@ -1105,7 +1126,7 @@ export default function NetworkPage() {
       commitObservation(scope, payload);
       setObservationStale(false);
       setObservationNotice(
-        "Start request accepted. Showing the runtime's start response.",
+        "Start accepted",
       );
 
       observationHoldRef.current = payload.running
@@ -1191,7 +1212,7 @@ export default function NetworkPage() {
       commitObservation(scope, payload);
       setObservationList([]);
       setObservationStale(false);
-      setObservationNotice("Stop request accepted.");
+      setObservationNotice("Stop accepted");
 
       observationHoldRef.current = {
         scope,
@@ -1966,200 +1987,162 @@ export default function NetworkPage() {
             Network observation: ONE stable box. Header, scope, controls,
             live-state strip, result, clips, list and errors all live here.
             ------------------------------------------------------------------ */}
-        <section className="mt-4 min-h-[12rem] min-w-0 overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
-          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
-            <div className="min-w-0 flex-1">
-              <h2 className="text-sm font-semibold sm:text-base">
+        <section className="mt-4 min-w-0 overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800 sm:px-4">
+            <div className="flex min-w-0 items-center gap-2">
+              <h2 className="whitespace-nowrap text-sm font-semibold sm:text-base">
                 Network observation
               </h2>
 
-              <p className="mt-1 text-[10px] leading-5 text-zinc-500 dark:text-zinc-400 sm:text-xs">
-                Scoped to the selected substrate, activation, and network
-                path. Status reflects what the runtime reports. Electrum
-                listen ports are distinct from the API transport.
-              </p>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
               <DiagnosticBadge status={observationBadge.status}>
                 {observationBadge.label}
               </DiagnosticBadge>
-
-              {observationHasNetworkContext && (
-                <DiagnosticBadge status="unknown">
-                  Network context selected
-                </DiagnosticBadge>
-              )}
             </div>
+
+            <span className="whitespace-nowrap text-[10px] text-zinc-500 dark:text-zinc-400">
+              {lastObservationCheck && scopeMatches
+                ? `Checked ${lastObservationCheck.toLocaleTimeString()}`
+                : autoRefresh
+                  ? `Refreshes every ${REFRESH_INTERVAL_MS / 1000}s`
+                  : "Live updates off"}
+            </span>
           </div>
 
-          <div className="grid grid-cols-1 gap-4 border-b border-zinc-200 p-3 min-[420px]:grid-cols-2 sm:grid-cols-3 sm:p-4 lg:grid-cols-4">
-            <DiagnosticValue
-              label="Substrate"
-              value={selectedSubstrate || "—"}
-            />
-
-            <DiagnosticValue
-              label="Activation"
-              value={selectedActivation}
-            />
-
-            <DiagnosticValue
-              label="Network ID"
-              value={selectedNetworkId || "—"}
-            />
-
-            <DiagnosticValue
-              label="Registered path"
+          <div className="grid grid-cols-2 gap-1.5 border-b border-zinc-200 p-2 dark:border-zinc-800 sm:grid-cols-4 sm:p-2.5">
+            <CompactValue label="Substrate" value={selectedSubstrate || "—"} />
+            <CompactValue label="Activation" value={selectedActivation} />
+            <CompactValue label="Network ID" value={selectedNetworkId || "—"} />
+            <CompactValue
+              label="Path"
               value={
                 selectedNetwork
                   ? getPathIdentifier(selectedNetwork)
                   : selectedPath || "—"
               }
             />
-
-            <DiagnosticValue
-              label="Last check"
-              value={
-                lastObservationCheck && scopeMatches
-                  ? lastObservationCheck.toLocaleTimeString()
-                  : "—"
-              }
-            />
           </div>
 
-          {observationHasNetworkContext && (
-            <div className="flex flex-wrap items-center gap-2 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
-              <button
-                type="button"
-                onClick={startObservation}
-                disabled={
-                  !selectedSubstrate ||
-                  !selectedNetworkId ||
-                  observationActionLoading ||
-                  observationRunning
-                }
-                className="inline-flex min-h-9 items-center justify-center rounded-lg bg-zinc-950 px-3.5 py-2 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950"
-              >
-                {observationActionLoading && !observationRunning
-                  ? "Starting…"
-                  : "Start observation"}
-              </button>
-
-              <button
-                type="button"
-                onClick={stopObservation}
-                disabled={
-                  !selectedSubstrate ||
-                  !selectedNetworkId ||
-                  observationActionLoading ||
-                  !observationRunning
-                }
-                className="inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-300 px-3.5 py-2 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
-              >
-                {observationActionLoading && observationRunning
-                  ? "Stopping…"
-                  : "Stop observation"}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => loadObservation()}
-                disabled={
-                  !selectedSubstrate ||
-                  !selectedNetworkId ||
-                  observationLoading ||
-                  observationActionLoading
-                }
-                className="inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-300 px-3.5 py-2 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
-              >
-                {observationLoading ? "Refreshing…" : "Refresh status"}
-              </button>
-            </div>
-          )}
-
-          {/* Fixed-height state strip: shows progress without moving the
-              result below it or replacing it. */}
           <div
-            className="flex min-h-[2.25rem] flex-wrap items-center gap-2 border-b border-zinc-200 px-3 py-1.5 dark:border-zinc-800 sm:px-4"
+            className="flex min-h-[2.75rem] flex-wrap items-center justify-between gap-2 px-3 py-2 sm:px-4"
             aria-live="polite"
           >
-            {observationActionLoading && (
-              <DiagnosticBadge status="checking">
-                Applying request…
-              </DiagnosticBadge>
+            {observationHasNetworkContext ? (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={startObservation}
+                  disabled={
+                    !selectedSubstrate ||
+                    !selectedNetworkId ||
+                    observationActionLoading ||
+                    observationRunning
+                  }
+                  className="inline-flex min-h-8 items-center justify-center whitespace-nowrap rounded-lg bg-zinc-950 px-3 py-1.5 text-center text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950"
+                >
+                  {observationActionLoading && !observationRunning
+                    ? "Starting…"
+                    : "Start"}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={stopObservation}
+                  disabled={
+                    !selectedSubstrate ||
+                    !selectedNetworkId ||
+                    observationActionLoading ||
+                    !observationRunning
+                  }
+                  className="inline-flex min-h-8 items-center justify-center whitespace-nowrap rounded-lg border border-zinc-300 px-3 py-1.5 text-center text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                >
+                  {observationActionLoading && observationRunning
+                    ? "Stopping…"
+                    : "Stop"}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => loadObservation()}
+                  disabled={
+                    !selectedSubstrate ||
+                    !selectedNetworkId ||
+                    observationLoading ||
+                    observationActionLoading
+                  }
+                  className="inline-flex min-h-8 items-center justify-center whitespace-nowrap rounded-lg border border-zinc-300 px-3 py-1.5 text-center text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                >
+                  {observationLoading ? "Refreshing…" : "Refresh"}
+                </button>
+              </div>
+            ) : (
+              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                Select a registered network path to scope observation.
+              </span>
             )}
 
-            {observationLoading && !observationActionLoading && (
-              <DiagnosticBadge status="checking">
-                Refreshing status — keeping last result
-              </DiagnosticBadge>
-            )}
-
-            {scopedObservation && observationStale && (
-              <DiagnosticBadge status="checking">
-                Last known result — status read unavailable
-              </DiagnosticBadge>
-            )}
-
-            {scopedObservation && observationNotice && (
-              <DiagnosticBadge status="running">
-                {observationNotice}
-              </DiagnosticBadge>
-            )}
-
-            {!observationActionLoading &&
-              !observationLoading &&
-              !observationStale &&
-              !observationNotice && (
-                <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
-                  {autoRefresh
-                    ? `Status refreshes every ${REFRESH_INTERVAL_MS / 1000}s`
-                    : "Live updates are off"}
-                </span>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {observationActionLoading && (
+                <DiagnosticBadge status="checking">Applying…</DiagnosticBadge>
               )}
+
+              {observationLoading && !observationActionLoading && (
+                <DiagnosticBadge status="checking">Refreshing…</DiagnosticBadge>
+              )}
+
+              {scopedObservation && observationStale && (
+                <DiagnosticBadge status="checking">
+                  Last known result
+                </DiagnosticBadge>
+              )}
+
+              {scopedObservation && observationNotice && (
+                <DiagnosticBadge status="running">
+                  {observationNotice}
+                </DiagnosticBadge>
+              )}
+            </div>
           </div>
 
           {observationError && (
-            <div className="p-3 sm:p-4">
+            <div className="px-3 pb-2 sm:px-4">
               <ErrorMessage>{observationError}</ErrorMessage>
             </div>
           )}
 
           {scopedObservation && (
-            <div className="min-w-0 space-y-4 p-3 sm:p-4">
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(11rem,1fr))] gap-4">
-                <DiagnosticValue
+            <div className="min-w-0 space-y-2 border-t border-zinc-200 p-2 dark:border-zinc-800 sm:p-2.5">
+              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4 lg:grid-cols-8">
+                <CompactValue
                   label="Running"
                   value={scopedObservation.running ? "yes" : "no"}
                 />
 
-                <DiagnosticValue
+                <CompactValue
                   label="Commitment"
                   value={scopedObservation.commitment}
                 />
 
-                <DiagnosticValue
+                <CompactValue
                   label="Electrum listen port"
                   value={listenPort}
                 />
 
-                <DiagnosticValue
+                <CompactValue
                   label="Electrum endpoint"
                   value={electrumAddress}
                 />
 
-                <DiagnosticValue
+                <CompactValue
                   label="Path hint"
                   value={scopedObservation.path}
                 />
 
-                <DiagnosticValue
+                <CompactValue
                   label="Message"
                   value={scopedObservation.message}
                 />
 
-                <DiagnosticValue
+                <CompactValue
                   label="Runtime"
                   value={
                     scopedObservation.runtime?.unix_seconds !== undefined
@@ -2168,7 +2151,7 @@ export default function NetworkPage() {
                   }
                 />
 
-                <DiagnosticValue
+                <CompactValue
                   label="Clips"
                   value={observationClips.length}
                 />
@@ -2176,7 +2159,7 @@ export default function NetworkPage() {
 
               {hasExtraObservationFields && (
                 <details className="min-w-0 rounded-lg border border-zinc-200 dark:border-zinc-800">
-                  <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold">
+                  <summary className="cursor-pointer select-none px-3 py-1.5 text-xs font-semibold">
                     Additional response fields
                   </summary>
 
@@ -2190,11 +2173,11 @@ export default function NetworkPage() {
               )}
 
               <details className="min-w-0 rounded-lg border border-zinc-200 dark:border-zinc-800">
-                <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold">
+                <summary className="cursor-pointer select-none px-3 py-1.5 text-xs font-semibold">
                   Raw runtime response
                 </summary>
 
-                <pre className="max-h-72 overflow-auto border-t border-zinc-200 bg-zinc-50 p-3 text-[10px] leading-4 dark:border-zinc-800 dark:bg-zinc-950">
+                <pre className="max-h-56 overflow-auto border-t border-zinc-200 bg-zinc-50 p-3 text-[10px] leading-4 dark:border-zinc-800 dark:bg-zinc-950">
                   {safeJson(scopedObservation)}
                 </pre>
               </details>
@@ -2203,13 +2186,13 @@ export default function NetworkPage() {
 
           {scopedObservation && observationClips.length > 0 && (
             <div className="border-t border-zinc-200 dark:border-zinc-800">
-              <div className="px-3 py-2.5 sm:px-4">
+              <div className="px-3 py-1.5 sm:px-4">
                 <h3 className="text-xs font-semibold sm:text-sm">
                   Observation clips
                 </h3>
               </div>
 
-              <div className="min-w-0 px-3 pb-3 sm:px-4 sm:pb-4">
+              <div className="min-w-0 px-3 pb-2 sm:px-4">
                 <ObjectTable
                   rows={observationClips}
                   columns={["substrate", "active", "direction"]}
@@ -2220,13 +2203,13 @@ export default function NetworkPage() {
 
           {scopedObservationList.length > 0 && (
             <div className="border-t border-zinc-200 dark:border-zinc-800">
-              <div className="px-3 py-2.5 sm:px-4">
+              <div className="px-3 py-1.5 sm:px-4">
                 <h3 className="text-xs font-semibold sm:text-sm">
                   Activation observation list
                 </h3>
               </div>
 
-              <div className="min-w-0 px-3 pb-3 sm:px-4 sm:pb-4">
+              <div className="min-w-0 px-3 pb-2 sm:px-4">
                 <ObjectTable
                   rows={scopedObservationList}
                   columns={[
@@ -2246,20 +2229,14 @@ export default function NetworkPage() {
             !observationLoading &&
             !observationActionLoading &&
             !observationError && (
-              <p className="px-3 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400 sm:px-4">
+              <p className="px-3 py-3 text-center text-xs text-zinc-500 dark:text-zinc-400 sm:px-4">
                 No live observation for this path. Start one to request
                 observation through the QTM runtime.
               </p>
             )}
 
-          {!observationHasNetworkContext && (
-            <p className="px-3 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400 sm:px-4">
-              Select a registered network path to scope observation.
-            </p>
-          )}
-
           {observationLoading && !scopedObservation && (
-            <p className="px-3 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400 sm:px-4">
+            <p className="px-3 py-3 text-center text-xs text-zinc-500 dark:text-zinc-400 sm:px-4">
               Loading observation status…
             </p>
           )}
