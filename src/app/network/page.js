@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -9,13 +10,8 @@ const API_BASE = (
 
 const REFRESH_INTERVAL_MS = 80000;
 const SUBSTRATE_QUERY_KEY = "substrate";
-
-// How long a fresh POST/DELETE result is protected from a contradicting
-// status read (the runtime can briefly report the old state).
 const MUTATION_HOLD_MS = 8000;
 
-// Fields rendered by the curated observation grid. Everything else in the
-// response is dropped into the flexible "Additional response fields" area.
 const KNOWN_OBSERVATION_KEYS = [
   "running",
   "commitment",
@@ -26,6 +22,18 @@ const KNOWN_OBSERVATION_KEYS = [
   "clips",
   "event",
 ];
+
+const BUTTON =
+  "inline-flex h-8 items-center justify-center whitespace-nowrap rounded-full border border-zinc-300 px-3 text-xs font-medium transition-colors hover:bg-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:hover:bg-zinc-800";
+
+const BUTTON_PRIMARY =
+  "inline-flex h-8 items-center justify-center whitespace-nowrap rounded-full bg-zinc-950 px-3 text-xs font-medium text-white transition-colors hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200";
+
+const PANEL =
+  "min-w-0 overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900";
+
+const MUTED = "text-zinc-500 dark:text-zinc-400";
+const ERROR_TEXT = "text-pink-600 dark:text-pink-400";
 
 async function apiRequest(path, signal, options = {}) {
   const method = options.method || "GET";
@@ -98,9 +106,13 @@ function normalizeEntries(result, keys = []) {
 function displayValue(value) {
   if (value === null || value === undefined || value === "") return "—";
   if (typeof value === "boolean") return value ? "yes" : "no";
+
   if (Array.isArray(value)) {
-    return value.length ? value.map((item) => displayValue(item)).join(", ") : "—";
+    return value.length
+      ? value.map((item) => displayValue(item)).join(", ")
+      : "—";
   }
+
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
 }
@@ -131,7 +143,6 @@ function safeJson(value) {
 
 function buildScopeKey(name, activation, networkId, pathId) {
   if (!name || !networkId || !pathId) return "";
-
   return `${name}:${activation}:${networkId}:${pathId}`;
 }
 
@@ -166,29 +177,19 @@ function formatTimestamp(value) {
 function parseActivation(value) {
   if (value === null || value === undefined || value === "") return 0;
 
-  const n = Number(value);
+  const number = Number(value);
 
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+  return Number.isFinite(number) && number >= 0
+    ? Math.floor(number)
+    : 0;
 }
 
 function diagnosticClass(status) {
-  if (status === "live") {
-    return "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300";
+  if (status === "live" || status === "running") {
+    return "border-emerald-300/70 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300";
   }
 
-  if (status === "error") {
-    return "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300";
-  }
-
-  if (status === "checking") {
-    return "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300";
-  }
-
-  if (status === "running") {
-    return "border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-300";
-  }
-
-  return "border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300";
+  return "border-zinc-200 bg-white text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300";
 }
 
 function DiagnosticBadge({ status, children }) {
@@ -204,7 +205,7 @@ function DiagnosticBadge({ status, children }) {
 function DiagnosticValue({ label, value }) {
   return (
     <div className="min-w-0 overflow-hidden">
-      <p className="break-words text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400 [overflow-wrap:anywhere]">
+      <p className={`break-words text-[10px] font-medium uppercase tracking-wide ${MUTED} [overflow-wrap:anywhere]`}>
         {label}
       </p>
       <p className="mt-0.5 min-w-0 break-words text-xs font-medium [overflow-wrap:anywhere]">
@@ -214,9 +215,6 @@ function DiagnosticValue({ label, value }) {
   );
 }
 
-// Compact, centered, single-line value used inside the observation box.
-// Long values truncate (full text in the tooltip and raw response) instead
-// of wrapping character by character.
 function CompactValue({ label, value, mono = false, title }) {
   const text = displayValue(value);
   const tip = title ? `${text} — ${title}` : text;
@@ -224,10 +222,9 @@ function CompactValue({ label, value, mono = false, title }) {
 
   return (
     <div className="min-w-0 rounded-lg bg-zinc-50 px-2 py-1.5 text-center dark:bg-zinc-950/60">
-      <p className="truncate whitespace-nowrap text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+      <p className={`truncate whitespace-nowrap text-[10px] font-medium uppercase tracking-wide ${MUTED}`}>
         {label}
       </p>
-
       {mono ? (
         <code title={tip} className={`${valueClass} font-mono`}>
           {text}
@@ -245,17 +242,19 @@ function ErrorMessage({ children }) {
   if (!children) return null;
 
   return (
-    <div className="min-w-0 break-words rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300 [overflow-wrap:anywhere]">
+    <p
+      role="status"
+      className={`min-w-0 break-words text-xs leading-5 ${ERROR_TEXT} [overflow-wrap:anywhere]`}
+    >
       {children}
-    </div>
+    </p>
   );
 }
 
-// Responsive table on sm+ screens, stacked cards on narrow screens.
-// Columns listed in `columns` come first; any other keys found in the rows
-// are appended, so unexpected fields in the runtime response still show up.
 function ObjectTable({ rows, columns = [] }) {
-  const normalized = rows.map((row) => (isPlainObject(row) ? row : { value: row }));
+  const normalized = rows.map((row) =>
+    isPlainObject(row) ? row : { value: row },
+  );
 
   const keys = [...columns];
 
@@ -286,7 +285,6 @@ function ObjectTable({ rows, columns = [] }) {
               ))}
             </tr>
           </thead>
-
           <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
             {normalized.map((row, index) => (
               <tr key={index} className="align-top">
@@ -313,7 +311,7 @@ function ObjectTable({ rows, columns = [] }) {
             <dl className="grid grid-cols-1 gap-2">
               {cols.map((key) => (
                 <div key={key} className="min-w-0">
-                  <dt className="text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  <dt className={`text-[10px] font-medium uppercase tracking-wide ${MUTED}`}>
                     {humanizeKey(key)}
                   </dt>
                   <dd className="mt-0.5 min-w-0 text-xs font-medium">
@@ -329,14 +327,10 @@ function ObjectTable({ rows, columns = [] }) {
   );
 }
 
-// Flexible renderer for any JSON object the runtime returns:
-// scalars -> auto-fitting grid, nested objects -> expandable details,
-// arrays of objects -> responsive table/cards.
 function ResponseFields({ data, omit = [], depth = 0 }) {
   if (!isPlainObject(data)) return null;
 
   const entries = Object.entries(data).filter(([key]) => !omit.includes(key));
-
   const scalars = entries.filter(
     ([, value]) => isScalar(value) || isPrimitiveArray(value),
   );
@@ -365,11 +359,10 @@ function ResponseFields({ data, omit = [], depth = 0 }) {
         >
           <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold">
             {humanizeKey(key)}
-            <span className="ml-2 font-normal text-zinc-500 dark:text-zinc-400">
+            <span className={`ml-2 font-normal ${MUTED}`}>
               {Object.keys(value).length} fields
             </span>
           </summary>
-
           <div className="min-w-0 border-t border-zinc-200 p-3 dark:border-zinc-800">
             {depth >= 2 ? (
               <pre className="max-h-60 overflow-auto text-[10px] leading-4">
@@ -390,11 +383,10 @@ function ResponseFields({ data, omit = [], depth = 0 }) {
         >
           <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold">
             {humanizeKey(key)}
-            <span className="ml-2 font-normal text-zinc-500 dark:text-zinc-400">
+            <span className={`ml-2 font-normal ${MUTED}`}>
               {value.length} items
             </span>
           </summary>
-
           <div className="min-w-0 border-t border-zinc-200 p-2 dark:border-zinc-800">
             <ObjectTable rows={value} />
           </div>
@@ -410,11 +402,9 @@ function getEventKey(event, index) {
   const activation = event?.activation ?? "";
   const dimension = event?.dimension ?? "";
 
-  if (record || activation || dimension) {
-    return `${kind}-${activation}-${dimension}-${record}`;
-  }
-
-  return `${kind}-${index}`;
+  return record || activation || dimension
+    ? `${kind}-${activation}-${dimension}-${record}`
+    : `${kind}-${index}`;
 }
 
 function updateSubstrateQuery(name) {
@@ -431,9 +421,7 @@ function updateSubstrateQuery(name) {
 function getSubstrateQuery() {
   if (typeof window === "undefined") return "";
 
-  return (
-    new URLSearchParams(window.location.search).get(SUBSTRATE_QUERY_KEY) ?? ""
-  );
+  return new URLSearchParams(window.location.search).get(SUBSTRATE_QUERY_KEY) ?? "";
 }
 
 function resolvePreferredSubstrate(entries, preferred, current) {
@@ -443,24 +431,6 @@ function resolvePreferredSubstrate(entries, preferred, current) {
   if (current && names.includes(current)) return current;
 
   return names[0] || "";
-}
-
-function getRefreshPath(result) {
-  const path = result?.refresh_path;
-
-  return typeof path === "string" && path.trim().length > 0
-    ? path.trim()
-    : "Unavailable";
-}
-
-function isUnavailableError(error) {
-  const message = error instanceof Error ? error.message : String(error ?? "");
-
-  return (
-    message.includes("[HTTP 404]") ||
-    message.toLowerCase().includes("not found") ||
-    message.toLowerCase().includes("unavailable")
-  );
 }
 
 export default function NetworkPage() {
@@ -473,17 +443,13 @@ export default function NetworkPage() {
   const [substrateState, setSubstrateState] = useState(null);
   const [eventStore, setEventStore] = useState(null);
 
-  // Observation data always travels with the scope it belongs to
-  // (substrate:activation:networkId:path). It is only displayed while that
-  // scope matches the current selection.
   const [observation, setObservation] = useState(null);
   const [observationList, setObservationList] = useState([]);
   const [observationScope, setObservationScope] = useState("");
   const [observationStale, setObservationStale] = useState(false);
   const [observationNotice, setObservationNotice] = useState("");
   const [observationLoading, setObservationLoading] = useState(false);
-  const [observationActionLoading, setObservationActionLoading] =
-    useState(false);
+  const [observationActionLoading, setObservationActionLoading] = useState(false);
   const [observationError, setObservationError] = useState("");
   const [lastObservationCheck, setLastObservationCheck] = useState(null);
 
@@ -501,25 +467,16 @@ export default function NetworkPage() {
   const [lastDiagnosticsCheck, setLastDiagnosticsCheck] = useState(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
 
-  const [bitMinerRefresh, setBitMinerRefresh] = useState(null);
-  const [bitMinerRefreshLoading, setBitMinerRefreshLoading] = useState(false);
-  const [bitMinerRefreshError, setBitMinerRefreshError] = useState("");
-  const [lastBitMinerRefreshCheck, setLastBitMinerRefreshCheck] =
-    useState(null);
-
   const networkRequestRef = useRef(null);
   const substrateRequestRef = useRef(null);
   const diagnosticsRequestRef = useRef(null);
   const observationRequestRef = useRef(null);
-  const bitMinerRefreshRequestRef = useRef(null);
 
   const networkRequestIdRef = useRef(0);
   const substrateRequestIdRef = useRef(0);
   const diagnosticsRequestIdRef = useRef(0);
   const observationRequestIdRef = useRef(0);
-  const bitMinerRefreshRequestIdRef = useRef(0);
 
-  // Observation bookkeeping used to keep results from racing each other.
   const observationScopeRef = useRef("");
   const observationDataRef = useRef(null);
   const observationMutationRef = useRef(0);
@@ -557,7 +514,6 @@ export default function NetworkPage() {
     setSelectedActivation(next);
   }, []);
 
-  // Drops observation data and re-labels the (empty) state with `scope`.
   const resetObservation = useCallback((scope) => {
     observationScopeRef.current = scope;
     observationDataRef.current = null;
@@ -570,8 +526,6 @@ export default function NetworkPage() {
     setObservationNotice("");
   }, []);
 
-  // Switches ownership of the observation box to a new scope. Data from the
-  // previous scope is cleared; data of the same scope is never touched.
   const claimObservationScope = useCallback(
     (scope) => {
       if (observationScopeRef.current === scope) return;
@@ -585,7 +539,6 @@ export default function NetworkPage() {
   const commitObservation = useCallback((scope, value) => {
     observationScopeRef.current = scope;
     observationDataRef.current = value;
-
     setObservationScope(scope);
     setObservation(value);
   }, []);
@@ -595,11 +548,12 @@ export default function NetworkPage() {
 
     const requestId = ++networkRequestIdRef.current;
     const controller = new AbortController();
-
     networkRequestRef.current = controller;
 
-    if (!silent) setNetworkLoading(true);
-    setNetworkError("");
+    if (!silent) {
+      setNetworkLoading(true);
+      setNetworkError("");
+    }
 
     try {
       const result = await apiRequest("/networks", controller.signal);
@@ -615,8 +569,7 @@ export default function NetworkPage() {
 
       const current = selectedPathRef.current;
       const stillValid =
-        current &&
-        entries.some((entry) => getPathIdentifier(entry) === current);
+        current && entries.some((entry) => getPathIdentifier(entry) === current);
 
       const next = stillValid
         ? current
@@ -624,8 +577,12 @@ export default function NetworkPage() {
           ? getPathIdentifier(entries[0])
           : "";
 
-      selectedPathRef.current = next;
-      setSelectedPath(next);
+      if (next !== current) {
+        selectedPathRef.current = next;
+        setSelectedPath(next);
+      }
+
+      setNetworkError("");
     } catch (error) {
       if (
         error?.name === "AbortError" ||
@@ -640,7 +597,9 @@ export default function NetworkPage() {
           : "Unable to load registered network paths.",
       );
     } finally {
-      if (requestId === networkRequestIdRef.current) {
+      if (requestId === networkRequestIdRef.current && !silent) {
+        setNetworkLoading(false);
+      } else if (requestId === networkRequestIdRef.current && silent) {
         setNetworkLoading(false);
       }
     }
@@ -651,11 +610,12 @@ export default function NetworkPage() {
 
     const requestId = ++substrateRequestIdRef.current;
     const controller = new AbortController();
-
     substrateRequestRef.current = controller;
 
-    if (!silent) setSubstrateLoading(true);
-    setSubstrateListError("");
+    if (!silent) {
+      setSubstrateLoading(true);
+      setSubstrateListError("");
+    }
 
     try {
       const result = await apiRequest("/wallets", controller.signal);
@@ -684,9 +644,13 @@ export default function NetworkPage() {
         requestedSubstrateRef.current = "";
       }
 
-      selectedSubstrateRef.current = resolved;
-      setSelectedSubstrate(resolved);
-      updateSubstrateQuery(resolved);
+      if (resolved !== selectedSubstrateRef.current) {
+        selectedSubstrateRef.current = resolved;
+        setSelectedSubstrate(resolved);
+        updateSubstrateQuery(resolved);
+      }
+
+      setSubstrateListError("");
     } catch (error) {
       if (
         error?.name === "AbortError" ||
@@ -721,7 +685,6 @@ export default function NetworkPage() {
         setStateError("");
         setEventStoreError("");
         setDiagnosticsLoading(false);
-
         return;
       }
 
@@ -745,16 +708,8 @@ export default function NetworkPage() {
         setEventStoreError("");
         setStateStatus("checking");
         setEventStoreStatus("checking");
-      } else {
-        setStateStatus((status) =>
-          status === "error" ? status : "checking",
-        );
-        setEventStoreStatus((status) =>
-          status === "error" ? status : "checking",
-        );
+        setDiagnosticsLoading(true);
       }
-
-      setDiagnosticsLoading(true);
 
       const encodedName = encodeURIComponent(name);
 
@@ -781,7 +736,6 @@ export default function NetworkPage() {
           setStateStatus("live");
           setStateError("");
         } else {
-          setSubstrateState(null);
           setStateStatus("error");
           setStateError(
             stateResult.reason instanceof Error
@@ -798,23 +752,18 @@ export default function NetworkPage() {
           setEventStoreStatus("live");
           setEventStoreError("");
 
-          const fromEvents = events.map((event) =>
-            parseActivation(event?.activation),
+          const unique = Array.from(
+            new Set(events.map((event) => parseActivation(event?.activation))),
           );
-
-          const unique = Array.from(new Set(fromEvents));
           const current = selectedActivationRef.current;
 
           if (!activationInitializedRef.current && unique.length > 0) {
             activationInitializedRef.current = true;
             setActivationSynced(Math.max(...unique));
           } else if (!silent && unique.length > 0 && !unique.includes(current)) {
-            // Background refreshes must never move the user to another
-            // activation; that would swap the observation scope under them.
             setActivationSynced(Math.max(...unique));
           }
         } else {
-          setEventStore(null);
           setEventStoreStatus("error");
           setEventStoreError(
             eventsResult.reason instanceof Error
@@ -825,7 +774,7 @@ export default function NetworkPage() {
 
         setLastDiagnosticsCheck(new Date());
       } finally {
-        if (isCurrent()) setDiagnosticsLoading(false);
+        if (isCurrent() && !silent) setDiagnosticsLoading(false);
       }
     },
     [setActivationSynced],
@@ -833,15 +782,11 @@ export default function NetworkPage() {
 
   const selectedNetwork = useMemo(
     () =>
-      networks.find(
-        (entry) => getPathIdentifier(entry) === selectedPath,
-      ) ?? null,
+      networks.find((entry) => getPathIdentifier(entry) === selectedPath) ?? null,
     [networks, selectedPath],
   );
 
   const selectedNetworkId = selectedNetwork ? getNetworkId(selectedNetwork) : "";
-
-  // Network selection supplies context, but is not a Bitcoin-only gate.
   const observationHasNetworkContext = Boolean(selectedNetwork);
 
   const loadObservation = useCallback(
@@ -856,11 +801,9 @@ export default function NetworkPage() {
       if (!name || !networkId || !pathId) {
         observationRequestIdRef.current += 1;
         observationContextRef.current = "";
-
         resetObservation("");
         setObservationError("");
         setObservationLoading(false);
-
         return;
       }
 
@@ -869,9 +812,6 @@ export default function NetworkPage() {
       const contextKey = buildScopeKey(name, activation, networkId, pathId);
 
       observationContextRef.current = contextKey;
-
-      // Clears data only if it belongs to a different scope. Refreshing the
-      // same scope keeps the last known result on screen.
       claimObservationScope(contextKey);
 
       const controller = new AbortController();
@@ -886,7 +826,6 @@ export default function NetworkPage() {
         selectedActivationRef.current === activation;
 
       if (!silent) setObservationError("");
-
       setObservationLoading(true);
 
       const encodedName = encodeURIComponent(name);
@@ -914,13 +853,9 @@ export default function NetworkPage() {
 
         if (statusAborted || listAborted) return;
 
-        // A failed list read keeps the previous list instead of blanking it.
         if (listResult.status === "fulfilled") {
           setObservationList(
-            normalizeEntries(listResult.value, [
-              "pipelines",
-              "observations",
-            ]),
+            normalizeEntries(listResult.value, ["pipelines", "observations"]),
           );
         }
 
@@ -941,7 +876,6 @@ export default function NetworkPage() {
             Boolean(payload.running) !== hold.running;
 
           if (!hasPayload) {
-            // Empty status response: keep what we have, just flag it.
             if (previous) setObservationStale(true);
           } else if (!contradictsHold) {
             observationDataRef.current = payload;
@@ -953,7 +887,6 @@ export default function NetworkPage() {
           setObservationError("");
         } else {
           const error = statusResult.reason;
-
           const message =
             error instanceof Error
               ? error.message
@@ -964,9 +897,7 @@ export default function NetworkPage() {
             message.toLowerCase().includes("no live") ||
             message.toLowerCase().includes("not found");
 
-          // Never wipe a known result because a status read failed.
           if (previous) setObservationStale(true);
-
           setObservationError(notFound ? "" : message);
         }
 
@@ -988,92 +919,18 @@ export default function NetworkPage() {
     [selectedNetworkId, claimObservationScope, resetObservation],
   );
 
-  // This request checks only the activation-scoped refresh-path endpoint.
-  // It does not start, stop, or refresh the miner's internal pipeline.
-  const loadBitMinerRefresh = useCallback(
-    async ({ silent = false } = {}) => {
-      const name = selectedSubstrateRef.current;
-      const activation = selectedActivationRef.current;
-
-      bitMinerRefreshRequestRef.current?.abort();
-
-      if (!name) {
-        bitMinerRefreshRequestIdRef.current += 1;
-        setBitMinerRefresh(null);
-        setBitMinerRefreshError("");
-        setBitMinerRefreshLoading(false);
-        setLastBitMinerRefreshCheck(null);
-        return;
-      }
-
-      const requestId = ++bitMinerRefreshRequestIdRef.current;
-      const controller = new AbortController();
-
-      bitMinerRefreshRequestRef.current = controller;
-
-      const isCurrent = () =>
-        requestId === bitMinerRefreshRequestIdRef.current &&
-        selectedSubstrateRef.current === name &&
-        selectedActivationRef.current === activation;
-
-      if (!silent) {
-        setBitMinerRefresh(null);
-        setBitMinerRefreshError("");
-      }
-
-      setBitMinerRefreshLoading(true);
-
-      try {
-        const result = await apiRequest(
-          `/wallets/${encodeURIComponent(name)}/activations/${activation}/bit_miner/refresh`,
-          controller.signal,
-        );
-
-        if (!isCurrent()) return;
-
-        setBitMinerRefresh(result);
-        setBitMinerRefreshError("");
-      } catch (error) {
-        if (error?.name === "AbortError" || !isCurrent()) return;
-
-        setBitMinerRefresh(null);
-
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Refresh-path check unavailable.";
-
-        setBitMinerRefreshError(
-          isUnavailableError(error)
-            ? `Refresh-path check unavailable: ${message}`
-            : message,
-        );
-      } finally {
-        if (isCurrent()) {
-          setLastBitMinerRefreshCheck(new Date());
-          setBitMinerRefreshLoading(false);
-        }
-      }
-    },
-    [],
-  );
-
   const startObservation = useCallback(async () => {
     const name = selectedSubstrateRef.current;
     const activation = selectedActivationRef.current;
     const pathId = selectedPathRef.current;
     const networkId = selectedNetworkId;
 
-    const pathHint = selectedNetwork
-      ? getPathIdentifier(selectedNetwork)
-      : pathId;
+    const pathHint = selectedNetwork ? getPathIdentifier(selectedNetwork) : pathId;
 
     if (!name || !networkId) return;
 
     const scope = buildScopeKey(name, activation, networkId, pathId);
 
-    // A new mutation invalidates every status read still in flight, so a
-    // stale GET can never overwrite this POST's result.
     observationMutationRef.current += 1;
     const mutationVersion = observationMutationRef.current;
 
@@ -1094,25 +951,18 @@ export default function NetworkPage() {
     try {
       const encodedName = encodeURIComponent(name);
       const encodedNetwork = encodeURIComponent(networkId);
-
       const basePath =
         `/wallets/${encodedName}/activations/${activation}` +
         `/networks/${encodedNetwork}/observation`;
 
-      const body = pathHint ? { path: pathHint } : {};
-
-      // POST requests observation start. Pipeline execution remains
-      // owned by bit-miner/src/main.rs.
       const started = await apiRequest(basePath, undefined, {
         method: "POST",
-        body,
+        body: pathHint ? { path: pathHint } : {},
       });
 
-      // The selection changed (or another action started) while waiting.
       if (!stillSameScope()) return;
 
       const hasBody = isPlainObject(started) && Object.keys(started).length > 0;
-
       const payload = hasBody
         ? started
         : {
@@ -1122,32 +972,19 @@ export default function NetworkPage() {
 
       commitObservation(scope, payload);
       setObservationStale(false);
-      setObservationNotice(
-        "Start accepted",
-      );
+      setObservationNotice("Start accepted");
 
-      // Hold every accepted start, even when the response omits `running`
-      // (an accepted start implies running). Only an explicit
-      // `running: false` in the response skips the hold.
       observationHoldRef.current =
         payload.running === false
           ? { scope: "", until: 0, running: false }
           : { scope, until: Date.now() + MUTATION_HOLD_MS, running: true };
 
       setLastObservationCheck(new Date());
-
-      // No immediate status read here. The POST response stays on screen
-      // until the normal refresh interval or the "Refresh status" button
-      // reconciles it with the runtime.
     } catch (error) {
-      if (error?.name === "AbortError") return;
-      if (!stillSameScope()) return;
+      if (error?.name === "AbortError" || !stillSameScope()) return;
 
-      // Keep whatever was already on screen; just report the failure.
       setObservationError(
-        error instanceof Error
-          ? error.message
-          : "Unable to start observation.",
+        error instanceof Error ? error.message : "Unable to start observation.",
       );
     } finally {
       if (mutationVersion === observationMutationRef.current) {
@@ -1191,12 +1028,10 @@ export default function NetworkPage() {
     try {
       const encodedName = encodeURIComponent(name);
       const encodedNetwork = encodeURIComponent(networkId);
-
       const basePath =
         `/wallets/${encodedName}/activations/${activation}` +
         `/networks/${encodedNetwork}/observation`;
 
-      // DELETE requests observation stop.
       const stopped = await apiRequest(basePath, undefined, {
         method: "DELETE",
       });
@@ -1214,22 +1049,17 @@ export default function NetworkPage() {
       setObservationList([]);
       setObservationStale(false);
       setObservationNotice("Stop accepted");
-
       observationHoldRef.current = {
         scope,
         until: Date.now() + MUTATION_HOLD_MS,
         running: false,
       };
-
       setLastObservationCheck(new Date());
     } catch (error) {
-      if (error?.name === "AbortError") return;
-      if (!stillSameScope()) return;
+      if (error?.name === "AbortError" || !stillSameScope()) return;
 
       setObservationError(
-        error instanceof Error
-          ? error.message
-          : "Unable to stop observation.",
+        error instanceof Error ? error.message : "Unable to stop observation.",
       );
     } finally {
       if (mutationVersion === observationMutationRef.current) {
@@ -1247,13 +1077,11 @@ export default function NetworkPage() {
       substrateRequestRef.current?.abort();
       diagnosticsRequestRef.current?.abort();
       observationRequestRef.current?.abort();
-      bitMinerRefreshRequestRef.current?.abort();
 
       networkRequestIdRef.current += 1;
       substrateRequestIdRef.current += 1;
       diagnosticsRequestIdRef.current += 1;
       observationRequestIdRef.current += 1;
-      bitMinerRefreshRequestIdRef.current += 1;
     };
   }, [loadNetworks, loadSubstrates]);
 
@@ -1271,7 +1099,6 @@ export default function NetworkPage() {
       setStateError("");
       setEventStoreError("");
       setDiagnosticsLoading(false);
-
       return undefined;
     }
 
@@ -1294,12 +1121,6 @@ export default function NetworkPage() {
   ]);
 
   useEffect(() => {
-    loadBitMinerRefresh();
-
-    return () => bitMinerRefreshRequestRef.current?.abort();
-  }, [selectedSubstrate, selectedActivation, loadBitMinerRefresh]);
-
-  useEffect(() => {
     if (!autoRefresh) return undefined;
 
     const interval = setInterval(() => {
@@ -1311,7 +1132,6 @@ export default function NetworkPage() {
       }
 
       loadObservation({ silent: true });
-      loadBitMinerRefresh({ silent: true });
     }, REFRESH_INTERVAL_MS);
 
     return () => clearInterval(interval);
@@ -1321,7 +1141,6 @@ export default function NetworkPage() {
     loadSubstrates,
     loadHostDiagnostics,
     loadObservation,
-    loadBitMinerRefresh,
   ]);
 
   const persistedEvents = eventStore?.events ?? [];
@@ -1348,15 +1167,14 @@ export default function NetworkPage() {
   }, [substrates, selectedSubstrate, persistedEvents, selectedActivation]);
 
   const refreshAll = () => {
-    loadNetworks();
-    loadSubstrates();
+    loadNetworks({ silent: true });
+    loadSubstrates({ silent: true });
 
     if (selectedSubstrateRef.current) {
-      loadHostDiagnostics(selectedSubstrateRef.current);
+      loadHostDiagnostics(selectedSubstrateRef.current, { silent: true });
     }
 
-    loadObservation();
-    loadBitMinerRefresh();
+    loadObservation({ silent: true });
   };
 
   const handleSubstrateChange = (event) => {
@@ -1369,9 +1187,6 @@ export default function NetworkPage() {
     observationRequestRef.current?.abort();
     observationRequestIdRef.current += 1;
     observationContextRef.current = "";
-
-    bitMinerRefreshRequestRef.current?.abort();
-    bitMinerRefreshRequestIdRef.current += 1;
 
     requestedSubstrateRef.current = "";
     selectedSubstrateRef.current = name;
@@ -1387,30 +1202,20 @@ export default function NetworkPage() {
     setStateStatus(name ? "checking" : "unknown");
     setEventStoreStatus(name ? "checking" : "unknown");
 
-    // The previous observation belongs to the previous substrate.
     resetObservation("");
     setObservationError("");
     setObservationLoading(false);
-
-    setBitMinerRefresh(null);
-    setBitMinerRefreshError("");
-    setLastBitMinerRefreshCheck(null);
   };
 
-
   const handlePathSelect = (identifier) => {
-    // Re-selecting the current path must not discard its observation.
     if (identifier === selectedPathRef.current) return;
 
     selectedPathRef.current = identifier;
-
     observationRequestRef.current?.abort();
     observationRequestIdRef.current += 1;
     observationContextRef.current = "";
 
     setSelectedPath(identifier);
-
-    // The previous observation belongs to the previous path.
     resetObservation("");
     setObservationError("");
     setObservationLoading(false);
@@ -1434,7 +1239,6 @@ export default function NetworkPage() {
         ? "checking"
         : "unknown";
 
-  // Only show observation data that belongs to the current selection.
   const currentScopeKey = buildScopeKey(
     selectedSubstrate,
     selectedActivation,
@@ -1449,8 +1253,6 @@ export default function NetworkPage() {
   const scopedObservation = scopeMatches ? observation : null;
   const scopedObservationList = scopeMatches ? observationList : [];
 
-  // Strip the domain commitment and event fields from list rows; the
-  // Network observation card does not surface an event commitment lookup.
   const observationListRows = scopedObservationList.map((row) => {
     if (!isPlainObject(row)) return row;
     const { commitment: _domainCommitment, event: _event, ...rest } = row;
@@ -1479,47 +1281,32 @@ export default function NetworkPage() {
       )
     : false;
 
-  const refreshStatus = bitMinerRefreshError
-    ? "error"
-    : bitMinerRefreshLoading
-      ? "checking"
-      : bitMinerRefresh
-        ? "live"
-        : "unknown";
-
   return (
-    <main className="min-h-screen w-full min-w-0 overflow-x-hidden bg-zinc-50 text-zinc-950 dark:bg-zinc-950 dark:text-zinc-50">
+    <main className="min-h-screen w-full min-w-0 overflow-x-hidden bg-white text-zinc-950 dark:bg-zinc-950 dark:text-zinc-50">
       <div className="mx-auto w-full min-w-0 max-w-7xl px-3 py-4 sm:px-5 sm:py-7 lg:px-8">
         <header className="mb-5 sm:mb-6">
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
             QuantPerm · QTM
           </p>
-
           <h1 className="mt-1.5 text-xl font-semibold tracking-tight sm:text-2xl md:text-3xl">
             Network
           </h1>
-
           <p className="mt-2 max-w-3xl text-xs leading-5 text-zinc-600 dark:text-zinc-400 sm:text-sm sm:leading-6">
-            The substrate is the persistent host. Network paths are derivation
-            contexts. Observation is scoped to the selected substrate,
-            activation, and path. Electrum listen ports are separate from the
-            API transport and can be used by compatible wallet clients.
+            Network observation is scoped to the selected substrate, activation,
+            and registered path. The substrate remains the persistent host for
+            system state and event records.
           </p>
 
           <div className="mt-3.5 flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={refreshAll}
-              disabled={networkLoading || substrateLoading}
-              className="inline-flex min-h-9 items-center justify-center rounded-lg bg-zinc-950 px-3.5 py-2 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 sm:text-sm"
-            >
-              {networkLoading || substrateLoading ? "Loading…" : "Refresh"}
+            <button type="button" onClick={refreshAll} className={BUTTON_PRIMARY}>
+              Refresh
             </button>
 
             <button
               type="button"
               onClick={() => setAutoRefresh((value) => !value)}
-              className="inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-300 px-3.5 py-2 text-xs font-medium dark:border-zinc-700 sm:text-sm"
+              aria-pressed={autoRefresh}
+              className={BUTTON}
             >
               Live updates: {autoRefresh ? "On" : "Off"}
             </button>
@@ -1530,7 +1317,7 @@ export default function NetworkPage() {
                   ? `/?substrate=${encodeURIComponent(selectedSubstrate)}`
                   : "/"
               }
-              className="inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-300 px-3.5 py-2 text-xs font-medium dark:border-zinc-700 sm:text-sm"
+              className={BUTTON}
             >
               Back to QTM
             </a>
@@ -1540,11 +1327,9 @@ export default function NetworkPage() {
             <DiagnosticBadge status="unknown">
               {networks.length} registered paths
             </DiagnosticBadge>
-
             <DiagnosticBadge status="unknown">
               {substrates.length} substrates
             </DiagnosticBadge>
-
             <DiagnosticBadge status={hostStatus}>
               {hostLive
                 ? "Substrate reachable"
@@ -1554,7 +1339,6 @@ export default function NetworkPage() {
                     ? "Checking substrate"
                     : "Substrate not confirmed"}
             </DiagnosticBadge>
-
             <DiagnosticBadge status={observationBadge.status}>
               {observationBadge.status === "running"
                 ? "Observation running"
@@ -1568,7 +1352,7 @@ export default function NetworkPage() {
             </DiagnosticBadge>
           </div>
 
-          <p className="mt-2 break-words text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
+          <p className={`mt-2 break-words text-[10px] sm:text-xs ${MUTED}`}>
             {lastNetworkCheck
               ? `Paths checked ${lastNetworkCheck.toLocaleTimeString()}`
               : "Waiting for network data"}
@@ -1581,26 +1365,23 @@ export default function NetworkPage() {
           </p>
         </header>
 
-
         {networkError && (
           <div className="mb-3">
             <ErrorMessage>{networkError}</ErrorMessage>
           </div>
         )}
 
-        <section className="mb-4 min-w-0 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900 sm:p-4">
+        <section className={`${PANEL} mb-4 p-3 sm:p-4`}>
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
               <h2 className="text-sm font-semibold sm:text-base">
                 Substrate environment
               </h2>
-
-              <p className="mt-1 text-[11px] leading-5 text-zinc-500 dark:text-zinc-400 sm:text-xs">
+              <p className={`mt-1 text-[11px] leading-5 sm:text-xs ${MUTED}`}>
                 Persistent host for state and events. Shared with the main QTM
                 page through the substrate URL parameter.
               </p>
             </div>
-
             <DiagnosticBadge status={hostStatus}>
               {hostLive
                 ? "Reachable"
@@ -1614,51 +1395,39 @@ export default function NetworkPage() {
 
           <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,8rem)] lg:grid-cols-[minmax(0,1fr)_minmax(0,8rem)_auto]">
             <label className="block min-w-0">
-              <span className="mb-1.5 block text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+              <span className={`mb-1.5 block text-[10px] font-medium uppercase tracking-wide ${MUTED}`}>
                 Substrate
               </span>
-
               <select
                 value={selectedSubstrate}
                 onChange={handleSubstrateChange}
                 disabled={substrateLoading || substrates.length === 0}
-                className="h-10 w-full min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 sm:text-sm"
+                className="h-9 w-full min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 sm:text-sm"
               >
                 {substrates.length === 0 && (
                   <option value="">
-                    {substrateLoading
-                      ? "Loading substrates…"
-                      : "No substrates found"}
+                    {substrateLoading ? "Loading substrates…" : "No substrates found"}
                   </option>
                 )}
-
                 {substrates.map((substrate) => {
                   const name = getSubstrateName(substrate);
-
-                  return (
-                    <option key={name} value={name}>
-                      {name}
-                    </option>
-                  );
+                  return <option key={name} value={name}>{name}</option>;
                 })}
               </select>
             </label>
 
             <label className="block min-w-0">
-              <span className="mb-1.5 block text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+              <span className={`mb-1.5 block text-[10px] font-medium uppercase tracking-wide ${MUTED}`}>
                 Activation
               </span>
-
               <select
                 value={selectedActivation}
                 onChange={handleActivationChange}
                 disabled={!selectedSubstrate}
-                className="h-10 w-full min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 sm:text-sm"
+                className="h-9 w-full min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 sm:text-sm"
               >
                 {activationOptions.map((value) => (
-                  <option key={value} value={value}>
-                    {value}
-                  </option>
+                  <option key={value} value={value}>{value}</option>
                 ))}
               </select>
             </label>
@@ -1668,80 +1437,51 @@ export default function NetworkPage() {
                 type="button"
                 onClick={() => loadHostDiagnostics(selectedSubstrate)}
                 disabled={!selectedSubstrate || diagnosticsLoading}
-                className="h-10 w-full rounded-lg border border-zinc-300 px-3 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800 sm:text-sm lg:w-auto"
+                className={`${BUTTON} w-full lg:w-auto`}
               >
-                {diagnosticsLoading ? "Checking…" : "Check substrate"}
+                Check substrate
               </button>
             </div>
           </div>
 
           {substrateListError && (
-            <div className="mt-3">
-              <ErrorMessage>{substrateListError}</ErrorMessage>
-            </div>
+            <div className="mt-3"><ErrorMessage>{substrateListError}</ErrorMessage></div>
           )}
 
           <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
             <div className="min-w-0 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-xs font-semibold">Persisted system state</p>
-
                 <DiagnosticBadge status={stateStatus}>
-                  {stateStatus === "live"
-                    ? "Reachable"
-                    : stateStatus === "error"
-                      ? "Unavailable"
-                      : stateStatus === "checking"
-                        ? "Checking"
-                        : "Not checked"}
+                  {stateStatus === "live" ? "Reachable" : stateStatus === "error" ? "Unavailable" : stateStatus === "checking" ? "Checking" : "Not checked"}
                 </DiagnosticBadge>
               </div>
-
-              {stateError && (
-                <p className="mt-2 break-words text-xs text-red-700 dark:text-red-300 [overflow-wrap:anywhere]">
-                  {stateError}
-                </p>
-              )}
+              {stateError && <p className={`mt-2 break-words text-xs ${ERROR_TEXT} [overflow-wrap:anywhere]`}>{stateError}</p>}
             </div>
 
             <div className="min-w-0 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-xs font-semibold">Persistent event store</p>
-
                 <DiagnosticBadge status={eventStoreStatus}>
-                  {eventStoreStatus === "live"
-                    ? "Readable"
-                    : eventStoreStatus === "error"
-                      ? "Unavailable"
-                      : eventStoreStatus === "checking"
-                        ? "Checking"
-                        : "Not checked"}
+                  {eventStoreStatus === "live" ? "Readable" : eventStoreStatus === "error" ? "Unavailable" : eventStoreStatus === "checking" ? "Checking" : "Not checked"}
                 </DiagnosticBadge>
               </div>
-
-              {eventStoreError && (
-                <p className="mt-2 break-words text-xs text-red-700 dark:text-red-300 [overflow-wrap:anywhere]">
-                  {eventStoreError}
-                </p>
-              )}
+              {eventStoreError && <p className={`mt-2 break-words text-xs ${ERROR_TEXT} [overflow-wrap:anywhere]`}>{eventStoreError}</p>}
             </div>
           </div>
 
           {lastDiagnosticsCheck && (
-            <p className="mt-2 text-[10px] text-zinc-500 dark:text-zinc-400">
+            <p className={`mt-2 text-[10px] ${MUTED}`}>
               Diagnostics checked {lastDiagnosticsCheck.toLocaleTimeString()}
             </p>
           )}
         </section>
 
         {substrateState && (
-          <section className="mb-4 min-w-0 overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+          <section className={`${PANEL} mb-4`}>
             <div className="border-b border-zinc-200 px-3 py-2.5 dark:border-zinc-800 sm:px-4">
-              <h2 className="text-sm font-semibold sm:text-base">
-                Substrate system state
-              </h2>
-
-              <p className="mt-1 break-all text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
+              <h2 className="text-sm font-semibold sm:text-base">Substrate system state</h2>
+              <p className={`mt-1 break-all text-[10px] sm:text-xs ${MUTED}`}>
                 {displayValue(substrateState.namespace)}
               </p>
             </div>
@@ -1754,45 +1494,154 @@ export default function NetworkPage() {
               <DiagnosticValue label="Sigma" value={substrateState.sigma} />
               <DiagnosticValue label="Network" value={substrateState.network} />
               <DiagnosticValue label="Indices" value={substrateState.indices} />
-
               <DiagnosticValue
                 label="Entropy"
-                value={
-                  substrateState.entropy
-                    ? `Present · ${String(substrateState.entropy).length} characters`
-                    : "Not available"
-                }
+                value={substrateState.entropy ? `Present · ${String(substrateState.entropy).length} characters` : "Not available"}
               />
-
-              <DiagnosticValue
-                label="Registered activations"
-                value={selectedHostEntry?.activations}
-              />
+              <DiagnosticValue label="Registered activations" value={selectedHostEntry?.activations} />
             </div>
 
-            <p className="px-3 pb-3 text-[10px] leading-5 text-zinc-500 dark:text-zinc-400 sm:px-4">
-              Entropy content is not displayed. This report only indicates
-              whether the field is present.
+            <p className={`px-3 pb-3 text-[10px] leading-5 sm:px-4 ${MUTED}`}>
+              Entropy content is not displayed. This report only indicates whether the field is present.
             </p>
           </section>
         )}
 
-        <section className="min-w-0 overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+        {/* Network observation is the primary network operation panel. */}
+        <section className={`${PANEL} mb-4 sm:mb-5`}>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800 sm:px-4">
+            <div className="flex min-w-0 items-center gap-2">
+              <h2 className="whitespace-nowrap text-sm font-semibold sm:text-base">Network observation</h2>
+              <DiagnosticBadge status={observationBadge.status}>{observationBadge.label}</DiagnosticBadge>
+            </div>
+            <span className={`whitespace-nowrap text-[10px] ${MUTED}`}>
+              {lastObservationCheck && scopeMatches
+                ? `Checked ${lastObservationCheck.toLocaleTimeString()}`
+                : autoRefresh
+                  ? `Refreshes every ${REFRESH_INTERVAL_MS / 1000}s`
+                  : "Live updates off"}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-1.5 border-b border-zinc-200 p-2 dark:border-zinc-800 sm:grid-cols-4 sm:p-2.5">
+            <CompactValue label="Substrate" value={selectedSubstrate || "—"} />
+            <CompactValue label="Activation" value={selectedActivation} />
+            <CompactValue label="Network ID" value={selectedNetworkId || "—"} />
+            <CompactValue label="Path" value={selectedNetwork ? getPathIdentifier(selectedNetwork) : selectedPath || "—"} />
+          </div>
+
+          <div className="flex min-h-[2.75rem] flex-wrap items-center justify-between gap-2 px-3 py-2 sm:px-4" aria-live="polite">
+            {observationHasNetworkContext ? (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={startObservation}
+                  disabled={!selectedSubstrate || !selectedNetworkId || observationActionLoading || observationRunning}
+                  className={BUTTON_PRIMARY}
+                >
+                  {observationActionLoading && !observationRunning ? "Starting…" : "Start"}
+                </button>
+                <button
+                  type="button"
+                  onClick={stopObservation}
+                  disabled={!selectedSubstrate || !selectedNetworkId || observationActionLoading || !observationRunning}
+                  className={BUTTON}
+                >
+                  {observationActionLoading && observationRunning ? "Stopping…" : "Stop"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => loadObservation()}
+                  disabled={!selectedSubstrate || !selectedNetworkId || observationLoading || observationActionLoading}
+                  className={BUTTON}
+                >
+                  Refresh status
+                </button>
+              </div>
+            ) : (
+              <span className={`text-xs ${MUTED}`}>
+                Select a registered network path to scope observation.
+              </span>
+            )}
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              {observationActionLoading && <DiagnosticBadge status="checking">Applying…</DiagnosticBadge>}
+              {observationLoading && !observationActionLoading && <DiagnosticBadge status="checking">Refreshing…</DiagnosticBadge>}
+              {scopedObservation && observationStale && <DiagnosticBadge status="checking">Last known result</DiagnosticBadge>}
+              {scopedObservation && observationNotice && <DiagnosticBadge status="running">{observationNotice}</DiagnosticBadge>}
+            </div>
+          </div>
+
+          {observationError && (
+            <div className="px-3 pb-2 sm:px-4"><ErrorMessage>{observationError}</ErrorMessage></div>
+          )}
+
+          {scopedObservation && (
+            <div className="min-w-0 space-y-2 border-t border-zinc-200 p-2 dark:border-zinc-800 sm:p-2.5">
+              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+                <CompactValue label="Running" value={scopedObservation.running ? "yes" : "no"} />
+                <CompactValue label="Path hint" value={scopedObservation.path} />
+                <CompactValue
+                  label="Runtime"
+                  value={scopedObservation.runtime?.unix_seconds !== undefined ? formatTimestamp(scopedObservation.runtime.unix_seconds) : "—"}
+                />
+                <CompactValue label="Clips" value={observationClips.length} />
+              </div>
+
+              {hasExtraObservationFields && (
+                <details className="min-w-0 rounded-lg border border-zinc-200 dark:border-zinc-800">
+                  <summary className="cursor-pointer select-none px-3 py-1.5 text-xs font-semibold">Additional response fields</summary>
+                  <div className="min-w-0 border-t border-zinc-200 p-3 dark:border-zinc-800">
+                    <ResponseFields data={scopedObservation} omit={KNOWN_OBSERVATION_KEYS} />
+                  </div>
+                </details>
+              )}
+
+              <details className="min-w-0 rounded-lg border border-zinc-200 dark:border-zinc-800">
+                <summary className="cursor-pointer select-none px-3 py-1.5 text-xs font-semibold">Raw runtime response</summary>
+                <pre className="max-h-56 overflow-auto border-t border-zinc-200 bg-zinc-50 p-3 text-[10px] leading-4 dark:border-zinc-800 dark:bg-zinc-950">{safeJson(scopedObservation)}</pre>
+              </details>
+            </div>
+          )}
+
+          {scopedObservation && observationClips.length > 0 && (
+            <div className="border-t border-zinc-200 dark:border-zinc-800">
+              <div className="px-3 py-1.5 sm:px-4"><h3 className="text-xs font-semibold sm:text-sm">Observation clips</h3></div>
+              <div className="min-w-0 px-3 pb-2 sm:px-4">
+                <ObjectTable rows={observationClips} columns={["substrate", "active", "direction"]} />
+              </div>
+            </div>
+          )}
+
+          {scopedObservationList.length > 0 && (
+            <div className="border-t border-zinc-200 dark:border-zinc-800">
+              <div className="px-3 py-1.5 sm:px-4"><h3 className="text-xs font-semibold sm:text-sm">Activation observation list</h3></div>
+              <div className="min-w-0 px-3 pb-2 sm:px-4">
+                <ObjectTable rows={observationListRows} columns={["network", "listen_port", "running", "path"]} />
+              </div>
+            </div>
+          )}
+
+          {observationHasNetworkContext && !scopedObservation && !observationLoading && !observationActionLoading && !observationError && (
+            <p className={`px-3 py-3 text-center text-xs sm:px-4 ${MUTED}`}>
+              No live observation for this path. Start one to request observation through the QTM runtime.
+            </p>
+          )}
+
+          {observationLoading && !scopedObservation && (
+            <p className={`px-3 py-3 text-center text-xs sm:px-4 ${MUTED}`}>Loading observation status…</p>
+          )}
+        </section>
+
+        <section className={`${PANEL} mb-4 sm:mb-5`}>
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 px-3 py-2.5 dark:border-zinc-800 sm:px-4">
             <div className="min-w-0">
-              <h2 className="text-sm font-semibold sm:text-base">
-                Registered network paths
-              </h2>
-
-              <p className="mt-1 text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
-                Derivation contexts. Select a path to scope observation.
-                Persisted events stay on the substrate.
+              <h2 className="text-sm font-semibold sm:text-base">Registered network paths</h2>
+              <p className={`mt-1 text-[10px] sm:text-xs ${MUTED}`}>
+                Derivation contexts. Select a path to scope observation. Persisted events stay on the substrate.
               </p>
             </div>
-
-            <span className="text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
-              {networks.length} paths
-            </span>
+            <span className={`text-[10px] sm:text-xs ${MUTED}`}>{networks.length} paths</span>
           </div>
 
           <div className="w-full min-w-0 overflow-x-auto">
@@ -1807,7 +1656,6 @@ export default function NetworkPage() {
                   <th className="px-3 py-2.5 sm:px-4">Context</th>
                 </tr>
               </thead>
-
               <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
                 {networks.map((network, index) => {
                   const identifier = getPathIdentifier(network);
@@ -1816,36 +1664,19 @@ export default function NetworkPage() {
                   return (
                     <tr
                       key={`${network.id ?? identifier}-${index}`}
-                      className={`align-top transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800 ${
-                        selected ? "bg-zinc-100 dark:bg-zinc-800" : ""
-                      }`}
+                      className={`align-top transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/60 ${selected ? "bg-zinc-50 dark:bg-zinc-800/60" : ""}`}
                     >
-                      <td className="px-3 py-2.5 font-medium sm:px-4">
-                        {displayValue(network.name ?? identifier)}
-                      </td>
-
-                      <td className="px-3 py-2.5 font-mono text-[10px] text-zinc-500 sm:px-4 sm:text-xs">
-                        {displayValue(network.id)}
-                      </td>
-
-                      <td className="px-3 py-2.5 sm:px-4">
-                        {displayValue(network.coin)}
-                      </td>
-
-                      <td className="px-3 py-2.5 sm:px-4">
-                        {displayValue(network.purpose)}
-                      </td>
-
-                      <td className="break-all px-3 py-2.5 font-mono text-[10px] sm:px-4 sm:text-xs">
-                        {identifier}
-                      </td>
-
+                      <td className="px-3 py-2.5 font-medium sm:px-4">{displayValue(network.name ?? identifier)}</td>
+                      <td className={`px-3 py-2.5 font-mono text-[10px] sm:px-4 sm:text-xs ${MUTED}`}>{displayValue(network.id)}</td>
+                      <td className="px-3 py-2.5 sm:px-4">{displayValue(network.coin)}</td>
+                      <td className="px-3 py-2.5 sm:px-4">{displayValue(network.purpose)}</td>
+                      <td className="break-all px-3 py-2.5 font-mono text-[10px] sm:px-4 sm:text-xs">{identifier}</td>
                       <td className="px-3 py-2.5 sm:px-4">
                         <button
                           type="button"
                           onClick={() => handlePathSelect(identifier)}
                           aria-pressed={selected}
-                          className="whitespace-nowrap rounded-lg border border-zinc-300 px-2.5 py-1.5 text-[10px] font-semibold hover:bg-zinc-200 dark:border-zinc-700 dark:hover:bg-zinc-700 sm:text-xs"
+                          className={BUTTON}
                         >
                           {selected ? "Selected" : "Select path"}
                         </button>
@@ -1855,25 +1686,11 @@ export default function NetworkPage() {
                 })}
 
                 {!networkLoading && networks.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={6}
-                      className="px-3 py-8 text-center text-xs text-zinc-500 sm:px-4 sm:text-sm"
-                    >
-                      No registered paths were returned.
-                    </td>
-                  </tr>
+                  <tr><td colSpan={6} className={`px-3 py-8 text-center text-xs sm:px-4 sm:text-sm ${MUTED}`}>No registered paths were returned.</td></tr>
                 )}
 
                 {networkLoading && networks.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={6}
-                      className="px-3 py-8 text-center text-xs text-zinc-500 sm:px-4 sm:text-sm"
-                    >
-                      Loading registered paths…
-                    </td>
-                  </tr>
+                  <tr><td colSpan={6} className={`px-3 py-8 text-center text-xs sm:px-4 sm:text-sm ${MUTED}`}>Loading registered paths…</td></tr>
                 )}
               </tbody>
             </table>
@@ -1881,387 +1698,32 @@ export default function NetworkPage() {
 
           {selectedNetwork && (
             <div className="border-t border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
-              <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                Selected path context
-              </p>
-
-              <p className="mt-1 break-all text-xs font-medium">
-                {getPathIdentifier(selectedNetwork)}
-              </p>
-
-              <p className="mt-1 text-[10px] leading-5 text-zinc-500 dark:text-zinc-400 sm:text-xs">
-                Derivation context only. Observation controls are available
-                for the selected registered network path below; event records
-                remain on the selected substrate.
+              <p className={`text-[10px] font-semibold uppercase tracking-wide ${MUTED}`}>Selected path context</p>
+              <p className="mt-1 break-all text-xs font-medium">{getPathIdentifier(selectedNetwork)}</p>
+              <p className={`mt-1 text-[10px] leading-5 sm:text-xs ${MUTED}`}>
+                Derivation context only. Observation is managed above; event records remain on the selected substrate.
               </p>
             </div>
           )}
         </section>
 
-        <section className="mt-4 min-w-0 overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
+        <section className={PANEL}>
           <div className="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
             <div className="min-w-0 flex-1">
-              <h2 className="text-sm font-semibold sm:text-base">
-                bit-miner refresh status
-              </h2>
-
-              <p className="mt-1 text-[10px] leading-5 text-zinc-500 dark:text-zinc-400 sm:text-xs">
-                Activation-scoped status and refresh-path check. This request
-                does not start, stop, or refresh the miner&apos;s internal
-                pipeline. Execution remains owned by bit-miner/src/main.rs.
+              <h2 className="text-sm font-semibold sm:text-base">Persistent event store</h2>
+              <p className={`mt-1 break-all text-[10px] sm:text-xs ${MUTED} [overflow-wrap:anywhere]`}>
+                {eventStore?.events_directory ?? (selectedSubstrate ? `Substrate: ${selectedSubstrate}` : "Select a substrate")}
               </p>
             </div>
-
-            <DiagnosticBadge status={refreshStatus}>
-              {bitMinerRefreshError
-                ? "Unavailable"
-                : bitMinerRefreshLoading
-                  ? "Checking"
-                  : bitMinerRefresh
-                    ? "Path response received"
-                    : "Not checked"}
-            </DiagnosticBadge>
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 p-3 min-[420px]:grid-cols-2 sm:p-4 lg:grid-cols-3">
-            <DiagnosticValue
-              label="Substrate"
-              value={selectedSubstrate || "—"}
-            />
-
-            <DiagnosticValue
-              label="Activation"
-              value={selectedActivation}
-            />
-
-            <DiagnosticValue
-              label="Execution owner"
-              value="bit-miner/src/main.rs"
-            />
-
-            <DiagnosticValue
-              label="Refresh path"
-              value={getRefreshPath(bitMinerRefresh)}
-            />
-
-            <DiagnosticValue
-              label="Activation path"
-              value={bitMinerRefresh?.activation_path ?? "Unavailable"}
-            />
-
-            <DiagnosticValue
-              label="Execution status"
-              value={
-                bitMinerRefresh?.independently_run === true
-                  ? "Independent execution reported"
-                  : "Not confirmed by runtime"
-              }
-            />
-
-            <DiagnosticValue
-              label="Last path check"
-              value={
-                lastBitMinerRefreshCheck
-                  ? lastBitMinerRefreshCheck.toLocaleTimeString()
-                  : "—"
-              }
-            />
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 border-t border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
-            <button
-              type="button"
-              onClick={() => loadBitMinerRefresh()}
-              disabled={!selectedSubstrate || bitMinerRefreshLoading}
-              className="inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-300 px-3.5 py-2 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
-            >
-              {bitMinerRefreshLoading
-                ? "Checking path…"
-                : "Check refresh path"}
-            </button>
-
-            <span className="min-w-0 text-[10px] leading-5 text-zinc-500 dark:text-zinc-400 sm:text-xs">
-              Status/path check only. Does not launch or refresh the miner.
-            </span>
-          </div>
-
-          {bitMinerRefreshError && (
-            <div className="px-3 pb-3 sm:px-4">
-              <ErrorMessage>{bitMinerRefreshError}</ErrorMessage>
-            </div>
-          )}
-        </section>
-
-        {/* ------------------------------------------------------------------
-            Network observation: ONE stable box. Header, scope, controls,
-            live-state strip, result, clips, list and errors all live here.
-            ------------------------------------------------------------------ */}
-        <section className="mt-4 min-w-0 overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800 sm:px-4">
-            <div className="flex min-w-0 items-center gap-2">
-              <h2 className="whitespace-nowrap text-sm font-semibold sm:text-base">
-                Network observation
-              </h2>
-
-              <DiagnosticBadge status={observationBadge.status}>
-                {observationBadge.label}
-              </DiagnosticBadge>
-            </div>
-
-            <span className="whitespace-nowrap text-[10px] text-zinc-500 dark:text-zinc-400">
-              {lastObservationCheck && scopeMatches
-                ? `Checked ${lastObservationCheck.toLocaleTimeString()}`
-                : autoRefresh
-                  ? `Refreshes every ${REFRESH_INTERVAL_MS / 1000}s`
-                  : "Live updates off"}
-            </span>
-          </div>
-
-          <div className="grid grid-cols-2 gap-1.5 border-b border-zinc-200 p-2 dark:border-zinc-800 sm:grid-cols-4 sm:p-2.5">
-            <CompactValue label="Substrate" value={selectedSubstrate || "—"} />
-            <CompactValue label="Activation" value={selectedActivation} />
-            <CompactValue label="Network ID" value={selectedNetworkId || "—"} />
-            <CompactValue
-              label="Path"
-              value={
-                selectedNetwork
-                  ? getPathIdentifier(selectedNetwork)
-                  : selectedPath || "—"
-              }
-            />
-          </div>
-
-          <div
-            className="flex min-h-[2.75rem] flex-wrap items-center justify-between gap-2 px-3 py-2 sm:px-4"
-            aria-live="polite"
-          >
-            {observationHasNetworkContext ? (
-              <div className="flex flex-wrap items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={startObservation}
-                  disabled={
-                    !selectedSubstrate ||
-                    !selectedNetworkId ||
-                    observationActionLoading ||
-                    observationRunning
-                  }
-                  className="inline-flex min-h-8 items-center justify-center whitespace-nowrap rounded-lg bg-zinc-950 px-3 py-1.5 text-center text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950"
-                >
-                  {observationActionLoading && !observationRunning
-                    ? "Starting…"
-                    : "Start"}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={stopObservation}
-                  disabled={
-                    !selectedSubstrate ||
-                    !selectedNetworkId ||
-                    observationActionLoading ||
-                    !observationRunning
-                  }
-                  className="inline-flex min-h-8 items-center justify-center whitespace-nowrap rounded-lg border border-zinc-300 px-3 py-1.5 text-center text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
-                >
-                  {observationActionLoading && observationRunning
-                    ? "Stopping…"
-                    : "Stop"}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => loadObservation()}
-                  disabled={
-                    !selectedSubstrate ||
-                    !selectedNetworkId ||
-                    observationLoading ||
-                    observationActionLoading
-                  }
-                  className="inline-flex min-h-8 items-center justify-center whitespace-nowrap rounded-lg border border-zinc-300 px-3 py-1.5 text-center text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
-                >
-                  {observationLoading ? "Refreshing…" : "Refresh"}
-                </button>
-              </div>
-            ) : (
-              <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                Select a registered network path to scope observation.
-              </span>
-            )}
-
-            <div className="flex flex-wrap items-center gap-1.5">
-              {observationActionLoading && (
-                <DiagnosticBadge status="checking">Applying…</DiagnosticBadge>
-              )}
-
-              {observationLoading && !observationActionLoading && (
-                <DiagnosticBadge status="checking">Refreshing…</DiagnosticBadge>
-              )}
-
-              {scopedObservation && observationStale && (
-                <DiagnosticBadge status="checking">
-                  Last known result
-                </DiagnosticBadge>
-              )}
-
-              {scopedObservation && observationNotice && (
-                <DiagnosticBadge status="running">
-                  {observationNotice}
-                </DiagnosticBadge>
-              )}
-            </div>
-          </div>
-
-          {observationError && (
-            <div className="px-3 pb-2 sm:px-4">
-              <ErrorMessage>{observationError}</ErrorMessage>
-            </div>
-          )}
-
-          {scopedObservation && (
-            <div className="min-w-0 space-y-2 border-t border-zinc-200 p-2 dark:border-zinc-800 sm:p-2.5">
-              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-                <CompactValue
-                  label="Running"
-                  value={scopedObservation.running ? "yes" : "no"}
-                />
-
-                <CompactValue
-                  label="Path hint"
-                  value={scopedObservation.path}
-                />
-
-                <CompactValue
-                  label="Runtime"
-                  value={
-                    scopedObservation.runtime?.unix_seconds !== undefined
-                      ? formatTimestamp(scopedObservation.runtime.unix_seconds)
-                      : "—"
-                  }
-                />
-
-                <CompactValue
-                  label="Clips"
-                  value={observationClips.length}
-                />
-              </div>
-
-              {hasExtraObservationFields && (
-                <details className="min-w-0 rounded-lg border border-zinc-200 dark:border-zinc-800">
-                  <summary className="cursor-pointer select-none px-3 py-1.5 text-xs font-semibold">
-                    Additional response fields
-                  </summary>
-
-                  <div className="min-w-0 border-t border-zinc-200 p-3 dark:border-zinc-800">
-                    <ResponseFields
-                      data={scopedObservation}
-                      omit={KNOWN_OBSERVATION_KEYS}
-                    />
-                  </div>
-                </details>
-              )}
-
-              <details className="min-w-0 rounded-lg border border-zinc-200 dark:border-zinc-800">
-                <summary className="cursor-pointer select-none px-3 py-1.5 text-xs font-semibold">
-                  Raw runtime response
-                </summary>
-
-                <pre className="max-h-56 overflow-auto border-t border-zinc-200 bg-zinc-50 p-3 text-[10px] leading-4 dark:border-zinc-800 dark:bg-zinc-950">
-                  {safeJson(scopedObservation)}
-                </pre>
-              </details>
-            </div>
-          )}
-
-          {scopedObservation && observationClips.length > 0 && (
-            <div className="border-t border-zinc-200 dark:border-zinc-800">
-              <div className="px-3 py-1.5 sm:px-4">
-                <h3 className="text-xs font-semibold sm:text-sm">
-                  Observation clips
-                </h3>
-              </div>
-
-              <div className="min-w-0 px-3 pb-2 sm:px-4">
-                <ObjectTable
-                  rows={observationClips}
-                  columns={["substrate", "active", "direction"]}
-                />
-              </div>
-            </div>
-          )}
-
-          {scopedObservationList.length > 0 && (
-            <div className="border-t border-zinc-200 dark:border-zinc-800">
-              <div className="px-3 py-1.5 sm:px-4">
-                <h3 className="text-xs font-semibold sm:text-sm">
-                  Activation observation list
-                </h3>
-              </div>
-
-              <div className="min-w-0 px-3 pb-2 sm:px-4">
-                <ObjectTable
-                  rows={observationListRows}
-                  columns={["network", "listen_port", "running", "path"]}
-                />
-              </div>
-            </div>
-          )}
-
-          {observationHasNetworkContext &&
-            !scopedObservation &&
-            !observationLoading &&
-            !observationActionLoading &&
-            !observationError && (
-              <p className="px-3 py-3 text-center text-xs text-zinc-500 dark:text-zinc-400 sm:px-4">
-                No live observation for this path. Start one to request
-                observation through the QTM runtime.
-              </p>
-            )}
-
-          {observationLoading && !scopedObservation && (
-            <p className="px-3 py-3 text-center text-xs text-zinc-500 dark:text-zinc-400 sm:px-4">
-              Loading observation status…
-            </p>
-          )}
-        </section>
-
-        <section className="mt-4 min-w-0 overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
-          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
-            <div className="min-w-0 flex-1">
-              <h2 className="text-sm font-semibold sm:text-base">
-                Persistent event store
-              </h2>
-
-              <p className="mt-1 break-all text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs [overflow-wrap:anywhere]">
-                {eventStore?.events_directory ??
-                  (selectedSubstrate
-                    ? `Substrate: ${selectedSubstrate}`
-                    : "Select a substrate")}
-              </p>
-            </div>
-
             <div className="flex flex-wrap items-center gap-2">
               <DiagnosticBadge status={eventStoreStatus}>
-                {eventStoreStatus === "live"
-                  ? "Readable"
-                  : eventStoreStatus === "error"
-                    ? "Unavailable"
-                    : eventStoreStatus === "checking"
-                      ? "Checking"
-                      : "Not checked"}
+                {eventStoreStatus === "live" ? "Readable" : eventStoreStatus === "error" ? "Unavailable" : eventStoreStatus === "checking" ? "Checking" : "Not checked"}
               </DiagnosticBadge>
-
-              <DiagnosticBadge status="unknown">
-                {persistedEvents.length} records
-              </DiagnosticBadge>
+              <DiagnosticBadge status="unknown">{persistedEvents.length} records</DiagnosticBadge>
             </div>
           </div>
 
-          {eventStoreError && (
-            <div className="p-3 sm:p-4">
-              <ErrorMessage>{eventStoreError}</ErrorMessage>
-            </div>
-          )}
+          {eventStoreError && <div className="p-3 sm:p-4"><ErrorMessage>{eventStoreError}</ErrorMessage></div>}
 
           {eventStore && (
             <>
@@ -2269,36 +1731,15 @@ export default function NetworkPage() {
                 <DiagnosticValue label="Substrate" value={eventStore.substrate} />
                 <DiagnosticValue label="Event directory" value={eventStore.events_directory} />
                 <DiagnosticValue label="Substrate directory" value={eventStore.directory} />
-
-                <DiagnosticValue
-                  label="Runtime time"
-                  value={
-                    runtime?.unix_seconds !== undefined
-                      ? formatTimestamp(runtime.unix_seconds)
-                      : "—"
-                  }
-                />
-
-                <DiagnosticValue
-                  label="Runtime nanoseconds"
-                  value={runtime?.subsec_nanos}
-                />
-
-                <DiagnosticValue
-                  label="Persistent records"
-                  value={persistedEvents.length}
-                />
+                <DiagnosticValue label="Runtime time" value={runtime?.unix_seconds !== undefined ? formatTimestamp(runtime.unix_seconds) : "—"} />
+                <DiagnosticValue label="Runtime nanoseconds" value={runtime?.subsec_nanos} />
+                <DiagnosticValue label="Persistent records" value={persistedEvents.length} />
               </div>
 
               <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
-                <h3 className="text-xs font-semibold sm:text-sm">
-                  Persisted event records
-                </h3>
-
-                <span className="text-[10px] text-zinc-500 dark:text-zinc-400 sm:text-xs">
-                  {lastDiagnosticsCheck
-                    ? `Checked ${lastDiagnosticsCheck.toLocaleTimeString()}`
-                    : "Not checked"}
+                <h3 className="text-xs font-semibold sm:text-sm">Persisted event records</h3>
+                <span className={`text-[10px] sm:text-xs ${MUTED}`}>
+                  {lastDiagnosticsCheck ? `Checked ${lastDiagnosticsCheck.toLocaleTimeString()}` : "Not checked"}
                 </span>
               </div>
 
@@ -2315,107 +1756,51 @@ export default function NetworkPage() {
                       <th className="px-3 py-2.5 sm:px-4">Retained mass</th>
                     </tr>
                   </thead>
-
                   <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
                     {persistedEvents.map((event, index) => (
-                      <tr
-                        key={getEventKey(event, index)}
-                        className="align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
-                      >
-                        <td className="px-3 py-2.5 font-medium sm:px-4">
-                          {displayValue(event.kind)}
-                        </td>
-
-                        <td className="max-w-[220px] break-all px-3 py-2.5 font-mono text-[10px] sm:px-4">
-                          {displayValue(event.record)}
-                        </td>
-
-                        <td className="px-3 py-2.5 tabular-nums sm:px-4">
-                          {displayValue(event.activation)}
-                        </td>
-
-                        <td className="px-3 py-2.5 tabular-nums sm:px-4">
-                          {displayValue(event.dimension)}
-                        </td>
-
-                        <td className="px-3 py-2.5 tabular-nums sm:px-4">
-                          {displayValue(event.structural_value)}
-                        </td>
-
-                        <td className="px-3 py-2.5 tabular-nums sm:px-4">
-                          {displayValue(event.depth_objects)}
-                        </td>
-
-                        <td className="px-3 py-2.5 tabular-nums sm:px-4">
-                          {displayValue(event.retained_mass)}
-                        </td>
+                      <tr key={getEventKey(event, index)} className="align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/60">
+                        <td className="px-3 py-2.5 font-medium sm:px-4">{displayValue(event.kind)}</td>
+                        <td className="max-w-[220px] break-all px-3 py-2.5 font-mono text-[10px] sm:px-4">{displayValue(event.record)}</td>
+                        <td className="px-3 py-2.5 tabular-nums sm:px-4">{displayValue(event.activation)}</td>
+                        <td className="px-3 py-2.5 tabular-nums sm:px-4">{displayValue(event.dimension)}</td>
+                        <td className="px-3 py-2.5 tabular-nums sm:px-4">{displayValue(event.structural_value)}</td>
+                        <td className="px-3 py-2.5 tabular-nums sm:px-4">{displayValue(event.depth_objects)}</td>
+                        <td className="px-3 py-2.5 tabular-nums sm:px-4">{displayValue(event.retained_mass)}</td>
                       </tr>
                     ))}
 
                     {diagnosticsLoading && persistedEvents.length === 0 && (
-                      <tr>
-                        <td
-                          colSpan={7}
-                          className="px-3 py-8 text-center text-zinc-500 dark:text-zinc-400"
-                        >
-                          Reading the persistent event store…
-                        </td>
-                      </tr>
+                      <tr><td colSpan={7} className={`px-3 py-8 text-center ${MUTED}`}>Reading the persistent event store…</td></tr>
                     )}
 
-                    {!diagnosticsLoading &&
-                      eventStoreStatus === "live" &&
-                      persistedEvents.length === 0 && (
-                        <tr>
-                          <td
-                            colSpan={7}
-                            className="px-3 py-8 text-center text-zinc-500 dark:text-zinc-400"
-                          >
-                            Event store is reachable, but no records were
-                            returned for this substrate.
-                          </td>
-                        </tr>
-                      )}
+                    {!diagnosticsLoading && eventStoreStatus === "live" && persistedEvents.length === 0 && (
+                      <tr><td colSpan={7} className={`px-3 py-8 text-center ${MUTED}`}>Event store is reachable, but no records were returned for this substrate.</td></tr>
+                    )}
 
-                    {!diagnosticsLoading &&
-                      !selectedSubstrate &&
-                      persistedEvents.length === 0 && (
-                        <tr>
-                          <td
-                            colSpan={7}
-                            className="px-3 py-8 text-center text-zinc-500 dark:text-zinc-400"
-                          >
-                            Select a substrate to inspect its event store.
-                          </td>
-                        </tr>
-                      )}
+                    {!diagnosticsLoading && !selectedSubstrate && persistedEvents.length === 0 && (
+                      <tr><td colSpan={7} className={`px-3 py-8 text-center ${MUTED}`}>Select a substrate to inspect its event store.</td></tr>
+                    )}
                   </tbody>
                 </table>
               </div>
             </>
           )}
 
-          {!eventStore &&
-            eventStoreStatus === "error" &&
-            !diagnosticsLoading && (
-              <p className="px-3 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400 sm:px-4 sm:text-sm">
-                Event store is unavailable for this substrate. See the error
-                above.
-              </p>
-            )}
+          {!eventStore && eventStoreStatus === "error" && !diagnosticsLoading && (
+            <p className={`px-3 py-6 text-center text-xs sm:px-4 sm:text-sm ${MUTED}`}>
+              Event store is unavailable for this substrate. See the error above.
+            </p>
+          )}
 
-          {!eventStore &&
-            eventStoreStatus !== "error" &&
-            !diagnosticsLoading && (
-              <p className="px-3 py-8 text-center text-xs text-zinc-500 dark:text-zinc-400 sm:px-4 sm:text-sm">
-                Select a substrate to load its persisted event records.
-              </p>
-            )}
+          {!eventStore && eventStoreStatus !== "error" && !diagnosticsLoading && (
+            <p className={`px-3 py-8 text-center text-xs sm:px-4 sm:text-sm ${MUTED}`}>
+              Select a substrate to load its persisted event records.
+            </p>
+          )}
         </section>
 
-        <footer className="mt-6 border-t border-zinc-200 pt-3.5 text-[10px] leading-5 text-zinc-500 dark:border-zinc-800 sm:mt-8 sm:pt-4 sm:text-xs">
-          QTM Network · Substrate host · Path-scoped observation · Electrum
-          endpoints · Event-store diagnostics · qtm-api
+        <footer className={`mt-6 border-t border-zinc-200 pt-3.5 text-[10px] leading-5 dark:border-zinc-800 sm:mt-8 sm:pt-4 sm:text-xs ${MUTED}`}>
+          QTM Network · Substrate host · Path-scoped observation · Event-store diagnostics · qtm-api
         </footer>
       </div>
     </main>
