@@ -2,15 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-// Substrate state lives in the machine-local ~/.qp/substrates and is operated
-// on by the QP runtime. Inside a native shell (for example Tauri) the console
-// calls that runtime directly through IPC: no HTTP. A plain browser cannot
-// reach the local filesystem, so it uses an optional bridge to a runtime.
-// Prefer NEXT_PUBLIC_QTM_API_BASE when set; otherwise fall back to the public
-// qtm-api deployment so a Vercel (or similar) host never routes /wallets to
-// itself.
-// Substrate storage is owned by the server-side QP runtime.
-// substrate_root() is resolved by Rust, never by the browser.
 const BRIDGE_BASE = (
   process.env.NEXT_PUBLIC_QTM_API_BASE ||
   "https://qtm-api-anwp.onrender.com"
@@ -28,23 +19,19 @@ const isRecord = (value) =>
 
 const objectAt = (source, keys) => {
   if (!isRecord(source)) return undefined;
-
   for (const key of keys) {
     if (isRecord(source[key])) return source[key];
   }
-
   return undefined;
 };
 
 const valueAt = (source, keys) => {
   if (!isRecord(source)) return undefined;
-
   for (const key of keys) {
     if (source[key] !== null && source[key] !== undefined) {
       return source[key];
     }
   }
-
   return undefined;
 };
 
@@ -58,19 +45,15 @@ function friendlyValue(value) {
   if (value === null || value === undefined || value === "") {
     return "Not provided";
   }
-
   if (typeof value === "boolean") {
     return value ? "Yes" : "No";
   }
-
   if (["string", "number", "bigint"].includes(typeof value)) {
     return String(value);
   }
-
   if (Array.isArray(value)) {
     return value.length ? `${value.length} items` : "None";
   }
-
   return "Details available";
 }
 
@@ -81,17 +64,14 @@ function flatten(value, prefix = "", rows = []) {
     if (!value.length && prefix) {
       rows.push([prefix, "None"]);
     }
-
     value.forEach((item, index) => {
       flatten(item, `${prefix || "Item"} ${index + 1}`, rows);
     });
   } else if (isRecord(value)) {
     const entries = Object.entries(value);
-
     if (!entries.length && prefix) {
       rows.push([prefix, "No details returned"]);
     }
-
     entries.forEach(([key, child]) => {
       flatten(
         child,
@@ -102,7 +82,6 @@ function flatten(value, prefix = "", rows = []) {
   } else {
     rows.push([prefix || "Value", friendlyValue(value)]);
   }
-
   return rows;
 }
 
@@ -128,10 +107,8 @@ class RuntimeError extends Error {
   }
 }
 
-// Native IPC entry point, present only inside a native shell.
 function nativeInvoke() {
   if (typeof window === "undefined") return null;
-
   return (
     window.__TAURI__?.core?.invoke ??
     window.__TAURI_INTERNALS__?.invoke ??
@@ -150,7 +127,6 @@ const NATIVE_COMMANDS = {
   listEvents: "qtm_events",
 };
 
-// Bridge adapter routes (browser only). Same operations, same payloads.
 const BRIDGE_ROUTES = {
   listSubstrates: () => ["GET", "/wallets"],
   listNetworks: () => ["GET", "/networks"],
@@ -171,23 +147,18 @@ const BRIDGE_ROUTES = {
   ],
 };
 
-// The runtime's own error text, with no transport details added.
 function directMessage(cause) {
   if (typeof cause === "string" && cause.trim()) return cause;
-
   if (cause instanceof Error && cause.message) return cause.message;
-
   if (isRecord(cause)) {
     const message = valueAt(cause, ["error", "message", "detail"]);
     if (typeof message === "string" && message.trim()) return message;
   }
-
   return "The QP runtime reported an error.";
 }
 
 async function callRuntime(operation, args = {}) {
   const invoke = nativeInvoke();
-
   if (invoke) {
     try {
       return await invoke(NATIVE_COMMANDS[operation], args);
@@ -204,7 +175,6 @@ async function callRuntime(operation, args = {}) {
 
   const [method, path] = BRIDGE_ROUTES[operation](args);
   const url = `${BRIDGE_BASE}${path}`;
-
   let response;
 
   try {
@@ -221,7 +191,6 @@ async function callRuntime(operation, args = {}) {
   } catch (cause) {
     const reason =
       cause instanceof Error && cause.message ? cause.message : "network error";
-
     throw new RuntimeError(
       `Could not reach the QTM runtime at ${BRIDGE_BASE} (${reason}). Make sure qtm-api is running at that address, and that this page is allowed to call it (CORS / mixed content). Hosted instances can take about a minute to wake from sleep.`,
       { status: 0, url }
@@ -243,7 +212,6 @@ async function callRuntime(operation, args = {}) {
 
   if (!response.ok) {
     const apiMessage = valueAt(data, ["error", "message", "detail"]);
-
     const reason =
       typeof apiMessage === "string"
         ? apiMessage
@@ -272,21 +240,17 @@ async function callRuntime(operation, args = {}) {
 function eventMapOf(source) {
   const direct = objectAt(source, ["event", "event_map", "eventMap"]);
   if (direct) return direct;
-
   const frame = objectAt(source, ["frame"]);
   const frameEvent = objectAt(frame, [
     "event",
     "event_map",
     "eventMap",
   ]);
-
   if (frameEvent) return frameEvent;
-
   const transaction = objectAt(frame, [
     "quantum_transaction",
     "quantumTransaction",
   ]);
-
   return objectAt(transaction, ["event", "event_map", "eventMap"]);
 }
 
@@ -298,7 +262,6 @@ function ResultHeading({ eyebrow, title }) {
           {eyebrow}
         </p>
       )}
-
       <h3 className="text-sm font-semibold">{title}</h3>
     </div>
   );
@@ -309,7 +272,6 @@ function KeyValueList({
   emptyText = "No details were returned.",
 }) {
   const rows = flatten(value);
-
   if (!rows.length) {
     return (
       <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -325,7 +287,6 @@ function KeyValueList({
           <dt className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
             {key}
           </dt>
-
           <dd className="mt-0.5 break-words text-xs text-zinc-800 dark:text-zinc-200">
             {itemValue}
           </dd>
@@ -353,14 +314,12 @@ function ResultSection({
       >
         <span className="min-w-0">
           <span className="block text-xs font-semibold">{title}</span>
-
           {description && (
             <span className="mt-1 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">
               {description}
             </span>
           )}
         </span>
-
         <span
           aria-hidden="true"
           className={`flex size-7 shrink-0 items-center justify-center rounded-md border border-zinc-200 transition-transform dark:border-zinc-700 ${
@@ -399,7 +358,6 @@ function Field({
   return (
     <label className="flex min-w-0 flex-col gap-1">
       <span className="text-xs font-medium">{label}</span>
-
       <input
         type={type}
         autoComplete={autoComplete}
@@ -419,7 +377,6 @@ function NumberField({ label, value, onChange, min = 0 }) {
   return (
     <label className="flex min-w-0 flex-col gap-1">
       <span className="text-xs font-medium">{label}</span>
-
       <input
         type="number"
         min={min}
@@ -435,7 +392,6 @@ function NumberField({ label, value, onChange, min = 0 }) {
 
 function ReceiveUnitIdentifiers({ amount }) {
   const count = Number(amount);
-
   if (!Number.isSafeInteger(count) || count <= 0) {
     return (
       <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -451,12 +407,10 @@ function ReceiveUnitIdentifiers({ amount }) {
     <section className="space-y-2">
       <div>
         <h4 className="text-xs font-semibold">Receive unit ordinals</h4>
-
         <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
           {count} {count === 1 ? "unit" : "units"} · Ordinals 1–{count}
         </p>
       </div>
-
       <div className="grid grid-cols-5 gap-1.5 sm:grid-cols-8">
         {Array.from(
           { length: Math.min(count, limit) },
@@ -469,18 +423,15 @@ function ReceiveUnitIdentifiers({ amount }) {
             <span className="block text-[10px] text-zinc-500 dark:text-zinc-400">
               Unit
             </span>
-
             <span className="mt-0.5 block font-mono text-xs">{id}</span>
           </div>
         ))}
       </div>
-
       {count > limit && (
         <p className="text-xs text-zinc-500 dark:text-zinc-400">
           Showing the first {limit} of {count} ordinals.
         </p>
       )}
-
       <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
         These are display ordinals from 1 through N, not distinct persisted
         identifiers supplied by the API.
@@ -504,7 +455,6 @@ function eventRecordsOf(source) {
     if (Array.isArray(candidate)) {
       return candidate.filter(isRecord);
     }
-
     if (isRecord(candidate)) {
       for (const key of ["events", "records", "items"]) {
         if (Array.isArray(candidate[key])) {
@@ -533,7 +483,6 @@ function recordNameOf(record) {
       return record[key];
     }
   }
-
   return "";
 }
 
@@ -541,16 +490,13 @@ function OpenResults({ result }) {
   const directory = result?.directory;
   const receive = result?.receive;
   const frame = objectAt(receive, ["frame"]) ?? receive;
-
   const transaction = objectAt(frame, [
     "quantum_transaction",
     "quantumTransaction",
   ]);
-
   const event = eventMapOf(receive);
   const depth = objectAt(event, ["depth"]);
   const objects = Array.isArray(depth?.objects) ? depth.objects : [];
-
   const amount =
     valueAt(transaction, ["amount"]) ?? result?.requested_amount;
 
@@ -562,29 +508,24 @@ function OpenResults({ result }) {
         value={directory}
         defaultOpen
       />
-
       <ResultSection
         title="Receive event depth"
         description="Depth data returned by the receive operation."
         value={depth}
         defaultOpen
       />
-
       {objects.length > 0 && (
         <ResultSection title="Retained objects" value={objects} />
       )}
-
       <section className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
         <h3 className="text-xs font-semibold">
           QuantumTransaction validation
         </h3>
-
         <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
           {transaction
             ? "A QuantumTransaction was returned by the receive operation."
             : "The response did not contain the expected QuantumTransaction."}
         </p>
-
         <div className="mt-3">
           <KeyValueList
             value={{
@@ -596,12 +537,10 @@ function OpenResults({ result }) {
             }}
           />
         </div>
-
         <div className="mt-4">
           <ReceiveUnitIdentifiers amount={amount} />
         </div>
       </section>
-
       {event && (
         <ResultSection title="Receive event fields" value={event} />
       )}
@@ -611,19 +550,16 @@ function OpenResults({ result }) {
 
 function EventMapSections({ event, prefix = "" }) {
   const depth = objectAt(event, ["depth"]);
-
   const heritage = objectAt(event, [
     "heritage",
     "state_heritage",
     "stateHeritage",
   ]);
-
   const transition = objectAt(event, [
     "transition",
     "transition_heritage",
     "transitionHeritage",
   ]);
-
   const identifier = valueAt(depth, [
     "identifier",
     "depth_identifier",
@@ -645,21 +581,18 @@ function EventMapSections({ event, prefix = "" }) {
           defaultOpen
         />
       )}
-
       {heritage && (
         <ResultSection
           title={`${prefix}Heritage state`}
           value={heritage}
         />
       )}
-
       {transition && (
         <ResultSection
           title={`${prefix}Transition heritage`}
           value={transition}
         />
       )}
-
       <ResultSection title={`${prefix}Event map`} value={event} />
     </div>
   );
@@ -682,19 +615,16 @@ function TransitResults({ result, network, path, substrate }) {
         }}
         defaultOpen
       />
-
       <ResultSection
         title="QTM values"
         value={objectAt(frame, ["qtm", "Qtm"])}
         defaultOpen
       />
-
       {event ? (
         <EventMapSections event={event} />
       ) : (
         <ResultSection title="Event map" value={undefined} />
       )}
-
       <ResultSection
         title="Complete transit response"
         description="Additional fields returned by the API."
@@ -717,26 +647,21 @@ function ExileResults({ result, substrate }) {
         value={{ substrate }}
         defaultOpen
       />
-
       <ResultSection
         title="Stored QTM"
         value={objectAt(frame, ["qtm", "Qtm"])}
         defaultOpen
       />
-
       {depth && (
         <section className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
           <h3 className="text-xs font-semibold">Exile depth record</h3>
-
           <p className="mt-2 break-all font-mono text-xs text-zinc-500 dark:text-zinc-400">
             {depth.path || "Depth path not returned"}
           </p>
-
           <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-300">
             {objects.length} retained{" "}
             {objects.length === 1 ? "object" : "objects"} returned by the API.
           </p>
-
           {objects.length > 0 && (
             <div className="mt-3">
               <KeyValueList value={objects} />
@@ -744,13 +669,11 @@ function ExileResults({ result, substrate }) {
           )}
         </section>
       )}
-
       {event ? (
         <EventMapSections event={event} prefix="Exile " />
       ) : (
         <ResultSection title="Exile event map" value={undefined} />
       )}
-
       <ResultSection title="Complete exile response" value={result} />
     </div>
   );
@@ -762,7 +685,6 @@ function ResultCard({ result, tab, network, path, substrate }) {
   return (
     <div className="mt-4 space-y-3">
       {tab === "open" && <OpenResults result={result} />}
-
       {tab === "transit" && (
         <TransitResults
           result={result}
@@ -771,18 +693,15 @@ function ResultCard({ result, tab, network, path, substrate }) {
           substrate={substrate}
         />
       )}
-
       {tab === "exile" && (
         <ExileResults result={result} substrate={substrate} />
       )}
-
       {tab === "create" && (
         <section className="space-y-3">
           <ResultHeading
             eyebrow="Create result"
             title="Substrate created"
           />
-
           <ResultSection
             title="Created substrate"
             value={result}
@@ -845,8 +764,6 @@ export default function Home() {
     );
   }, []);
 
-  // Substrate requested by links from /network and /eventstore (?substrate=).
-  // Read once (null = not read yet) and consumed by the first resolved load.
   const requestedSubstrateRef = useRef(null);
   const listRequestRef = useRef(0);
   const exileRequestRef = useRef(0);
@@ -857,19 +774,14 @@ export default function Home() {
     selectedRef.current = selectedSubstrate;
   }, [selectedSubstrate]);
 
-  // Do not touch the URL until the first list load has resolved the
-  // selection; otherwise the requested ?substrate= would be stripped.
   useEffect(() => {
     if (!selectionReady) return;
-
     const url = new URL(window.location.href);
-
     if (selectedSubstrate) {
       url.searchParams.set("substrate", selectedSubstrate);
     } else {
       url.searchParams.delete("substrate");
     }
-
     window.history.replaceState(
       {},
       "",
@@ -890,14 +802,12 @@ export default function Home() {
 
     try {
       const data = await callRuntime("listSubstrates");
-
       if (!Array.isArray(data.substrates)) {
         throw new Error(
           "The API response did not contain a substrates list."
         );
       }
 
-      // A newer list request has started; this response is stale.
       if (requestId !== listRequestRef.current) return;
 
       const valid = data.substrates.filter(
@@ -909,21 +819,17 @@ export default function Home() {
 
       setSubstrates(valid);
 
-      // Priority: explicit choice, the user's current selection, the URL
-      // request, then the first substrate only if none of those exist.
       setSelectedSubstrate((current) => {
         const wanted = [preferred, current, requested].find(
           (candidate) =>
             candidate && valid.some((item) => item.name === candidate)
         );
-
         return wanted || valid[0]?.name || "";
       });
 
       setSelectionReady(true);
     } catch (err) {
       if (requestId !== listRequestRef.current) return;
-
       setListError(
         err instanceof Error
           ? err.message
@@ -942,7 +848,6 @@ export default function Home() {
 
     try {
       const data = await callRuntime("listNetworks");
-
       if (!Array.isArray(data.networks)) {
         throw new Error(
           "The API response did not contain a networks list."
@@ -965,20 +870,17 @@ export default function Home() {
       );
 
       const first = valid[0];
-
       if (first) {
         if (Number.isFinite(first.purpose)) {
           setPurpose((current) =>
             current === "44" ? String(first.purpose) : current
           );
         }
-
         if (Number.isFinite(first.coin)) {
           setCoin((current) =>
             current === "0" ? String(first.coin) : current
           );
         }
-
         if (first.path) {
           setPath((current) => current || first.path);
         }
@@ -997,8 +899,6 @@ export default function Home() {
   const loadExileRecords = useCallback(async () => {
     const substrate = selectedSubstrate;
     const requestId = ++exileRequestRef.current;
-
-    // Only the latest request for the still-selected substrate may update state.
     const isCurrent = () =>
       requestId === exileRequestRef.current &&
       selectedRef.current === substrate;
@@ -1017,11 +917,9 @@ export default function Home() {
 
     try {
       const data = await callRuntime("listEvents", { name: substrate });
-
       if (!isCurrent()) return;
 
       const records = eventRecordsOf(data);
-
       const recognizedList =
         Array.isArray(data.events) ||
         Array.isArray(data.records) ||
@@ -1042,9 +940,7 @@ export default function Home() {
       setExileRecords(records);
     } catch (err) {
       if (!isCurrent()) return;
-
       setExileRecords([]);
-
       setExileRecordsError(
         err instanceof Error
           ? err.message
@@ -1079,7 +975,6 @@ export default function Home() {
 
   function handleSubstrateChange(value) {
     selectedRef.current = value;
-    // Invalidate in-flight exile-record loads for the previous substrate.
     exileRequestRef.current += 1;
     setExileRecordsLoading(false);
     setSelectedSubstrate(value);
@@ -1091,21 +986,17 @@ export default function Home() {
 
   function handleNetworkChange(id) {
     const network = networks.find((item) => item.id === id);
-
     setSelectedNetwork(id);
     setResult(null);
     setError("");
-
     if (!network) return;
 
     if (Number.isFinite(network.purpose)) {
       setPurpose(String(network.purpose));
     }
-
     if (Number.isFinite(network.coin)) {
       setCoin(String(network.coin));
     }
-
     setPath(network.path || "");
   }
 
@@ -1124,11 +1015,9 @@ export default function Home() {
     try {
       if (tab === "create") {
         const substrateName = name.trim();
-
         if (!substrateName) {
           throw new Error("Enter a substrate name.");
         }
-
         if (!/^[A-Za-z0-9_-]{1,64}$/.test(substrateName)) {
           throw new Error(
             "Substrate name must be 1-64 ASCII letters, digits, hyphens, or underscores."
@@ -1136,16 +1025,13 @@ export default function Home() {
         }
 
         let payload;
-
         if (seedSource === "bip39") {
           if (!phrase.trim()) {
             throw new Error("Enter a BIP39 mnemonic phrase.");
           }
-
           if (!language) {
             throw new Error("Select a BIP39 language.");
           }
-
           payload = {
             name: substrateName,
             seed_source: "bip39",
@@ -1155,7 +1041,6 @@ export default function Home() {
           };
         } else {
           const parsed = indices.split(",").map((item) => item.trim());
-
           if (
             parsed.length !== 12 ||
             parsed.some(
@@ -1171,7 +1056,6 @@ export default function Home() {
               "Enter exactly 12 indices, each an integer from 0 to 2047."
             );
           }
-
           payload = {
             name: substrateName,
             seed_source: "persistent",
@@ -1183,28 +1067,23 @@ export default function Home() {
         const data = await callRuntime("createSubstrate", {
           request: payload,
         });
-
         setResult(data);
         setName("");
         setEntropy("");
         setPhrase("");
         setPassphrase("");
 
-        // Background discovery refresh: its failure shows in the substrate
-        // card and never affects the Create result or the form.
         void loadSubstrates(substrateName);
         return;
       }
 
       if (tab === "open") {
         const amount = Number(receiveAmount);
-
         if (!Number.isSafeInteger(amount) || amount <= 0) {
           throw new Error(
             "Receive amount must be a positive safe integer."
           );
         }
-
         if (!["receive", "change"].includes(receiveFlow)) {
           throw new Error("Select a valid receive flow.");
         }
@@ -1212,7 +1091,6 @@ export default function Home() {
         const directory = await callRuntime("openSubstrate", {
           name: selectedSubstrate,
         });
-
         const receive = await callRuntime("receive", {
           name: selectedSubstrate,
           request: { amount, flow: receiveFlow },
@@ -1225,7 +1103,6 @@ export default function Home() {
           flow: receiveFlow,
           substrate: selectedSubstrate,
         });
-
         return;
       }
 
@@ -1251,8 +1128,6 @@ export default function Home() {
           }
         }
 
-        // The selected substrate is the state context for this transition.
-        // The network/path configure derivation; they do not replace the substrate.
         const data = await callRuntime("transit", {
           name: selectedSubstrate,
           request: {
@@ -1267,14 +1142,10 @@ export default function Home() {
           loadSubstrates(),
           loadExileRecords(),
         ]);
-
         return;
       }
 
       if (tab === "exile") {
-        // The Rust API decides eligibility and derives the exile depth from
-        // this substrate's persisted event history. The browser neither gates
-        // the request nor submits a client-created depth snapshot.
         const data = await callRuntime("exile", {
           name: selectedSubstrate,
         });
@@ -1298,9 +1169,7 @@ export default function Home() {
 
   const linkWithSubstrate = (href) => {
     if (!selectedSubstrate) return href;
-
     const separator = href.includes("?") ? "&" : "?";
-
     return `${href}${separator}substrate=${encodeURIComponent(
       selectedSubstrate
     )}`;
@@ -1318,17 +1187,14 @@ export default function Home() {
         html {
           font-size: 14px;
         }
-
         * {
           min-width: 0;
         }
-
         body {
           margin: 0;
           font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
             "Helvetica Neue", Arial, sans-serif;
         }
-
         a,
         button,
         input,
@@ -1343,11 +1209,9 @@ export default function Home() {
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
             QuantPerm · QTM
           </p>
-
           <h1 className="mt-1.5 text-lg font-semibold tracking-tight text-zinc-950 sm:text-xl dark:text-zinc-50">
             QTM substrate console
           </h1>
-
           <p className="mt-1 text-xs leading-5 text-zinc-600 dark:text-zinc-400">
             Create and inspect persistent substrates, derive network paths,
             and transition or exile state through the local QP runtime or the
@@ -1360,7 +1224,6 @@ export default function Home() {
             <label htmlFor="substrate" className="text-xs font-semibold">
               Active substrate
             </label>
-
             <button
               type="button"
               onClick={() => loadSubstrates()}
@@ -1387,7 +1250,6 @@ export default function Home() {
                   : "No substrates available"}
               </option>
             )}
-
             {substrates.map((substrate) => (
               <option key={substrate.name} value={substrate.name}>
                 {substrate.name} — dimension{" "}
@@ -1403,11 +1265,9 @@ export default function Home() {
                 <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                   State context
                 </p>
-
                 <p className="mt-1 break-all font-mono text-xs font-semibold">
                   {selectedSubstrate}
                 </p>
-
                 <p className="mt-1 text-xs leading-4 text-zinc-500 dark:text-zinc-400">
                   Transit and exile operate against this substrate. Network
                   and derivation path are operation parameters, not separate
@@ -1445,6 +1305,26 @@ export default function Home() {
         </section>
 
         <section
+          aria-label="Network observation card"
+          className="mb-3 rounded-md border border-zinc-200 bg-white p-3 shadow-sm sm:p-3.5 dark:border-zinc-800 dark:bg-zinc-900"
+        >
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                HTTP API Listener
+              </p>
+              <h2 className="text-xs font-semibold">Network Observation</h2>
+            </div>
+            <span className="rounded-md border border-zinc-300 px-2 py-1 text-[11px] font-medium dark:border-zinc-700">
+              Active: 0.0.0.0:$PORT
+            </span>
+          </div>
+          <p className="text-xs leading-5 text-zinc-600 dark:text-zinc-400">
+            Powered by qtm-api via {BRIDGE_BASE || "local API base"}. Handles observation start/stop/status, payload-board, wirepackets, wallets, events, and budgets.
+          </p>
+        </section>
+
+        <section
           aria-label="Substrate tools"
           className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-2"
         >
@@ -1457,16 +1337,13 @@ export default function Home() {
                 <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                   Persisted state
                 </p>
-
                 <h2 className="mt-0.5 text-xs font-semibold">
                   Event Store
                 </h2>
-
                 <p className="mt-0.5 text-xs text-zinc-600 dark:text-zinc-400">
                   Inspect records for the selected substrate
                 </p>
               </div>
-
               <span className="rounded-md border border-zinc-300 px-2 py-1 text-[11px] font-medium dark:border-zinc-700">
                 Open
               </span>
@@ -1482,16 +1359,13 @@ export default function Home() {
                 <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                   Derivation context
                 </p>
-
                 <h2 className="mt-0.5 text-xs font-semibold">
                   Network
                 </h2>
-
                 <p className="mt-0.5 text-xs text-zinc-600 dark:text-zinc-400">
                   Inspect network paths in this substrate context
                 </p>
               </div>
-
               <span className="rounded-md border border-zinc-300 px-2 py-1 text-[11px] font-medium dark:border-zinc-700">
                 Open
               </span>
@@ -1529,17 +1403,13 @@ export default function Home() {
             <h2 className="text-sm font-semibold">
               {TABS.find((item) => item.id === tab)?.label}
             </h2>
-
             <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
               {tab === "create" &&
                 "Initialize a persistent substrate using PERM indices or a BIP39 mnemonic."}
-
               {tab === "open" &&
                 "Read the selected substrate directory and perform a receive operation."}
-
               {tab === "transit" &&
                 "Apply a network derivation request in the selected substrate's state context."}
-
               {tab === "exile" &&
                 "Request exile for the selected substrate. The API decides eligibility from its persisted event history."}
             </p>
@@ -1577,7 +1447,6 @@ export default function Home() {
                           ? "BIP39 mnemonic"
                           : "Persistent indices"}
                       </span>
-
                       <span className="mt-1 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">
                         {source === "bip39"
                           ? "Derive indices and entropy from a mnemonic."
@@ -1596,7 +1465,6 @@ export default function Home() {
                       required
                       mono
                     />
-
                     <Field
                       label="Conditioning entropy"
                       value={entropy}
@@ -1610,7 +1478,6 @@ export default function Home() {
                       <span className="text-xs font-medium">
                         BIP39 language
                       </span>
-
                       <select
                         value={language}
                         onChange={(event) =>
@@ -1641,7 +1508,6 @@ export default function Home() {
                       <span className="text-xs font-medium">
                         Mnemonic phrase
                       </span>
-
                       <textarea
                         value={phrase}
                         onChange={(event) =>
@@ -1664,7 +1530,6 @@ export default function Home() {
                       type="password"
                       autoComplete="off"
                     />
-
                     <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
                       The phrase and passphrase are sent to the API for
                       validation and derivation.
@@ -1680,7 +1545,6 @@ export default function Home() {
                   <h3 className="text-xs font-semibold">
                     Open substrate and receive
                   </h3>
-
                   <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
                     The selected substrate determines which directory is
                     opened and where the receive operation is executed.
@@ -1691,7 +1555,6 @@ export default function Home() {
                   <p className="text-xs font-medium">
                     Selected substrate
                   </p>
-
                   <p className="mt-1 break-all font-mono text-xs">
                     {selectedSubstrate || "No substrate selected"}
                   </p>
@@ -1709,7 +1572,6 @@ export default function Home() {
                     <span className="text-xs font-medium">
                       Receive flow
                     </span>
-
                     <select
                       value={receiveFlow}
                       onChange={(event) =>
@@ -1737,11 +1599,9 @@ export default function Home() {
                   <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                     Transition state context
                   </p>
-
                   <p className="mt-1 break-all font-mono text-xs font-semibold">
                     {selectedSubstrate || "Select a substrate"}
                   </p>
-
                   <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
                     Transit is sent to this substrate's API route. Network
                     and path specify derivation; they are not a separate
@@ -1752,7 +1612,6 @@ export default function Home() {
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <label className="flex min-w-0 flex-col gap-1">
                     <span className="text-xs font-medium">Network</span>
-
                     <select
                       value={selectedNetwork}
                       onChange={(event) =>
@@ -1766,7 +1625,6 @@ export default function Home() {
                           {networkLoading ? "Loading…" : "No networks"}
                         </option>
                       )}
-
                       {networks.map((network) => (
                         <option key={network.id} value={network.id}>
                           {network.name} — {network.id}
@@ -1852,11 +1710,9 @@ export default function Home() {
                   <h3 className="text-xs font-semibold">
                     Persisted event history
                   </h3>
-
                   <p className="mt-1 break-all font-mono text-xs text-zinc-600 dark:text-zinc-300">
                     {selectedSubstrate || "No substrate selected"}
                   </p>
-
                   <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
                     Exile reads the selected substrate's persisted event
                     history. The Rust API decides eligibility and derives
@@ -1919,14 +1775,12 @@ export default function Home() {
                               {recordNameOf(record) ||
                                 `Persisted record ${index + 1}`}
                             </p>
-
                             <span className="rounded-md border border-zinc-200 px-2 py-1 text-[10px] font-medium dark:border-zinc-700">
                               {formatKey(
                                 valueAt(record, ["kind", "type"]) ?? "record"
                               )}
                             </span>
                           </div>
-
                           <div className="mt-3">
                             <KeyValueList value={record} />
                           </div>
@@ -1987,3 +1841,4 @@ export default function Home() {
     </div>
   );
 }
+
