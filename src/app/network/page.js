@@ -136,105 +136,115 @@ function buildScopeKey(name, activation, networkId, pathId) {
 }
 
 
+
 const EVENT_COMMITMENT_UNAVAILABLE = "Unavailable";
 
-function getEventCommitment(value) {
-  const candidates = [
-    value?.frame?.qtm?.qtm?.commitment,
-    value?.frame?.qtm?.commitment,
-    value?.qtm?.qtm?.commitment,
-    value?.qtm?.commitment,
-    value?.event?.qtm?.commitment,
-    value?.event?.commitment,
-    value?.commitment,
-  ];
+function normalizeEventValue(value) {
+  return value == null ? "" : String(value).trim();
+}
 
-  for (const candidate of candidates) {
-    if (
-      typeof candidate === "string" &&
-      candidate.trim().length > 0
-    ) {
-      return candidate.trim();
+function getEventCommitment(persistedEvent) {
+  const commitment = normalizeEventValue(persistedEvent?.commitment);
+  return commitment.length > 0 ? commitment : null;
+}
+
+function findMatchingPersistedEvent(
+  persistedEvents,
+  directionFrame,
+  selectedActivation,
+) {
+  const events = Array.isArray(persistedEvents)
+    ? persistedEvents
+    : [];
+
+  const activation = normalizeEventValue(selectedActivation);
+  const coordinate = normalizeEventValue(
+    directionFrame?.qtm?.qtm?.coordinate,
+  );
+
+  // The event context comes from DirectionFrameResponse.event.
+  const eventContext = directionFrame?.event;
+  const eventPath = normalizeEventValue(eventContext?.depth?.path);
+
+  if (!activation) {
+    return null;
+  }
+
+  const activationMatches = events.filter(
+    (item) =>
+      normalizeEventValue(item?.activation) === activation,
+  );
+
+  if (activationMatches.length === 0) {
+    return null;
+  }
+
+  // Coordinate is the strongest shared event identifier available
+  // in the supplied frame and persisted summary structures.
+  if (coordinate) {
+    const coordinateMatches = activationMatches.filter(
+      (item) =>
+        normalizeEventValue(item?.coordinate) === coordinate,
+    );
+
+    if (coordinateMatches.length === 1) {
+      return coordinateMatches[0];
+    }
+
+    // Do not select an arbitrary event when the match is ambiguous.
+    if (coordinateMatches.length > 1) {
+      return null;
     }
   }
+
+  // If the coordinate is unavailable, accept only an unambiguous
+  // activation match. Never guess among multiple persisted events.
+  if (activationMatches.length === 1) {
+    return activationMatches[0];
+  }
+
+  // The supplied PersistedEventSummary has no path field, so the
+  // DirectionFrameResponse event path cannot safely disambiguate
+  // multiple summaries for the same activation.
+  void eventPath;
 
   return null;
 }
 
-function findMatchingObservationRow(
-  observationList,
-  selectedNetworkId,
-  selectedPath,
-) {
-  const rows = Array.isArray(observationList)
-    ? observationList
-    : Array.isArray(observationList?.observations)
-      ? observationList.observations
-      : Array.isArray(observationList?.items)
-        ? observationList.items
-        : [];
-
-  return (
-    rows.find((row) => {
-      const networkMatches =
-        !selectedNetworkId ||
-        row?.network === selectedNetworkId;
-
-      const rowPath =
-        row?.path ??
-        row?.runtime?.path ??
-        row?.frame?.event?.runtime?.path;
-
-      const pathMatches =
-        !selectedPath ||
-        !rowPath ||
-        rowPath === selectedPath;
-
-      return networkMatches && pathMatches;
-    }) ?? null
-  );
-}
-
 function resolveEventCommitment(
-  matchingObservationRow,
-  scopedObservation,
-  scopedObservationList,
+  persistedEvents,
+  directionFrame,
+  selectedActivation,
 ) {
-  const sources = [
-    matchingObservationRow,
-    scopedObservation,
-    ...(Array.isArray(scopedObservationList)
-      ? scopedObservationList
-      : Array.isArray(scopedObservationList?.observations)
-        ? scopedObservationList.observations
-        : Array.isArray(scopedObservationList?.items)
-          ? scopedObservationList.items
-          : []),
-  ];
+  const persistedEvent = findMatchingPersistedEvent(
+    persistedEvents,
+    directionFrame,
+    selectedActivation,
+  );
 
-  for (const source of sources) {
-    const value = getEventCommitment(source);
-
-    if (value) {
-      return {
-        value,
-        source,
-      };
-    }
-  }
+  const value = getEventCommitment(persistedEvent);
 
   return {
-    value: null,
-    source: null,
+    value,
+    persistedEvent,
+    source: value ? "persisted-event-summary" : null,
   };
 }
 
 function describeEventCommitment(info) {
   if (!info?.value) {
-    return "The event commitment was not present in the available API response.";
+    return "No unambiguous persisted event summary matched this activation and coordinate.";
   }
 
-  return "Commitment read from the available API response.";
+  const event = info.persistedEvent;
+
+  return [
+    "Commitment from the persisted event summary.",
+    `Kind: ${event?.kind ?? "unknown"}`,
+    `Record: ${event?.record ?? "unknown"}`,
+    `Activation: ${event?.activation ?? "unknown"}`,
+    `Coordinate: ${event?.coordinate ?? "unknown"}`,
+  ].join("\n");
 }
 
 
