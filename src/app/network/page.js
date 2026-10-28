@@ -24,6 +24,7 @@ const KNOWN_OBSERVATION_KEYS = [
   "message",
   "runtime",
   "clips",
+  "event",
 ];
 
 async function apiRequest(path, signal, options = {}) {
@@ -134,6 +135,25 @@ function buildScopeKey(name, activation, networkId, pathId) {
   return `${name}:${activation}:${networkId}:${pathId}`;
 }
 
+// Event-focused results: event.qtm.commitment is the authoritative value.
+// It is never replaced by the Domain commitment. If it is missing, callers
+// show "Unavailable" instead of falling back.
+const EVENT_COMMITMENT_UNAVAILABLE = "Unavailable";
+
+function getEventCommitment(event) {
+  const commitment = event?.qtm?.commitment ?? null;
+
+  // Only a non-empty string counts. Anything else (null, empty/blank
+  // string, number, object) is treated as missing.
+  return typeof commitment === "string" && commitment.trim().length > 0
+    ? commitment
+    : null;
+}
+
+function eventCommitmentLabel(event) {
+  return getEventCommitment(event) ?? EVENT_COMMITMENT_UNAVAILABLE;
+}
+
 function getPathIdentifier(entry) {
   return String(
     entry?.path ??
@@ -216,20 +236,25 @@ function DiagnosticValue({ label, value }) {
 // Compact, centered, single-line value used inside the observation box.
 // Long values truncate (full text in the tooltip and raw response) instead
 // of wrapping character by character.
-function CompactValue({ label, value }) {
+function CompactValue({ label, value, mono = false }) {
   const text = displayValue(value);
+  const valueClass = "mt-0.5 block truncate whitespace-nowrap text-xs font-medium";
 
   return (
     <div className="min-w-0 rounded-lg bg-zinc-50 px-2 py-1.5 text-center dark:bg-zinc-950/60">
       <p className="truncate whitespace-nowrap text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
         {label}
       </p>
-      <p
-        title={text}
-        className="mt-0.5 truncate whitespace-nowrap text-xs font-medium"
-      >
-        {text}
-      </p>
+
+      {mono ? (
+        <code title={text} className={`${valueClass} font-mono`}>
+          {text}
+        </code>
+      ) : (
+        <p title={text} className={valueClass}>
+          {text}
+        </p>
+      )}
     </div>
   );
 }
@@ -1129,9 +1154,13 @@ export default function NetworkPage() {
         "Start accepted",
       );
 
-      observationHoldRef.current = payload.running
-        ? { scope, until: Date.now() + MUTATION_HOLD_MS, running: true }
-        : { scope: "", until: 0, running: false };
+      // Hold every accepted start, even when the response omits `running`
+      // (an accepted start implies running). Only an explicit
+      // `running: false` in the response skips the hold.
+      observationHoldRef.current =
+        payload.running === false
+          ? { scope: "", until: 0, running: false }
+          : { scope, until: Date.now() + MUTATION_HOLD_MS, running: true };
 
       setLastObservationCheck(new Date());
 
@@ -1446,6 +1475,17 @@ export default function NetworkPage() {
 
   const scopedObservation = scopeMatches ? observation : null;
   const scopedObservationList = scopeMatches ? observationList : [];
+
+  // Rows show event.qtm.commitment only; the row's Domain commitment is
+  // dropped, never used as a fallback.
+  const observationListRows = scopedObservationList.map((row) => {
+    if (!isPlainObject(row)) return row;
+
+    // eslint-disable-next-line no-unused-vars
+    const { commitment: _domainCommitment, event, ...rest } = row;
+
+    return { ...rest, event_commitment: eventCommitmentLabel(event) };
+  });
 
   const observationRunning = Boolean(scopedObservation?.running);
   const listenPort = scopedObservation?.listen_port;
@@ -2118,8 +2158,9 @@ export default function NetworkPage() {
                 />
 
                 <CompactValue
-                  label="Commitment"
-                  value={scopedObservation.commitment}
+                  label="Event commitment"
+                  mono
+                  value={eventCommitmentLabel(scopedObservation.event)}
                 />
 
                 <CompactValue
@@ -2211,10 +2252,10 @@ export default function NetworkPage() {
 
               <div className="min-w-0 px-3 pb-2 sm:px-4">
                 <ObjectTable
-                  rows={scopedObservationList}
+                  rows={observationListRows}
                   columns={[
                     "network",
-                    "commitment",
+                    "event_commitment",
                     "listen_port",
                     "running",
                     "path",
