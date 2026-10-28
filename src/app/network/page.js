@@ -154,6 +154,70 @@ function eventCommitmentLabel(event) {
   return getEventCommitment(event) ?? EVENT_COMMITMENT_UNAVAILABLE;
 }
 
+// Finds the activation-response row that belongs to the selected network.
+function findMatchingObservationRow(rows, networkId, pathId) {
+  if (!Array.isArray(rows)) return null;
+
+  return (
+    rows.find((row) => {
+      if (!isPlainObject(row)) return false;
+
+      const rowNetwork = String(row.network ?? row.network_id ?? "").trim();
+      const rowPath = String(row.path ?? "").trim();
+
+      return (
+        (networkId && rowNetwork === networkId) || (pathId && rowPath === pathId)
+      );
+    }) ?? null
+  );
+}
+
+// Prefers the matching activation response's event.qtm.commitment, then the
+// scoped status response's event. Neither source ever reads a top-level
+// (Domain) commitment. `event` is the first event that was present, so a
+// wrongly shaped event can be reported instead of silently hidden.
+function resolveEventCommitment(activationRow, statusResponse) {
+  const sources = [
+    ["activation observation", activationRow?.event],
+    ["status response", statusResponse?.event],
+  ];
+
+  let presentEvent = null;
+  let presentSource = null;
+
+  for (const [source, event] of sources) {
+    const value = getEventCommitment(event);
+
+    if (value) return { value, source, event, eventSource: source };
+
+    if (event !== null && event !== undefined && presentEvent === null) {
+      presentEvent = event;
+      presentSource = source;
+    }
+  }
+
+  return {
+    value: null,
+    source: null,
+    event: presentEvent,
+    eventSource: presentSource,
+  };
+}
+
+function describeEventCommitment(info) {
+  if (info.value) return `event.qtm.commitment from the ${info.source}`;
+
+  if (info.event !== null && info.event !== undefined) {
+    const keys = isPlainObject(info.event)
+      ? Object.keys(info.event).join(", ") || "none"
+      : typeof info.event;
+
+    return `Event found in the ${info.eventSource}, but event.qtm.commitment is missing or not a non-empty string (event keys: ${keys})`;
+  }
+
+  return "No event in the activation observation or status response";
+}
+
 function getPathIdentifier(entry) {
   return String(
     entry?.path ??
@@ -236,8 +300,9 @@ function DiagnosticValue({ label, value }) {
 // Compact, centered, single-line value used inside the observation box.
 // Long values truncate (full text in the tooltip and raw response) instead
 // of wrapping character by character.
-function CompactValue({ label, value, mono = false }) {
+function CompactValue({ label, value, mono = false, title }) {
   const text = displayValue(value);
+  const tip = title ? `${text} — ${title}` : text;
   const valueClass = "mt-0.5 block truncate whitespace-nowrap text-xs font-medium";
 
   return (
@@ -247,11 +312,11 @@ function CompactValue({ label, value, mono = false }) {
       </p>
 
       {mono ? (
-        <code title={text} className={`${valueClass} font-mono`}>
+        <code title={tip} className={`${valueClass} font-mono`}>
           {text}
         </code>
       ) : (
-        <p title={text} className={valueClass}>
+        <p title={tip} className={valueClass}>
           {text}
         </p>
       )}
@@ -1476,8 +1541,10 @@ export default function NetworkPage() {
   const scopedObservation = scopeMatches ? observation : null;
   const scopedObservationList = scopeMatches ? observationList : [];
 
-  // Rows show event.qtm.commitment only; the row's Domain commitment is
-  // dropped, never used as a fallback.
+  // The activation response keeps its event objects untouched in state
+  // (`observationList`). The table rows below only derive a display value
+  // from each row's event.qtm.commitment; the row's top-level (Domain)
+  // commitment is dropped and never used as a fallback.
   const observationListRows = scopedObservationList.map((row) => {
     if (!isPlainObject(row)) return row;
 
@@ -1486,6 +1553,17 @@ export default function NetworkPage() {
 
     return { ...rest, event_commitment: eventCommitmentLabel(event) };
   });
+
+  const matchingObservationRow = findMatchingObservationRow(
+    scopedObservationList,
+    selectedNetworkId,
+    selectedPath,
+  );
+
+  const eventCommitmentInfo = resolveEventCommitment(
+    matchingObservationRow,
+    scopedObservation,
+  );
 
   const observationRunning = Boolean(scopedObservation?.running);
   const listenPort = scopedObservation?.listen_port;
@@ -2160,7 +2238,10 @@ export default function NetworkPage() {
                 <CompactValue
                   label="Event commitment"
                   mono
-                  value={eventCommitmentLabel(scopedObservation.event)}
+                  value={
+                    eventCommitmentInfo.value ?? EVENT_COMMITMENT_UNAVAILABLE
+                  }
+                  title={describeEventCommitment(eventCommitmentInfo)}
                 />
 
                 <CompactValue
