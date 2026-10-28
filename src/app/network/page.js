@@ -1520,6 +1520,7 @@ export default function NetworkPage() {
     setLastBitMinerRefreshCheck(null);
   };
 
+     
   const handlePathSelect = (identifier) => {
     // Re-selecting the current path must not discard its observation.
     if (identifier === selectedPathRef.current) return;
@@ -1571,28 +1572,36 @@ export default function NetworkPage() {
   const scopedObservation = scopeMatches ? observation : null;
   const scopedObservationList = scopeMatches ? observationList : [];
 
-  // The activation response keeps its event objects untouched in state
-  // (`observationList`). The table rows below only derive a display value
-  // from each row's event.qtm.commitment; the row's top-level (Domain)
-  // commitment is dropped and never used as a fallback.
+  // Keep the observation response intact. Its top-level commitment may
+  // describe the substrate, so it is not used as the event commitment.
   const observationListRows = scopedObservationList.map((row) => {
     if (!isPlainObject(row)) return row;
 
-    // eslint-disable-next-line no-unused-vars
     const { commitment: _domainCommitment, event, ...rest } = row;
 
-    return { ...rest, event_commitment: eventCommitmentLabel(event) };
+    return {
+      ...rest,
+      event_commitment: eventCommitmentLabel(event),
+    };
   });
 
-  const matchingObservationRow = findMatchingObservationRow(
-    scopedObservationList,
-    selectedNetworkId,
-    selectedPath,
-  );
+  // DirectionFrameResponse.event supplies event context; the commitment
+  // displayed below comes from the persisted EventStoreResponse summary.
+  // Do not substitute the substrate-level observation commitment.
+  const directionFrame =
+    scopedObservation?.frame ??
+    scopedObservation?.directionFrame ??
+    scopedObservation?.direction_frame ??
+    null;
+
+  const persistedEvents = Array.isArray(eventStore?.events)
+    ? eventStore.events
+    : [];
 
   const eventCommitmentInfo = resolveEventCommitment(
-    matchingObservationRow,
-    scopedObservation,
+    persistedEvents,
+    directionFrame,
+    selectedActivation,
   );
 
   const observationRunning = Boolean(scopedObservation?.running);
@@ -1720,6 +1729,7 @@ export default function NetworkPage() {
             {REFRESH_INTERVAL_MS / 1000}s refresh interval
           </p>
         </header>
+
 
         {networkError && (
           <div className="mb-3">
