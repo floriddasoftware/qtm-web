@@ -135,88 +135,108 @@ function buildScopeKey(name, activation, networkId, pathId) {
   return `${name}:${activation}:${networkId}:${pathId}`;
 }
 
-// Event-focused results: event.qtm.commitment is the authoritative value.
-// It is never replaced by the Domain commitment. If it is missing, callers
-// show "Unavailable" instead of falling back.
+
 const EVENT_COMMITMENT_UNAVAILABLE = "Unavailable";
 
-function getEventCommitment(event) {
-  const commitment = event?.qtm?.commitment ?? null;
+function getEventCommitment(value) {
+  const candidates = [
+    value?.frame?.qtm?.qtm?.commitment,
+    value?.frame?.qtm?.commitment,
+    value?.qtm?.qtm?.commitment,
+    value?.qtm?.commitment,
+    value?.event?.qtm?.commitment,
+    value?.event?.commitment,
+    value?.commitment,
+  ];
 
-  // Only a non-empty string counts. Anything else (null, empty/blank
-  // string, number, object) is treated as missing.
-  return typeof commitment === "string" && commitment.trim().length > 0
-    ? commitment
-    : null;
+  for (const candidate of candidates) {
+    if (
+      typeof candidate === "string" &&
+      candidate.trim().length > 0
+    ) {
+      return candidate.trim();
+    }
+  }
+
+  return null;
 }
 
-function eventCommitmentLabel(event) {
-  return getEventCommitment(event) ?? EVENT_COMMITMENT_UNAVAILABLE;
-}
-
-// Finds the activation-response row that belongs to the selected network.
-function findMatchingObservationRow(rows, networkId, pathId) {
-  if (!Array.isArray(rows)) return null;
+function findMatchingObservationRow(
+  observationList,
+  selectedNetworkId,
+  selectedPath,
+) {
+  const rows = Array.isArray(observationList)
+    ? observationList
+    : Array.isArray(observationList?.observations)
+      ? observationList.observations
+      : Array.isArray(observationList?.items)
+        ? observationList.items
+        : [];
 
   return (
     rows.find((row) => {
-      if (!isPlainObject(row)) return false;
+      const networkMatches =
+        !selectedNetworkId ||
+        row?.network === selectedNetworkId;
 
-      const rowNetwork = String(row.network ?? row.network_id ?? "").trim();
-      const rowPath = String(row.path ?? "").trim();
+      const rowPath =
+        row?.path ??
+        row?.runtime?.path ??
+        row?.frame?.event?.runtime?.path;
 
-      return (
-        (networkId && rowNetwork === networkId) || (pathId && rowPath === pathId)
-      );
+      const pathMatches =
+        !selectedPath ||
+        !rowPath ||
+        rowPath === selectedPath;
+
+      return networkMatches && pathMatches;
     }) ?? null
   );
 }
 
-// Prefers the matching activation response's event.qtm.commitment, then the
-// scoped status response's event. Neither source ever reads a top-level
-// (Domain) commitment. `event` is the first event that was present, so a
-// wrongly shaped event can be reported instead of silently hidden.
-function resolveEventCommitment(activationRow, statusResponse) {
+function resolveEventCommitment(
+  matchingObservationRow,
+  scopedObservation,
+  scopedObservationList,
+) {
   const sources = [
-    ["activation observation", activationRow?.event],
-    ["status response", statusResponse?.event],
+    matchingObservationRow,
+    scopedObservation,
+    ...(Array.isArray(scopedObservationList)
+      ? scopedObservationList
+      : Array.isArray(scopedObservationList?.observations)
+        ? scopedObservationList.observations
+        : Array.isArray(scopedObservationList?.items)
+          ? scopedObservationList.items
+          : []),
   ];
 
-  let presentEvent = null;
-  let presentSource = null;
+  for (const source of sources) {
+    const value = getEventCommitment(source);
 
-  for (const [source, event] of sources) {
-    const value = getEventCommitment(event);
-
-    if (value) return { value, source, event, eventSource: source };
-
-    if (event !== null && event !== undefined && presentEvent === null) {
-      presentEvent = event;
-      presentSource = source;
+    if (value) {
+      return {
+        value,
+        source,
+      };
     }
   }
 
   return {
     value: null,
     source: null,
-    event: presentEvent,
-    eventSource: presentSource,
   };
 }
 
 function describeEventCommitment(info) {
-  if (info.value) return `event.qtm.commitment from the ${info.source}`;
-
-  if (info.event !== null && info.event !== undefined) {
-    const keys = isPlainObject(info.event)
-      ? Object.keys(info.event).join(", ") || "none"
-      : typeof info.event;
-
-    return `Event found in the ${info.eventSource}, but event.qtm.commitment is missing or not a non-empty string (event keys: ${keys})`;
+  if (!info?.value) {
+    return "The event commitment was not present in the available API response.";
   }
 
-  return "No event in the activation observation or status response";
+  return "Commitment read from the available API response.";
 }
+
 
 function getPathIdentifier(entry) {
   return String(
