@@ -10,6 +10,22 @@ const API_BASE = (
 const REFRESH_INTERVAL_MS = 80000;
 const SUBSTRATE_QUERY_KEY = "substrate";
 
+// How long a fresh POST/DELETE result is protected from a contradicting
+// status read (the runtime can briefly report the old state).
+const MUTATION_HOLD_MS = 8000;
+
+// Fields rendered by the curated observation grid. Everything else in the
+// response is dropped into the flexible "Additional response fields" area.
+const KNOWN_OBSERVATION_KEYS = [
+  "running",
+  "commitment",
+  "listen_port",
+  "path",
+  "message",
+  "runtime",
+  "clips",
+];
+
 async function apiRequest(path, signal, options = {}) {
   const method = options.method || "GET";
   let response;
@@ -80,9 +96,42 @@ function normalizeEntries(result, keys = []) {
 
 function displayValue(value) {
   if (value === null || value === undefined || value === "") return "—";
-  if (Array.isArray(value)) return value.length ? value.join(", ") : "—";
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  if (Array.isArray(value)) {
+    return value.length ? value.map((item) => displayValue(item)).join(", ") : "—";
+  }
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isScalar(value) {
+  return !isPlainObject(value) && !Array.isArray(value);
+}
+
+function isPrimitiveArray(value) {
+  return Array.isArray(value) && value.every(isScalar);
+}
+
+function humanizeKey(key) {
+  return String(key).replace(/[_-]+/g, " ").trim();
+}
+
+function safeJson(value) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function buildScopeKey(name, activation, networkId, pathId) {
+  if (!name || !networkId || !pathId) return "";
+
+  return `${name}:${activation}:${networkId}:${pathId}`;
 }
 
 function getPathIdentifier(entry) {
@@ -168,8 +217,161 @@ function ErrorMessage({ children }) {
   if (!children) return null;
 
   return (
-    <div className="min-w-0 break-words rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300 [overflow-wrap:anywhere]">
+    <div className="min-w-0 break-words rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300 [overflow-wrap:anywhere]">
       {children}
+    </div>
+  );
+}
+
+// Responsive table on sm+ screens, stacked cards on narrow screens.
+// Columns listed in `columns` come first; any other keys found in the rows
+// are appended, so unexpected fields in the runtime response still show up.
+function ObjectTable({ rows, columns = [] }) {
+  const normalized = rows.map((row) => (isPlainObject(row) ? row : { value: row }));
+
+  const keys = [...columns];
+
+  for (const row of normalized) {
+    for (const key of Object.keys(row)) {
+      if (!keys.includes(key)) keys.push(key);
+    }
+  }
+
+  const cols = keys.slice(0, 10);
+
+  if (normalized.length === 0 || cols.length === 0) return null;
+
+  const cell = (value) => (
+    <span className="[overflow-wrap:anywhere]">{displayValue(value)}</span>
+  );
+
+  return (
+    <div className="min-w-0">
+      <div className="hidden w-full min-w-0 overflow-x-auto sm:block">
+        <table className="w-full min-w-max border-collapse text-left text-xs">
+          <thead className="bg-zinc-100 text-[10px] uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+            <tr>
+              {cols.map((key) => (
+                <th key={key} className="whitespace-nowrap px-3 py-2 sm:px-4">
+                  {humanizeKey(key)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+
+          <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+            {normalized.map((row, index) => (
+              <tr key={index} className="align-top">
+                {cols.map((key) => (
+                  <td
+                    key={key}
+                    className="max-w-[260px] px-3 py-2 font-mono text-[10px] sm:px-4"
+                  >
+                    {cell(row[key])}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="grid grid-cols-1 gap-2 sm:hidden">
+        {normalized.map((row, index) => (
+          <div
+            key={index}
+            className="min-w-0 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800"
+          >
+            <dl className="grid grid-cols-1 gap-2">
+              {cols.map((key) => (
+                <div key={key} className="min-w-0">
+                  <dt className="text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                    {humanizeKey(key)}
+                  </dt>
+                  <dd className="mt-0.5 min-w-0 text-xs font-medium">
+                    {cell(row[key])}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Flexible renderer for any JSON object the runtime returns:
+// scalars -> auto-fitting grid, nested objects -> expandable details,
+// arrays of objects -> responsive table/cards.
+function ResponseFields({ data, omit = [], depth = 0 }) {
+  if (!isPlainObject(data)) return null;
+
+  const entries = Object.entries(data).filter(([key]) => !omit.includes(key));
+
+  const scalars = entries.filter(
+    ([, value]) => isScalar(value) || isPrimitiveArray(value),
+  );
+  const objects = entries.filter(([, value]) => isPlainObject(value));
+  const arrays = entries.filter(
+    ([, value]) => Array.isArray(value) && !isPrimitiveArray(value),
+  );
+
+  if (entries.length === 0) return null;
+
+  return (
+    <div className="min-w-0 space-y-3">
+      {scalars.length > 0 && (
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(10rem,1fr))] gap-3">
+          {scalars.map(([key, value]) => (
+            <DiagnosticValue key={key} label={humanizeKey(key)} value={value} />
+          ))}
+        </div>
+      )}
+
+      {objects.map(([key, value]) => (
+        <details
+          key={key}
+          open={depth === 0 && Object.keys(value).length <= 6}
+          className="min-w-0 rounded-lg border border-zinc-200 dark:border-zinc-800"
+        >
+          <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold">
+            {humanizeKey(key)}
+            <span className="ml-2 font-normal text-zinc-500 dark:text-zinc-400">
+              {Object.keys(value).length} fields
+            </span>
+          </summary>
+
+          <div className="min-w-0 border-t border-zinc-200 p-3 dark:border-zinc-800">
+            {depth >= 2 ? (
+              <pre className="max-h-60 overflow-auto text-[10px] leading-4">
+                {safeJson(value)}
+              </pre>
+            ) : (
+              <ResponseFields data={value} depth={depth + 1} />
+            )}
+          </div>
+        </details>
+      ))}
+
+      {arrays.map(([key, value]) => (
+        <details
+          key={key}
+          open
+          className="min-w-0 rounded-lg border border-zinc-200 dark:border-zinc-800"
+        >
+          <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold">
+            {humanizeKey(key)}
+            <span className="ml-2 font-normal text-zinc-500 dark:text-zinc-400">
+              {value.length} items
+            </span>
+          </summary>
+
+          <div className="min-w-0 border-t border-zinc-200 p-2 dark:border-zinc-800">
+            <ObjectTable rows={value} />
+          </div>
+        </details>
+      ))}
     </div>
   );
 }
@@ -253,13 +455,18 @@ export default function NetworkPage() {
   const [substrateState, setSubstrateState] = useState(null);
   const [eventStore, setEventStore] = useState(null);
 
+  // Observation data always travels with the scope it belongs to
+  // (substrate:activation:networkId:path). It is only displayed while that
+  // scope matches the current selection.
   const [observation, setObservation] = useState(null);
   const [observationList, setObservationList] = useState([]);
+  const [observationScope, setObservationScope] = useState("");
+  const [observationStale, setObservationStale] = useState(false);
+  const [observationNotice, setObservationNotice] = useState("");
   const [observationLoading, setObservationLoading] = useState(false);
   const [observationActionLoading, setObservationActionLoading] =
     useState(false);
   const [observationError, setObservationError] = useState("");
-  const [observationStatus, setObservationStatus] = useState("unknown");
   const [lastObservationCheck, setLastObservationCheck] = useState(null);
 
   const [networkLoading, setNetworkLoading] = useState(true);
@@ -294,6 +501,12 @@ export default function NetworkPage() {
   const observationRequestIdRef = useRef(0);
   const bitMinerRefreshRequestIdRef = useRef(0);
 
+  // Observation bookkeeping used to keep results from racing each other.
+  const observationScopeRef = useRef("");
+  const observationDataRef = useRef(null);
+  const observationMutationRef = useRef(0);
+  const observationHoldRef = useRef({ scope: "", until: 0, running: false });
+
   const diagnosticsSubstrateRef = useRef("");
   const observationContextRef = useRef("");
   const requestedSubstrateRef = useRef(null);
@@ -324,6 +537,39 @@ export default function NetworkPage() {
     const next = parseActivation(value);
     selectedActivationRef.current = next;
     setSelectedActivation(next);
+  }, []);
+
+  // Drops observation data and re-labels the (empty) state with `scope`.
+  const resetObservation = useCallback((scope) => {
+    observationScopeRef.current = scope;
+    observationDataRef.current = null;
+    observationHoldRef.current = { scope: "", until: 0, running: false };
+
+    setObservationScope(scope);
+    setObservation(null);
+    setObservationList([]);
+    setObservationStale(false);
+    setObservationNotice("");
+  }, []);
+
+  // Switches ownership of the observation box to a new scope. Data from the
+  // previous scope is cleared; data of the same scope is never touched.
+  const claimObservationScope = useCallback(
+    (scope) => {
+      if (observationScopeRef.current === scope) return;
+
+      resetObservation(scope);
+      setObservationError("");
+    },
+    [resetObservation],
+  );
+
+  const commitObservation = useCallback((scope, value) => {
+    observationScopeRef.current = scope;
+    observationDataRef.current = value;
+
+    setObservationScope(scope);
+    setObservation(value);
   }, []);
 
   const loadNetworks = useCallback(async ({ silent = false } = {}) => {
@@ -544,7 +790,9 @@ export default function NetworkPage() {
           if (!activationInitializedRef.current && unique.length > 0) {
             activationInitializedRef.current = true;
             setActivationSynced(Math.max(...unique));
-          } else if (unique.length > 0 && !unique.includes(current)) {
+          } else if (!silent && unique.length > 0 && !unique.includes(current)) {
+            // Background refreshes must never move the user to another
+            // activation; that would swap the observation scope under them.
             setActivationSynced(Math.max(...unique));
           }
         } else {
@@ -591,40 +839,35 @@ export default function NetworkPage() {
         observationRequestIdRef.current += 1;
         observationContextRef.current = "";
 
-        setObservation(null);
-        setObservationList([]);
+        resetObservation("");
         setObservationError("");
-        setObservationStatus("unknown");
         setObservationLoading(false);
 
         return;
       }
 
       const requestId = ++observationRequestIdRef.current;
-      const contextKey = `${name}:${activation}:${networkId}:${pathId}`;
+      const mutationVersion = observationMutationRef.current;
+      const contextKey = buildScopeKey(name, activation, networkId, pathId);
 
       observationContextRef.current = contextKey;
+
+      // Clears data only if it belongs to a different scope. Refreshing the
+      // same scope keeps the last known result on screen.
+      claimObservationScope(contextKey);
 
       const controller = new AbortController();
       observationRequestRef.current = controller;
 
       const isCurrent = () =>
         requestId === observationRequestIdRef.current &&
+        mutationVersion === observationMutationRef.current &&
         observationContextRef.current === contextKey &&
         selectedSubstrateRef.current === name &&
         selectedPathRef.current === pathId &&
         selectedActivationRef.current === activation;
 
-      if (!silent) {
-        setObservation(null);
-        setObservationList([]);
-        setObservationError("");
-        setObservationStatus("checking");
-      } else {
-        setObservationStatus((status) =>
-          status === "error" ? status : "checking",
-        );
-      }
+      if (!silent) setObservationError("");
 
       setObservationLoading(true);
 
@@ -653,6 +896,7 @@ export default function NetworkPage() {
 
         if (statusAborted || listAborted) return;
 
+        // A failed list read keeps the previous list instead of blanking it.
         if (listResult.status === "fulfilled") {
           setObservationList(
             normalizeEntries(listResult.value, [
@@ -660,15 +904,34 @@ export default function NetworkPage() {
               "observations",
             ]),
           );
-        } else {
-          setObservationList([]);
         }
+
+        const previous = observationDataRef.current;
 
         if (statusResult.status === "fulfilled") {
           const payload = statusResult.value;
+          const hasPayload =
+            isPlainObject(payload) && Object.keys(payload).length > 0;
 
-          setObservation(payload);
-          setObservationStatus(payload?.running ? "running" : "live");
+          const hold = observationHoldRef.current;
+          const held = hold.scope === contextKey && Date.now() < hold.until;
+
+          const contradictsHold =
+            held &&
+            hasPayload &&
+            payload.running !== undefined &&
+            Boolean(payload.running) !== hold.running;
+
+          if (!hasPayload) {
+            // Empty status response: keep what we have, just flag it.
+            if (previous) setObservationStale(true);
+          } else if (!contradictsHold) {
+            observationDataRef.current = payload;
+            setObservation(payload);
+            setObservationStale(false);
+            setObservationNotice("");
+          }
+
           setObservationError("");
         } else {
           const error = statusResult.reason;
@@ -683,8 +946,9 @@ export default function NetworkPage() {
             message.toLowerCase().includes("no live") ||
             message.toLowerCase().includes("not found");
 
-          setObservation(null);
-          setObservationStatus(notFound ? "unknown" : "error");
+          // Never wipe a known result because a status read failed.
+          if (previous) setObservationStale(true);
+
           setObservationError(notFound ? "" : message);
         }
 
@@ -692,8 +956,8 @@ export default function NetworkPage() {
       } catch (error) {
         if (error?.name === "AbortError" || !isCurrent()) return;
 
-        setObservation(null);
-        setObservationStatus("error");
+        if (observationDataRef.current) setObservationStale(true);
+
         setObservationError(
           error instanceof Error
             ? error.message
@@ -703,7 +967,7 @@ export default function NetworkPage() {
         if (isCurrent()) setObservationLoading(false);
       }
     },
-    [selectedNetworkId],
+    [selectedNetworkId, claimObservationScope, resetObservation],
   );
 
   // This request checks only the activation-scoped refresh-path endpoint.
@@ -779,16 +1043,35 @@ export default function NetworkPage() {
   const startObservation = useCallback(async () => {
     const name = selectedSubstrateRef.current;
     const activation = selectedActivationRef.current;
+    const pathId = selectedPathRef.current;
     const networkId = selectedNetworkId;
 
     const pathHint = selectedNetwork
       ? getPathIdentifier(selectedNetwork)
-      : selectedPathRef.current;
+      : pathId;
 
     if (!name || !networkId) return;
 
+    const scope = buildScopeKey(name, activation, networkId, pathId);
+
+    // A new mutation invalidates every status read still in flight, so a
+    // stale GET can never overwrite this POST's result.
+    observationMutationRef.current += 1;
+    const mutationVersion = observationMutationRef.current;
+
+    observationRequestRef.current?.abort();
+    observationRequestIdRef.current += 1;
+
+    setObservationLoading(false);
+    claimObservationScope(scope);
     setObservationActionLoading(true);
     setObservationError("");
+
+    const stillSameScope = () =>
+      mutationVersion === observationMutationRef.current &&
+      selectedSubstrateRef.current === name &&
+      selectedActivationRef.current === activation &&
+      selectedPathRef.current === pathId;
 
     try {
       const encodedName = encodeURIComponent(name);
@@ -807,35 +1090,81 @@ export default function NetworkPage() {
         body,
       });
 
-      setObservation(started);
-      setObservationStatus(started?.running ? "running" : "live");
+      // The selection changed (or another action started) while waiting.
+      if (!stillSameScope()) return;
+
+      const hasBody = isPlainObject(started) && Object.keys(started).length > 0;
+
+      const payload = hasBody
+        ? started
+        : {
+            message: "Start request accepted (empty response body).",
+            ...(pathHint ? { path: pathHint } : {}),
+          };
+
+      commitObservation(scope, payload);
+      setObservationStale(false);
+      setObservationNotice(
+        "Start request accepted. Showing the runtime's start response.",
+      );
+
+      observationHoldRef.current = payload.running
+        ? { scope, until: Date.now() + MUTATION_HOLD_MS, running: true }
+        : { scope: "", until: 0, running: false };
+
       setLastObservationCheck(new Date());
 
-      await loadObservation({ silent: true });
+      // No immediate status read here. The POST response stays on screen
+      // until the normal refresh interval or the "Refresh status" button
+      // reconciles it with the runtime.
     } catch (error) {
       if (error?.name === "AbortError") return;
+      if (!stillSameScope()) return;
 
+      // Keep whatever was already on screen; just report the failure.
       setObservationError(
         error instanceof Error
           ? error.message
           : "Unable to start observation.",
       );
-
-      setObservationStatus("error");
     } finally {
-      setObservationActionLoading(false);
+      if (mutationVersion === observationMutationRef.current) {
+        setObservationActionLoading(false);
+      }
     }
-  }, [loadObservation, selectedNetwork, selectedNetworkId]);
+  }, [
+    selectedNetwork,
+    selectedNetworkId,
+    claimObservationScope,
+    commitObservation,
+  ]);
 
   const stopObservation = useCallback(async () => {
     const name = selectedSubstrateRef.current;
     const activation = selectedActivationRef.current;
+    const pathId = selectedPathRef.current;
     const networkId = selectedNetworkId;
 
     if (!name || !networkId) return;
 
+    const scope = buildScopeKey(name, activation, networkId, pathId);
+
+    observationMutationRef.current += 1;
+    const mutationVersion = observationMutationRef.current;
+
+    observationRequestRef.current?.abort();
+    observationRequestIdRef.current += 1;
+
+    setObservationLoading(false);
+    claimObservationScope(scope);
     setObservationActionLoading(true);
     setObservationError("");
+
+    const stillSameScope = () =>
+      mutationVersion === observationMutationRef.current &&
+      selectedSubstrateRef.current === name &&
+      selectedActivationRef.current === activation &&
+      selectedPathRef.current === pathId;
 
     try {
       const encodedName = encodeURIComponent(name);
@@ -850,24 +1179,42 @@ export default function NetworkPage() {
         method: "DELETE",
       });
 
-      setObservation({ ...stopped, running: false });
-      setObservationStatus("live");
+      if (!stillSameScope()) return;
+
+      const payload = {
+        ...(isPlainObject(stopped) ? stopped : {}),
+        running: false,
+      };
+
+      if (!payload.message) payload.message = "Stop request accepted.";
+
+      commitObservation(scope, payload);
       setObservationList([]);
+      setObservationStale(false);
+      setObservationNotice("Stop request accepted.");
+
+      observationHoldRef.current = {
+        scope,
+        until: Date.now() + MUTATION_HOLD_MS,
+        running: false,
+      };
+
       setLastObservationCheck(new Date());
     } catch (error) {
       if (error?.name === "AbortError") return;
+      if (!stillSameScope()) return;
 
       setObservationError(
         error instanceof Error
           ? error.message
           : "Unable to stop observation.",
       );
-
-      setObservationStatus("error");
     } finally {
-      setObservationActionLoading(false);
+      if (mutationVersion === observationMutationRef.current) {
+        setObservationActionLoading(false);
+      }
     }
-  }, [selectedNetworkId]);
+  }, [selectedNetworkId, claimObservationScope, commitObservation]);
 
   useEffect(() => {
     loadNetworks();
@@ -1018,10 +1365,10 @@ export default function NetworkPage() {
     setStateStatus(name ? "checking" : "unknown");
     setEventStoreStatus(name ? "checking" : "unknown");
 
-    setObservation(null);
-    setObservationList([]);
+    // The previous observation belongs to the previous substrate.
+    resetObservation("");
     setObservationError("");
-    setObservationStatus("unknown");
+    setObservationLoading(false);
 
     setBitMinerRefresh(null);
     setBitMinerRefreshError("");
@@ -1029,6 +1376,9 @@ export default function NetworkPage() {
   };
 
   const handlePathSelect = (identifier) => {
+    // Re-selecting the current path must not discard its observation.
+    if (identifier === selectedPathRef.current) return;
+
     selectedPathRef.current = identifier;
 
     observationRequestRef.current?.abort();
@@ -1036,13 +1386,11 @@ export default function NetworkPage() {
     observationContextRef.current = "";
 
     setSelectedPath(identifier);
-    setObservation(null);
-    setObservationList([]);
-    setObservationError("");
 
-    setObservationStatus(
-      identifier && selectedNetwork ? "checking" : "unknown",
-    );
+    // The previous observation belongs to the previous path.
+    resetObservation("");
+    setObservationError("");
+    setObservationLoading(false);
   };
 
   const handleActivationChange = (event) => {
@@ -1063,9 +1411,44 @@ export default function NetworkPage() {
         ? "checking"
         : "unknown";
 
-  const observationRunning = Boolean(observation?.running);
-  const listenPort = observation?.listen_port;
+  // Only show observation data that belongs to the current selection.
+  const currentScopeKey = buildScopeKey(
+    selectedSubstrate,
+    selectedActivation,
+    selectedNetworkId,
+    selectedPath,
+  );
+
+  const scopeMatches = Boolean(
+    currentScopeKey && observationScope === currentScopeKey,
+  );
+
+  const scopedObservation = scopeMatches ? observation : null;
+  const scopedObservationList = scopeMatches ? observationList : [];
+
+  const observationRunning = Boolean(scopedObservation?.running);
+  const listenPort = scopedObservation?.listen_port;
   const electrumAddress = electrumEndpoint(listenPort);
+
+  const observationBadge = observationError
+    ? { status: "error", label: "Error" }
+    : observationRunning
+      ? { status: "running", label: "Running" }
+      : observationLoading && !scopedObservation
+        ? { status: "checking", label: "Checking" }
+        : scopedObservation
+          ? { status: "live", label: "Idle" }
+          : { status: "unknown", label: "Not started" };
+
+  const observationClips = Array.isArray(scopedObservation?.clips)
+    ? scopedObservation.clips
+    : [];
+
+  const hasExtraObservationFields = scopedObservation
+    ? Object.keys(scopedObservation).some(
+        (key) => !KNOWN_OBSERVATION_KEYS.includes(key),
+      )
+    : false;
 
   const refreshStatus = bitMinerRefreshError
     ? "error"
@@ -1099,7 +1482,7 @@ export default function NetworkPage() {
               type="button"
               onClick={refreshAll}
               disabled={networkLoading || substrateLoading}
-              className="inline-flex min-h-9 items-center justify-center rounded-md bg-zinc-950 px-3.5 py-2 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 sm:text-sm"
+              className="inline-flex min-h-9 items-center justify-center rounded-lg bg-zinc-950 px-3.5 py-2 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 sm:text-sm"
             >
               {networkLoading || substrateLoading ? "Loading…" : "Refresh"}
             </button>
@@ -1107,7 +1490,7 @@ export default function NetworkPage() {
             <button
               type="button"
               onClick={() => setAutoRefresh((value) => !value)}
-              className="inline-flex min-h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 py-2 text-xs font-medium dark:border-zinc-700 sm:text-sm"
+              className="inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-300 px-3.5 py-2 text-xs font-medium dark:border-zinc-700 sm:text-sm"
             >
               Live updates: {autoRefresh ? "On" : "Off"}
             </button>
@@ -1118,7 +1501,7 @@ export default function NetworkPage() {
                   ? `/?substrate=${encodeURIComponent(selectedSubstrate)}`
                   : "/"
               }
-              className="inline-flex min-h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 py-2 text-xs font-medium dark:border-zinc-700 sm:text-sm"
+              className="inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-300 px-3.5 py-2 text-xs font-medium dark:border-zinc-700 sm:text-sm"
             >
               Back to QTM
             </a>
@@ -1143,26 +1526,14 @@ export default function NetworkPage() {
                     : "Substrate not confirmed"}
             </DiagnosticBadge>
 
-            <DiagnosticBadge
-              status={
-                observationRunning
-                  ? "running"
-                  : observationStatus === "error"
-                    ? "error"
-                    : observationStatus === "checking"
-                      ? "checking"
-                      : observationStatus === "live"
-                        ? "live"
-                        : "unknown"
-              }
-            >
-              {observationRunning
+            <DiagnosticBadge status={observationBadge.status}>
+              {observationBadge.status === "running"
                 ? "Observation running"
-                : observationStatus === "checking"
+                : observationBadge.status === "checking"
                   ? "Observation checking"
-                  : observationStatus === "error"
+                  : observationBadge.status === "error"
                     ? "Observation error"
-                    : observation
+                    : observationBadge.status === "live"
                       ? "Observation idle"
                       : "Observation not started"}
             </DiagnosticBadge>
@@ -1187,7 +1558,7 @@ export default function NetworkPage() {
           </div>
         )}
 
-        <section className="mb-4 min-w-0 rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900 sm:p-4">
+        <section className="mb-4 min-w-0 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900 sm:p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
               <h2 className="text-sm font-semibold sm:text-base">
@@ -1221,7 +1592,7 @@ export default function NetworkPage() {
                 value={selectedSubstrate}
                 onChange={handleSubstrateChange}
                 disabled={substrateLoading || substrates.length === 0}
-                className="h-10 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 sm:text-sm"
+                className="h-10 w-full min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 sm:text-sm"
               >
                 {substrates.length === 0 && (
                   <option value="">
@@ -1252,7 +1623,7 @@ export default function NetworkPage() {
                 value={selectedActivation}
                 onChange={handleActivationChange}
                 disabled={!selectedSubstrate}
-                className="h-10 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 sm:text-sm"
+                className="h-10 w-full min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 sm:text-sm"
               >
                 {activationOptions.map((value) => (
                   <option key={value} value={value}>
@@ -1267,7 +1638,7 @@ export default function NetworkPage() {
                 type="button"
                 onClick={() => loadHostDiagnostics(selectedSubstrate)}
                 disabled={!selectedSubstrate || diagnosticsLoading}
-                className="h-10 w-full rounded-md border border-zinc-300 px-3 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800 sm:text-sm lg:w-auto"
+                className="h-10 w-full rounded-lg border border-zinc-300 px-3 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800 sm:text-sm lg:w-auto"
               >
                 {diagnosticsLoading ? "Checking…" : "Check substrate"}
               </button>
@@ -1281,7 +1652,7 @@ export default function NetworkPage() {
           )}
 
           <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-            <div className="min-w-0 rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
+            <div className="min-w-0 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-xs font-semibold">Persisted system state</p>
 
@@ -1303,7 +1674,7 @@ export default function NetworkPage() {
               )}
             </div>
 
-            <div className="min-w-0 rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
+            <div className="min-w-0 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-xs font-semibold">Persistent event store</p>
 
@@ -1334,7 +1705,7 @@ export default function NetworkPage() {
         </section>
 
         {substrateState && (
-          <section className="mb-4 min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+          <section className="mb-4 min-w-0 overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
             <div className="border-b border-zinc-200 px-3 py-2.5 dark:border-zinc-800 sm:px-4">
               <h2 className="text-sm font-semibold sm:text-base">
                 Substrate system state
@@ -1376,7 +1747,7 @@ export default function NetworkPage() {
           </section>
         )}
 
-        <section className="min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+        <section className="min-w-0 overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 px-3 py-2.5 dark:border-zinc-800 sm:px-4">
             <div className="min-w-0">
               <h2 className="text-sm font-semibold sm:text-base">
@@ -1444,7 +1815,7 @@ export default function NetworkPage() {
                           type="button"
                           onClick={() => handlePathSelect(identifier)}
                           aria-pressed={selected}
-                          className="whitespace-nowrap rounded-md border border-zinc-300 px-2.5 py-1.5 text-[10px] font-semibold hover:bg-zinc-200 dark:border-zinc-700 dark:hover:bg-zinc-700 sm:text-xs"
+                          className="whitespace-nowrap rounded-lg border border-zinc-300 px-2.5 py-1.5 text-[10px] font-semibold hover:bg-zinc-200 dark:border-zinc-700 dark:hover:bg-zinc-700 sm:text-xs"
                         >
                           {selected ? "Selected" : "Select path"}
                         </button>
@@ -1497,7 +1868,7 @@ export default function NetworkPage() {
           )}
         </section>
 
-        <section className="mt-4 min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
+        <section className="mt-4 min-w-0 overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
           <div className="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
             <div className="min-w-0 flex-1">
               <h2 className="text-sm font-semibold sm:text-base">
@@ -1572,7 +1943,7 @@ export default function NetworkPage() {
               type="button"
               onClick={() => loadBitMinerRefresh()}
               disabled={!selectedSubstrate || bitMinerRefreshLoading}
-              className="inline-flex min-h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 py-2 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+              className="inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-300 px-3.5 py-2 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
             >
               {bitMinerRefreshLoading
                 ? "Checking path…"
@@ -1591,7 +1962,11 @@ export default function NetworkPage() {
           )}
         </section>
 
-        <section className="mt-4 min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
+        {/* ------------------------------------------------------------------
+            Network observation: ONE stable box. Header, scope, controls,
+            live-state strip, result, clips, list and errors all live here.
+            ------------------------------------------------------------------ */}
+        <section className="mt-4 min-h-[12rem] min-w-0 overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
           <div className="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
             <div className="min-w-0 flex-1">
               <h2 className="text-sm font-semibold sm:text-base">
@@ -1606,28 +1981,8 @@ export default function NetworkPage() {
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              <DiagnosticBadge
-                status={
-                  observationRunning
-                    ? "running"
-                    : observationStatus === "error"
-                      ? "error"
-                      : observationStatus === "checking"
-                        ? "checking"
-                        : observation
-                          ? "live"
-                          : "unknown"
-                }
-              >
-                {observationRunning
-                  ? "Running"
-                  : observationStatus === "checking"
-                    ? "Checking"
-                    : observationStatus === "error"
-                      ? "Error"
-                      : observation
-                        ? "Idle"
-                        : "Not started"}
+              <DiagnosticBadge status={observationBadge.status}>
+                {observationBadge.label}
               </DiagnosticBadge>
 
               {observationHasNetworkContext && (
@@ -1666,7 +2021,7 @@ export default function NetworkPage() {
             <DiagnosticValue
               label="Last check"
               value={
-                lastObservationCheck
+                lastObservationCheck && scopeMatches
                   ? lastObservationCheck.toLocaleTimeString()
                   : "—"
               }
@@ -1684,7 +2039,7 @@ export default function NetworkPage() {
                   observationActionLoading ||
                   observationRunning
                 }
-                className="inline-flex min-h-9 items-center justify-center rounded-md bg-zinc-950 px-3.5 py-2 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950"
+                className="inline-flex min-h-9 items-center justify-center rounded-lg bg-zinc-950 px-3.5 py-2 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950"
               >
                 {observationActionLoading && !observationRunning
                   ? "Starting…"
@@ -1700,7 +2055,7 @@ export default function NetworkPage() {
                   observationActionLoading ||
                   !observationRunning
                 }
-                className="inline-flex min-h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 py-2 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                className="inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-300 px-3.5 py-2 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
               >
                 {observationActionLoading && observationRunning
                   ? "Stopping…"
@@ -1713,14 +2068,57 @@ export default function NetworkPage() {
                 disabled={
                   !selectedSubstrate ||
                   !selectedNetworkId ||
-                  observationLoading
+                  observationLoading ||
+                  observationActionLoading
                 }
-                className="inline-flex min-h-9 items-center justify-center rounded-md border border-zinc-300 px-3.5 py-2 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                className="inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-300 px-3.5 py-2 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
               >
                 {observationLoading ? "Refreshing…" : "Refresh status"}
               </button>
             </div>
           )}
+
+          {/* Fixed-height state strip: shows progress without moving the
+              result below it or replacing it. */}
+          <div
+            className="flex min-h-[2.25rem] flex-wrap items-center gap-2 border-b border-zinc-200 px-3 py-1.5 dark:border-zinc-800 sm:px-4"
+            aria-live="polite"
+          >
+            {observationActionLoading && (
+              <DiagnosticBadge status="checking">
+                Applying request…
+              </DiagnosticBadge>
+            )}
+
+            {observationLoading && !observationActionLoading && (
+              <DiagnosticBadge status="checking">
+                Refreshing status — keeping last result
+              </DiagnosticBadge>
+            )}
+
+            {scopedObservation && observationStale && (
+              <DiagnosticBadge status="checking">
+                Last known result — status read unavailable
+              </DiagnosticBadge>
+            )}
+
+            {scopedObservation && observationNotice && (
+              <DiagnosticBadge status="running">
+                {observationNotice}
+              </DiagnosticBadge>
+            )}
+
+            {!observationActionLoading &&
+              !observationLoading &&
+              !observationStale &&
+              !observationNotice && (
+                <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
+                  {autoRefresh
+                    ? `Status refreshes every ${REFRESH_INTERVAL_MS / 1000}s`
+                    : "Live updates are off"}
+                </span>
+              )}
+          </div>
 
           {observationError && (
             <div className="p-3 sm:p-4">
@@ -1728,59 +2126,82 @@ export default function NetworkPage() {
             </div>
           )}
 
-          {observation && (
-            <div className="grid grid-cols-1 gap-4 p-3 min-[420px]:grid-cols-2 sm:grid-cols-3 sm:p-4 lg:grid-cols-4">
-              <DiagnosticValue
-                label="Running"
-                value={observation.running ? "yes" : "no"}
-              />
+          {scopedObservation && (
+            <div className="min-w-0 space-y-4 p-3 sm:p-4">
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(11rem,1fr))] gap-4">
+                <DiagnosticValue
+                  label="Running"
+                  value={scopedObservation.running ? "yes" : "no"}
+                />
 
-              <DiagnosticValue
-                label="Commitment"
-                value={observation.commitment}
-              />
+                <DiagnosticValue
+                  label="Commitment"
+                  value={scopedObservation.commitment}
+                />
 
-              <DiagnosticValue
-                label="Electrum listen port"
-                value={listenPort}
-              />
+                <DiagnosticValue
+                  label="Electrum listen port"
+                  value={listenPort}
+                />
 
-              <DiagnosticValue
-                label="Electrum endpoint"
-                value={electrumAddress}
-              />
+                <DiagnosticValue
+                  label="Electrum endpoint"
+                  value={electrumAddress}
+                />
 
-              <DiagnosticValue
-                label="Path hint"
-                value={observation.path}
-              />
+                <DiagnosticValue
+                  label="Path hint"
+                  value={scopedObservation.path}
+                />
 
-              <DiagnosticValue
-                label="Message"
-                value={observation.message}
-              />
+                <DiagnosticValue
+                  label="Message"
+                  value={scopedObservation.message}
+                />
 
-              <DiagnosticValue
-                label="Runtime"
-                value={
-                  observation.runtime?.unix_seconds !== undefined
-                    ? formatTimestamp(observation.runtime.unix_seconds)
-                    : "—"
-                }
-              />
+                <DiagnosticValue
+                  label="Runtime"
+                  value={
+                    scopedObservation.runtime?.unix_seconds !== undefined
+                      ? formatTimestamp(scopedObservation.runtime.unix_seconds)
+                      : "—"
+                  }
+                />
 
-              <DiagnosticValue
-                label="Clips"
-                value={
-                  Array.isArray(observation.clips)
-                    ? observation.clips.length
-                    : 0
-                }
-              />
+                <DiagnosticValue
+                  label="Clips"
+                  value={observationClips.length}
+                />
+              </div>
+
+              {hasExtraObservationFields && (
+                <details className="min-w-0 rounded-lg border border-zinc-200 dark:border-zinc-800">
+                  <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold">
+                    Additional response fields
+                  </summary>
+
+                  <div className="min-w-0 border-t border-zinc-200 p-3 dark:border-zinc-800">
+                    <ResponseFields
+                      data={scopedObservation}
+                      omit={KNOWN_OBSERVATION_KEYS}
+                    />
+                  </div>
+                </details>
+              )}
+
+              <details className="min-w-0 rounded-lg border border-zinc-200 dark:border-zinc-800">
+                <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold">
+                  Raw runtime response
+                </summary>
+
+                <pre className="max-h-72 overflow-auto border-t border-zinc-200 bg-zinc-50 p-3 text-[10px] leading-4 dark:border-zinc-800 dark:bg-zinc-950">
+                  {safeJson(scopedObservation)}
+                </pre>
+              </details>
             </div>
           )}
 
-          {observation?.clips?.length > 0 && (
+          {scopedObservation && observationClips.length > 0 && (
             <div className="border-t border-zinc-200 dark:border-zinc-800">
               <div className="px-3 py-2.5 sm:px-4">
                 <h3 className="text-xs font-semibold sm:text-sm">
@@ -1788,39 +2209,16 @@ export default function NetworkPage() {
                 </h3>
               </div>
 
-              <div className="w-full min-w-0 overflow-x-auto">
-                <table className="w-full min-w-[440px] border-collapse text-left text-xs">
-                  <thead className="bg-zinc-100 text-[10px] uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                    <tr>
-                      <th className="px-3 py-2 sm:px-4">Substrate</th>
-                      <th className="px-3 py-2 sm:px-4">Active</th>
-                      <th className="px-3 py-2 sm:px-4">Direction</th>
-                    </tr>
-                  </thead>
-
-                  <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                    {observation.clips.map((clip, index) => (
-                      <tr key={`${clip.substrate ?? "clip"}-${index}`}>
-                        <td className="px-3 py-2 font-mono text-[10px] sm:px-4">
-                          {displayValue(clip.substrate)}
-                        </td>
-
-                        <td className="px-3 py-2 sm:px-4">
-                          {clip.active ? "yes" : "no"}
-                        </td>
-
-                        <td className="px-3 py-2 sm:px-4">
-                          {displayValue(clip.direction)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="min-w-0 px-3 pb-3 sm:px-4 sm:pb-4">
+                <ObjectTable
+                  rows={observationClips}
+                  columns={["substrate", "active", "direction"]}
+                />
               </div>
             </div>
           )}
 
-          {observationList.length > 0 && (
+          {scopedObservationList.length > 0 && (
             <div className="border-t border-zinc-200 dark:border-zinc-800">
               <div className="px-3 py-2.5 sm:px-4">
                 <h3 className="text-xs font-semibold sm:text-sm">
@@ -1828,54 +2226,25 @@ export default function NetworkPage() {
                 </h3>
               </div>
 
-              <div className="w-full min-w-0 overflow-x-auto">
-                <table className="w-full min-w-[600px] border-collapse text-left text-xs">
-                  <thead className="bg-zinc-100 text-[10px] uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                    <tr>
-                      <th className="px-3 py-2 sm:px-4">Network</th>
-                      <th className="px-3 py-2 sm:px-4">Commitment</th>
-                      <th className="px-3 py-2 sm:px-4">Port</th>
-                      <th className="px-3 py-2 sm:px-4">Running</th>
-                      <th className="px-3 py-2 sm:px-4">Path</th>
-                    </tr>
-                  </thead>
-
-                  <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                    {observationList.map((row, index) => (
-                      <tr
-                        key={`${row.network}-${row.commitment}-${index}`}
-                        className="align-top"
-                      >
-                        <td className="px-3 py-2 font-medium sm:px-4">
-                          {displayValue(row.network)}
-                        </td>
-
-                        <td className="max-w-[180px] break-all px-3 py-2 font-mono text-[10px] sm:px-4">
-                          {displayValue(row.commitment)}
-                        </td>
-
-                        <td className="px-3 py-2 tabular-nums sm:px-4">
-                          {displayValue(row.listen_port)}
-                        </td>
-
-                        <td className="px-3 py-2 sm:px-4">
-                          {row.running ? "yes" : "no"}
-                        </td>
-
-                        <td className="break-all px-3 py-2 font-mono text-[10px] sm:px-4">
-                          {displayValue(row.path)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="min-w-0 px-3 pb-3 sm:px-4 sm:pb-4">
+                <ObjectTable
+                  rows={scopedObservationList}
+                  columns={[
+                    "network",
+                    "commitment",
+                    "listen_port",
+                    "running",
+                    "path",
+                  ]}
+                />
               </div>
             </div>
           )}
 
           {observationHasNetworkContext &&
-            !observation &&
+            !scopedObservation &&
             !observationLoading &&
+            !observationActionLoading &&
             !observationError && (
               <p className="px-3 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400 sm:px-4">
                 No live observation for this path. Start one to request
@@ -1883,14 +2252,20 @@ export default function NetworkPage() {
               </p>
             )}
 
-          {observationLoading && !observation && (
+          {!observationHasNetworkContext && (
+            <p className="px-3 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400 sm:px-4">
+              Select a registered network path to scope observation.
+            </p>
+          )}
+
+          {observationLoading && !scopedObservation && (
             <p className="px-3 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400 sm:px-4">
               Loading observation status…
             </p>
           )}
         </section>
 
-        <section className="mt-4 min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
+        <section className="mt-4 min-w-0 overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 sm:mt-5">
           <div className="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-200 px-3 py-3 dark:border-zinc-800 sm:px-4">
             <div className="min-w-0 flex-1">
               <h2 className="text-sm font-semibold sm:text-base">
