@@ -1585,26 +1585,7 @@ export default function NetworkPage() {
     };
   });
 
-  // DirectionFrameResponse.event supplies event context; the commitment
-  // displayed below comes from the persisted EventStoreResponse summary.
-  // Do not substitute the substrate-level observation commitment.
-  const directionFrame =
-    scopedObservation?.frame ??
-    scopedObservation?.directionFrame ??
-    scopedObservation?.direction_frame ??
-    null;
 
-  const directionFrame =
-  scopedObservation?.frame ??
-  scopedObservation?.directionFrame ??
-  scopedObservation?.direction_frame ??
-  null;
-
-const eventCommitmentInfo = resolveEventCommitment(
-  persistedEvents,
-  directionFrame,
-  selectedActivation,
-);
 
   const eventCommitmentInfo = resolveEventCommitment(
     persistedEvents,
