@@ -137,7 +137,7 @@ function budgetValue(budget, key) {
 
 // Canonical wirepackets location (API-owned, a FILE not a directory):
 //   <substrate>/activations/<activation>/event/<commitment>/wirepackets
-const WIREPACKETS_CANONICAL = "activations/<activation>/event/<commitment>/wirepackets";
+const WIREPACKETS_CANONICAL = "activations/<activation>/event/wirepackets";
 
 // Tri-state: true / false only when the API sent a real boolean, otherwise
 // null ("not reported"). Never coerces a missing field into false.
