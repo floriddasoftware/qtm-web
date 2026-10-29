@@ -135,6 +135,58 @@ function budgetValue(budget, key) {
   return undefined;
 }
 
+// Canonical wirepackets location (API-owned, a FILE not a directory):
+//   <substrate>/activations/<activation>/event/<commitment>/wirepackets
+const WIREPACKETS_CANONICAL = "activations/<activation>/event/<commitment>/wirepackets";
+
+// Tri-state: true / false only when the API sent a real boolean, otherwise
+// null ("not reported"). Never coerces a missing field into false.
+function reportedBool(value) {
+  return typeof value === "boolean" ? value : null;
+}
+
+function reportedText(value) {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text.length > 0 ? text : null;
+}
+
+// Exact byte count from the API; null when it is not a non-negative integer.
+function parseByteCount(value) {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  }
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    const parsed = Number(value.trim());
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function formatBytes(bytes) {
+  if (bytes === null || bytes === undefined) return "Not reported";
+  const exact = `${bytes.toLocaleString("en-US")} byte${bytes === 1 ? "" : "s"}`;
+  if (bytes < 1024) return exact;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${exact} (${value.toFixed(value >= 100 ? 0 : 2)} ${units[unit]})`;
+}
+
+// True when the API-reported path ends with the canonical shape for this
+// activation + commitment. Separators are normalized so Windows hosts match.
+function isCanonicalWirepacketsPath(path, activation, commitment) {
+  if (typeof path !== "string" || !commitment) return false;
+  const normalized = path.replace(/\\/g, "/");
+  return normalized.endsWith(
+    `/activations/${activation}/event/${commitment}/wirepackets`,
+  );
+}
+
 function toU128OrNull(value) {
   if (value === undefined || value === null || value === "") return null;
 
@@ -207,12 +259,34 @@ function normalizeNetwork(network) {
   };
 }
 
-function normalizeNetworkBudgets(result) {
+function normalizeNetworkBudgets(result, activationValue) {
+  const selected = String(activationValue);
+
+  // Reject a response that belongs to another activation outright.
+  if (
+    result?.activation !== undefined &&
+    result?.activation !== null &&
+    String(result.activation) !== selected
+  ) {
+    return [];
+  }
+
   return Array.isArray(result?.budgets)
     ? result.budgets
         .map((row) => {
           const network = normalizeNetwork(row?.network);
-          return network ? { ...row, network } : null;
+          if (!network) return null;
+
+          // Rows that declare a different activation are not ours.
+          if (
+            row?.activation !== undefined &&
+            row?.activation !== null &&
+            String(row.activation) !== selected
+          ) {
+            return null;
+          }
+
+          return { ...row, activation: selected, network };
         })
         .filter(Boolean)
     : [];
@@ -282,170 +356,181 @@ function normalizePayloadEntry(entry, fallbackRecord = "") {
 
 /**
  * Normalize GET /wallets/:name/activations/:activation/networks/:network/wirepackets
- * Wire packets live under substrate · activation · commitment · wallet · wirepackets.
+ *
+ * `wirepackets` is a single persisted FILE at
+ *   <substrate>/activations/<activation>/event/<commitment>/wirepackets
+ * The API returns that file as at most one entry with its exact byte length.
+ * Network is request context only; it does not change the path.
  */
 function normalizeWireStream(body, name, activationValue, networkId) {
-  const packets = Array.isArray(body?.packets)
-    ? body.packets
-        .map((packet) => {
-          if (!packet || typeof packet !== "object") return null;
-          const packetName =
-            typeof packet.name === "string" ? packet.name : null;
-          const packetPath =
-            typeof packet.path === "string" ? packet.path : null;
-          if (!packetName || !packetPath) return null;
+  const requestedActivation = String(activationValue);
+  const reportedActivation =
+    body?.activation !== undefined && body?.activation !== null
+      ? String(body.activation)
+      : requestedActivation;
+
+  const commitment = reportedText(body?.commitment);
+  const path = reportedText(body?.path);
+  const exists = body?.exists === true;
+
+  const entries = Array.isArray(body?.packets) ? body.packets : [];
+  const entry = entries.find(
+    (item) =>
+      item &&
+      typeof item === "object" &&
+      typeof item.path === "string" &&
+      item.path.length > 0,
+  );
+
+  const file = entry
+    ? {
+        name: typeof entry.name === "string" ? entry.name : "wirepackets",
+        path: entry.path,
+        bytes: parseByteCount(entry.bytes),
+      }
+    : null;
+
+  let error = null;
+  if (reportedActivation !== requestedActivation) {
+    error = `Wirepackets response is for activation ${reportedActivation}, not the selected activation ${requestedActivation}.`;
+  } else if (exists && !file) {
+    error = "The API reported the wirepackets file as present but returned no file entry.";
+  } else if (file && file.bytes === null) {
+    error = "The API returned the wirepackets file without a valid byte count.";
+  }
+
+  return {
+    substrate: body?.substrate ?? name,
+    activation: reportedActivation,
+    network: body?.network ?? networkId,
+    commitment,
+    path,
+    exists,
+    file,
+    canonical:
+      path !== null &&
+      isCanonicalWirepacketsPath(path, reportedActivation, commitment),
+    error,
+  };
+}
+
+/**
+ * Map GET .../payload-board to display rows.
+ * Source of truth: payload.rs PayloadKind + AuthorizedPayload.
+ *
+ * The client only renders what the API serializes. Every state is tri-state:
+ * a real boolean/string is shown, anything absent stays null ("not reported").
+ * The derived listen-port candidate is intentionally NOT read: it is computed
+ * from the commitment and is not evidence of a listener.
+ */
+function normalizePayloadBoard(body, name, activationValue, networkId) {
+  const kinds = Array.isArray(body?.kinds)
+    ? body.kinds
+        .map((entry) => {
+          if (!entry || typeof entry !== "object") return null;
+
+          const kind = typeof entry.kind === "string" ? entry.kind : null;
+          if (!kind) return null;
+
+          const authorized =
+            entry.authorized_payload && typeof entry.authorized_payload === "object"
+              ? entry.authorized_payload
+              : null;
+          const request =
+            authorized?.request && typeof authorized.request === "object"
+              ? authorized.request
+              : null;
+          const authorization =
+            request?.authorization && typeof request.authorization === "object"
+              ? request.authorization
+              : null;
+
           return {
-            name: packetName,
-            path: packetPath,
-            bytes:
-              typeof packet.bytes === "number"
-                ? packet.bytes
-                : Number(packet.bytes) || 0,
+            kind,
+            in_scope: entry.in_scope === true,
+            available: entry.available === true,
+            network: normalizeNetwork(entry.network),
+            depth_path: reportedText(entry.depth_path),
+            depth_record: reportedText(entry.depth_record),
+            depth_objects: Array.isArray(entry.depth_objects)
+              ? entry.depth_objects
+              : [],
+            // AuthorizedPayload view — display only; never invent carried state.
+            authorized_payload: authorized
+              ? {
+                  carried: reportedBool(authorized.carried),
+                  authorization_state: reportedText(
+                    authorized.authorization_state,
+                  ),
+                  settlement_state: reportedText(authorized.settlement_state),
+                  request: request
+                    ? {
+                        carried: reportedBool(request.carried),
+                        packet_present: reportedBool(request.packet_present),
+                        authorization: authorization
+                          ? {
+                              commitment: reportedText(authorization.commitment),
+                              activation: reportedText(authorization.activation),
+                              locked_present: reportedBool(
+                                authorization.locked_present,
+                              ),
+                            }
+                          : null,
+                      }
+                    : null,
+                }
+              : null,
           };
         })
         .filter(Boolean)
     : [];
 
-  // Preserve activation as a decimal string so large u64 values stay exact
-  // and match the component's string-based activation selection.
-  const activationRaw =
-    body?.activation !== undefined && body?.activation !== null
-      ? body.activation
-      : activationValue;
+  const rawObservation =
+    body?.observation && typeof body.observation === "object"
+      ? body.observation
+      : null;
 
-  return {
-    substrate: body?.substrate ?? name,
-    activation: String(activationRaw),
-    network: body?.network ?? networkId,
-    commitment:
-      body?.commitment !== undefined && body?.commitment !== null
-        ? String(body.commitment)
-        : null,
-    path:
-      body?.path !== undefined && body?.path !== null
-        ? String(body.path)
-        : null,
-    exists: Boolean(body?.exists),
-    packets,
-    error: null,
-  };
-}
-
-
-/**
- * Map GET .../payload-board to display rows.
- * Source of truth: payload.rs PayloadKind + AuthorizedPayload.
- * The client only renders fields the API serializes; it does not rebuild
- * SettlementRequest, Authorization, or SettlementState.
- */
-function normalizePayloadBoard(body, name, activationValue, networkId) {
-  const kinds = Array.isArray(body?.kinds)
-    ? body.kinds.map((entry) => {
-        if (!entry || typeof entry !== "object") return null;
-        const kind = typeof entry.kind === "string" ? entry.kind : null;
-        if (!kind) return null;
-
-        const authorized = entry.authorized_payload;
-        const request = authorized?.request;
-
-        return {
-          kind,
-          in_scope: Boolean(entry.in_scope),
-          available: Boolean(entry.available),
-          network: normalizeNetwork(entry.network),
-          depth_path:
-            entry.depth_path !== undefined && entry.depth_path !== null
-              ? String(entry.depth_path)
-              : null,
-          depth_record:
-            entry.depth_record !== undefined && entry.depth_record !== null
-              ? String(entry.depth_record)
-              : null,
-          depth_objects: Array.isArray(entry.depth_objects)
-            ? entry.depth_objects
-            : [],
-          // AuthorizedPayload view — display only; never invent carried state.
-          authorized_payload: authorized
-            ? {
-                carried: Boolean(authorized.carried),
-                authorization_state:
-                  authorized.authorization_state != null
-                    ? String(authorized.authorization_state)
-                    : null,
-                settlement_state:
-                  authorized.settlement_state != null
-                    ? String(authorized.settlement_state)
-                    : null,
-                request: request
-                  ? {
-                      carried: Boolean(request.carried),
-                      packet_present: Boolean(request.packet_present),
-                      authorization: request.authorization
-                        ? {
-                            commitment:
-                              request.authorization.commitment != null
-                                ? String(request.authorization.commitment)
-                                : null,
-                            activation:
-                              request.authorization.activation != null
-                                ? String(request.authorization.activation)
-                                : null,
-                            locked_present: Boolean(
-                              request.authorization.locked_present,
-                            ),
-                          }
-                        : null,
-                    }
-                  : null,
-              }
-            : null,
-        };
-      }).filter(Boolean)
-    : [];
-
-  const observation = body?.observation && typeof body.observation === "object"
+  const observation = rawObservation
     ? {
-        registry_running: Boolean(body.observation.registry_running),
-        listen_port_candidate:
-          body.observation.listen_port_candidate ?? null,
-        path_hint:
-          body.observation.path_hint != null
-            ? String(body.observation.path_hint)
-            : null,
-        bit_minner_feature: Boolean(body.observation.bit_minner_feature),
-        electrum_listener_bound: Boolean(
-          body.observation.electrum_listener_bound,
+        registry_running: reportedBool(rawObservation.registry_running),
+        path_hint: reportedText(rawObservation.path_hint),
+        bit_minner_feature: reportedBool(rawObservation.bit_minner_feature),
+        electrum_listener_bound: reportedBool(
+          rawObservation.electrum_listener_bound,
         ),
-        settlement_payload_carried: Boolean(
-          body.observation.settlement_payload_carried,
+        settlement_payload_carried: reportedBool(
+          rawObservation.settlement_payload_carried,
         ),
       }
     : null;
 
+  const reportedActivation =
+    body?.activation !== undefined && body?.activation !== null
+      ? String(body.activation)
+      : String(activationValue);
+
   return {
     substrate: body?.substrate ?? name,
-    activation: String(
-      body?.activation !== undefined && body?.activation !== null
-        ? body.activation
-        : activationValue,
-    ),
+    activation: reportedActivation,
     network:
       body?.network !== undefined && body?.network !== null
         ? String(body.network)
-        : networkId ?? null,
-    commitment:
-      body?.commitment !== undefined && body?.commitment !== null
-        ? String(body.commitment)
-        : null,
-    message: body?.message != null ? String(body.message) : null,
+        : (networkId ?? null),
+    commitment: reportedText(body?.commitment),
+    message: reportedText(body?.message),
     observation,
     kinds,
-    error: null,
+    error:
+      reportedActivation !== String(activationValue)
+        ? `Payload board is for activation ${reportedActivation}, not the selected activation ${activationValue}.`
+        : null,
   };
 }
 
-function networkKey(activation, networkId) {
-  return `network:${activation}:${networkId}`;
+// Budget, draft and editor state are keyed by substrate · activation · network
+// so nothing leaks between substrates, activations, or networks.
+function networkKey(substrate, activation, networkId) {
+  return `network:${substrate}:${activation}:${networkId}`;
 }
 
 function payloadRowKey(record, networkId, path, depth) {
@@ -776,11 +861,20 @@ function DirectionSection({ title, description, entries }) {
   );
 }
 
+function yesNo(value) {
+  return value === true ? "yes" : "no";
+}
+
 function PayloadBoardPanel({ network, board, loading, activation }) {
   const [open, setOpen] = useState(true);
+
   const kinds = Array.isArray(board?.kinds) ? board.kinds : [];
   const scoped = kinds.filter((k) => k.in_scope);
   const observation = board?.observation;
+
+  // Only an explicit `true` from the API is shown as a listener/chain state.
+  const listenerBound = observation?.electrum_listener_bound === true;
+  const payloadCarried = observation?.settlement_payload_carried === true;
 
   return (
     <section className="min-w-0 rounded-xl border border-zinc-200 dark:border-zinc-800">
@@ -791,30 +885,24 @@ function PayloadBoardPanel({ network, board, loading, activation }) {
         onClick={() => setOpen((value) => !value)}
       >
         <span className="min-w-0">
-          <span className="block text-sm font-semibold">
-            Payload board
-          </span>
+          <span className="block text-sm font-semibold">Payload board</span>
           <span className="mt-1 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">
             API payload model from payload.rs — PayloadKind and
             AuthorizedPayload for network {network.id} · activation{" "}
-            {activation}. Depth objects are ancillary; settlement request and
-            auth/settlement states are only shown when the API carries them.
+            {activation}. Listener and pipeline-chain states appear only when
+            the API explicitly reports them. Depth objects are ancillary.
           </span>
         </span>
 
         <span className="flex shrink-0 items-center gap-2">
           <span
             className={`rounded-full px-2 py-1 text-xs font-medium ${
-              observation?.settlement_payload_carried
+              payloadCarried
                 ? "bg-emerald-50 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
                 : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
             }`}
           >
-            {loading
-              ? "…"
-              : observation?.settlement_payload_carried
-                ? "carried"
-                : "not carried"}
+            {loading ? "…" : payloadCarried ? "carried" : "not reported"}
           </span>
           <span aria-hidden="true" className="text-zinc-500">
             {open ? "−" : "+"}
@@ -835,22 +923,34 @@ function PayloadBoardPanel({ network, board, loading, activation }) {
           {!board?.error && observation && (
             <dl className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Commitment">{display(board.commitment)}</Field>
-              <Field label="Observation registry">
-                {observation.registry_running ? "running" : "idle"}
-              </Field>
-              <Field label="Settlement payload carried">
-                {observation.settlement_payload_carried ? "yes" : "no"}
-              </Field>
-              <Field label="Electrum listener bound">
-                {observation.electrum_listener_bound ? "yes" : "no"}
-              </Field>
-              <Field label="bit-minner feature">
-                {observation.bit_minner_feature ? "enabled" : "disabled"}
-              </Field>
-              <Field label="Listen port candidate">
-                {display(observation.listen_port_candidate)}
-              </Field>
+
+              {observation.registry_running !== null && (
+                <Field label="Observation registry (control plane)">
+                  {observation.registry_running ? "running" : "idle"}
+                </Field>
+              )}
+
+              {observation.bit_minner_feature !== null && (
+                <Field label="bit-minner feature">
+                  {observation.bit_minner_feature ? "enabled" : "disabled"}
+                </Field>
+              )}
+
+              {listenerBound && (
+                <Field label="Electrum listener">bound</Field>
+              )}
+
+              {payloadCarried && (
+                <Field label="Settlement payload">carried</Field>
+              )}
             </dl>
+          )}
+
+          {!board?.error && observation && !listenerBound && !payloadCarried && (
+            <p className="mb-3 rounded-lg bg-zinc-50 p-3 text-xs leading-5 text-zinc-500 dark:bg-zinc-950 dark:text-zinc-400">
+              The API does not report a bound listener or a carried settlement
+              payload for this context, so none is shown.
+            </p>
           )}
 
           {loading && (
@@ -873,7 +973,9 @@ function PayloadBoardPanel({ network, board, loading, activation }) {
           {!loading &&
             scoped.map((entry) => {
               const ap = entry.authorized_payload;
-              const req = ap?.request;
+              const req = ap?.request ?? null;
+              const auth = req?.authorization ?? null;
+              const apCarried = ap?.carried === true;
 
               return (
                 <article
@@ -890,15 +992,11 @@ function PayloadBoardPanel({ network, board, loading, activation }) {
                   </div>
 
                   <dl className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <Field label="In scope">
-                      {entry.in_scope ? "yes" : "no"}
-                    </Field>
+                    <Field label="In scope">{yesNo(entry.in_scope)}</Field>
                     <Field label="Depth record">
                       {display(entry.depth_record)}
                     </Field>
-                    <Field label="Depth path">
-                      {display(entry.depth_path)}
-                    </Field>
+                    <Field label="Depth path">{display(entry.depth_path)}</Field>
                     <Field label="Depth objects">
                       {entry.depth_objects.length}
                     </Field>
@@ -908,36 +1006,45 @@ function PayloadBoardPanel({ network, board, loading, activation }) {
                     <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                       AuthorizedPayload (API-serialized)
                     </p>
-                    {!ap ? (
-                      <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
-                        No authorized_payload field for this kind.
+
+                    {!apCarried ? (
+                      <p className="mt-2 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                        No AuthorizedPayload is reported as carried for this
+                        kind; authorization and settlement states are not
+                        shown.
                       </p>
                     ) : (
                       <dl className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                        <Field label="Carried">
-                          {ap.carried ? "yes" : "no"}
-                        </Field>
-                        <Field label="Authorization state">
-                          {display(ap.authorization_state, "not reported")}
-                        </Field>
-                        <Field label="Settlement state">
-                          {display(ap.settlement_state, "not reported")}
-                        </Field>
-                        <Field label="SettlementRequest carried">
-                          {req?.carried ? "yes" : "no"}
-                        </Field>
-                        <Field label="Wire packet present">
-                          {req?.packet_present ? "yes" : "no"}
-                        </Field>
-                        <Field label="Request commitment">
-                          {display(req?.authorization?.commitment)}
-                        </Field>
-                        <Field label="Request activation">
-                          {display(req?.authorization?.activation)}
-                        </Field>
-                        <Field label="Locked present">
-                          {req?.authorization?.locked_present ? "yes" : "no"}
-                        </Field>
+                        <Field label="Carried">yes</Field>
+                        {ap.authorization_state !== null && (
+                          <Field label="Authorization state">
+                            {ap.authorization_state}
+                          </Field>
+                        )}
+                        {ap.settlement_state !== null && (
+                          <Field label="Settlement state">
+                            {ap.settlement_state}
+                          </Field>
+                        )}
+                        {req?.carried === true && (
+                          <Field label="SettlementRequest carried">yes</Field>
+                        )}
+                        {req?.packet_present === true && (
+                          <Field label="Wire packet present">yes</Field>
+                        )}
+                        {auth?.commitment != null && (
+                          <Field label="Request commitment">
+                            {auth.commitment}
+                          </Field>
+                        )}
+                        {auth?.activation != null && (
+                          <Field label="Request activation">
+                            {auth.activation}
+                          </Field>
+                        )}
+                        {auth?.locked_present === true && (
+                          <Field label="Locked present">yes</Field>
+                        )}
                       </dl>
                     )}
                   </div>
@@ -952,8 +1059,9 @@ function PayloadBoardPanel({ network, board, loading, activation }) {
 
 function WirePacketStreamPanel({ network, stream, loading, activation }) {
   const [open, setOpen] = useState(true);
-  const packets = Array.isArray(stream?.packets) ? stream.packets : [];
-  const packetCount = packets.length;
+
+  const file = stream?.file ?? null;
+  const bytes = file ? file.bytes : null;
 
   return (
     <section className="min-w-0 rounded-xl border border-zinc-200 dark:border-zinc-800">
@@ -964,33 +1072,32 @@ function WirePacketStreamPanel({ network, stream, loading, activation }) {
         onClick={() => setOpen((value) => !value)}
       >
         <span className="min-w-0">
-          <span className="block text-sm font-semibold">
-            Wire packet stream
-          </span>
+          <span className="block text-sm font-semibold">Wirepackets file</span>
           <span className="mt-1 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-            Listener path for network {network.id} · activation {activation}.
-            Packets are keyed by the activation commitment under the runtime host
-            (<span className="font-mono">
-              {" "}
-              …/&#123;activation&#125;/events/&#123;commitment&#125;/networks/wirepackets
-            </span>
-            ).
+            Persisted file for network {network.id} · activation {activation}.
+            Canonical path:{" "}
+            <span className="break-all font-mono">{WIREPACKETS_CANONICAL}</span>
+            . <span className="font-mono">wirepackets</span> is a single file,
+            keyed by activation and commitment; the network is request context
+            only.
           </span>
         </span>
 
         <span className="flex shrink-0 items-center gap-2">
           <span
             className={`rounded-full px-2 py-1 text-xs font-medium ${
-              stream?.exists
+              stream?.exists && !stream?.error
                 ? "bg-emerald-50 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
                 : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
             }`}
           >
             {loading
               ? "…"
-              : stream?.exists
-                ? `${packetCount} packet${packetCount === 1 ? "" : "s"}`
-                : "no stream"}
+              : stream?.error
+                ? "error"
+                : stream?.exists
+                  ? formatBytes(bytes).split(" (")[0]
+                  : "no file"}
           </span>
           <span aria-hidden="true" className="text-zinc-500">
             {open ? "−" : "+"}
@@ -1002,71 +1109,45 @@ function WirePacketStreamPanel({ network, stream, loading, activation }) {
         <div className="border-t border-zinc-200 p-3 dark:border-zinc-800 sm:p-4">
           {stream?.error && <Notice type="warning">{stream.error}</Notice>}
 
-          {!stream?.error && (
+          {stream && !stream.error && (
             <dl className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <Field label="Commitment">{display(stream?.commitment)}</Field>
-              <Field label="Stream directory">{display(stream?.path)}</Field>
-              <Field label="Directory present">
-                {stream?.exists ? "yes" : "no"}
+              <Field label="Commitment">{display(stream.commitment)}</Field>
+              <Field label="File present">{stream.exists ? "yes" : "no"}</Field>
+              <Field label="Returned path">{display(file?.path ?? stream.path)}</Field>
+              <Field label="File size">
+                {stream.exists ? formatBytes(bytes) : "No file"}
               </Field>
-              <Field label="Packets">{packetCount}</Field>
             </dl>
+          )}
+
+          {stream && !stream.error && stream.path && !stream.canonical && (
+            <div className="mt-3">
+              <Notice type="warning">
+                The returned path does not end with{" "}
+                <span className="font-mono">
+                  /activations/{activation}/event/{display(stream.commitment)}
+                  /wirepackets
+                </span>
+                .
+              </Notice>
+            </div>
           )}
 
           {loading && (
             <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
-              Loading wire packet stream…
+              Loading wirepackets file status…
             </p>
           )}
 
-          {!loading && !stream?.error && packets.length === 0 && (
+          {!loading && stream && !stream.error && !stream.exists && (
             <p className="mt-3 rounded-lg bg-zinc-50 p-3 text-xs leading-5 text-zinc-500 dark:bg-zinc-950 dark:text-zinc-400">
-              No wire packets under this network · activation · commitment path
-              yet. Listeners can poll{" "}
+              No wirepackets file exists at the canonical path yet. Poll{" "}
               <span className="font-mono">
                 /wallets/…/activations/{activation}/networks/{network.id}
                 /wirepackets
               </span>
               .
             </p>
-          )}
-
-          {!loading && packets.length > 0 && (
-            <div className="mt-3 overflow-x-auto">
-              <table className="w-full min-w-[480px] border-collapse text-left text-xs">
-                <thead className="bg-zinc-100 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                  <tr>
-                    {["Name", "Path", "Bytes"].map((heading) => (
-                      <th
-                        key={heading}
-                        scope="col"
-                        className="px-3 py-2 font-semibold"
-                      >
-                        {heading}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                  {packets.map((packet) => (
-                    <tr
-                      key={`${packet.name}-${packet.path}`}
-                      className="align-top"
-                    >
-                      <td className="px-3 py-2 font-mono">
-                        {display(packet.name)}
-                      </td>
-                      <td className="max-w-md break-all px-3 py-2 font-mono text-zinc-500 dark:text-zinc-400">
-                        {display(packet.path)}
-                      </td>
-                      <td className="px-3 py-2 tabular-nums">
-                        {display(packet.bytes)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
           )}
         </div>
       )}
@@ -1082,7 +1163,7 @@ export default function EventStorePage() {
   const [activationOptions, setActivationOptions] = useState(["0"]);
   const [store, setStore] = useState(null);
   const [payloads, setPayloads] = useState([]);
-  // Wire packet stream: <substrate>/<activation>/events/<commitment>/networks/wirepackets
+  // Wirepackets FILE: <substrate>/activations/<activation>/event/<commitment>/wirepackets
   const [wireStreams, setWireStreams] = useState({});
   const [loadingWire, setLoadingWire] = useState(false);
   // Payload board: API PayloadKind + AuthorizedPayload (payload.rs) — display only
@@ -1111,6 +1192,7 @@ export default function EventStorePage() {
   const budgetRequestRef = useRef(0);
   const wireRequestRef = useRef(0);
   const boardRequestRef = useRef(0);
+  const savingKeysRef = useRef({});
 
   const events = Array.isArray(store?.events) ? store.events : [];
 
@@ -1351,9 +1433,10 @@ export default function EventStorePage() {
   );
 
   /**
-   * Wire packet stream for listeners.
+   * Wirepackets file status for listeners.
    * GET /wallets/:name/activations/:activation/networks/:network/wirepackets
-   * Path is scoped by substrate · activation · commitment (API-owned).
+   * The file lives at <substrate>/activations/<activation>/event/<commitment>/wirepackets
+   * (API-owned path). Network is request context only.
    */
   const loadWirePackets = useCallback(
     async (name, activationValue, networkRows, options = {}) => {
@@ -1400,7 +1483,7 @@ export default function EventStorePage() {
             const message =
               result.reason instanceof Error
                 ? result.reason.message
-                : "Unable to load wire packet stream.";
+                : "Unable to load wirepackets file status.";
             next[networkId] = {
               substrate: name,
               activation: String(activationValue),
@@ -1408,7 +1491,8 @@ export default function EventStorePage() {
               commitment: null,
               path: null,
               exists: false,
-              packets: [],
+              file: null,
+              canonical: false,
               error: message,
             };
           }
@@ -1546,16 +1630,16 @@ export default function EventStorePage() {
           return null;
         }
 
-        const rows = normalizeNetworkBudgets(result);
+        const rows = normalizeNetworkBudgets(result, activationValue);
         setNetworkBudgets(rows);
 
         setDrafts((current) => {
           const next = { ...current };
 
           rows.forEach((entry) => {
-            const key = networkKey(activationValue, entry.network.id);
+            const key = networkKey(name, String(activationValue), entry.network.id);
 
-            if (!savingKeys[key]) {
+            if (!savingKeysRef.current[key]) {
               next[key] = draftFromBudget(
                 entry.configured ? entry.budget : null,
               );
@@ -1583,7 +1667,7 @@ export default function EventStorePage() {
         }
       }
     },
-    [savingKeys],
+    [],
   );
 
   useEffect(() => {
@@ -1637,9 +1721,9 @@ export default function EventStorePage() {
     loadNetworkBudgets(substrate, activation);
   }, [substrate, activation, loadNetworkBudgets]);
 
-  // Keep wire packet streams and payload boards aligned with selection.
-  // Wire path: <substrate>/<activation>/events/<commitment>/networks/wirepackets
-  // Network is request context only (API resolves activation commitment).
+  // Keep wirepackets file status and payload boards aligned with selection.
+  // Wire path: <substrate>/activations/<activation>/event/<commitment>/wirepackets
+  // Network is request context only (API resolves the substrate commitment).
   useEffect(() => {
     if (!substrate || !networks.length || !/^\d+$/.test(String(activation))) {
       setWireStreams({});
@@ -1690,6 +1774,8 @@ export default function EventStorePage() {
     setStore(null);
     setPayloads([]);
     setNetworkBudgets([]);
+    setDrafts({});
+    setExpandedNetworks({});
     setWireStreams({});
     setPayloadBoards({});
     setError("");
@@ -1764,7 +1850,11 @@ export default function EventStorePage() {
       return;
     }
 
-    const key = networkKey(activation, network.id);
+    // Pin the selection this save belongs to; the user may switch while the
+    // request is in flight.
+    const savedSubstrate = substrate;
+    const savedActivation = String(activation);
+    const key = networkKey(savedSubstrate, savedActivation, network.id);
     let payload;
 
     try {
@@ -1777,39 +1867,57 @@ export default function EventStorePage() {
       return;
     }
 
+    savingKeysRef.current = { ...savingKeysRef.current, [key]: true };
     setSavingKeys((current) => ({ ...current, [key]: true }));
     setBudgetErrors((current) => ({ ...current, [key]: "" }));
     setBudgetNotices((current) => ({ ...current, [key]: "" }));
 
     try {
       const result = await apiRequest(
-        `/wallets/${encodeURIComponent(substrate)}/activations/${encodeURIComponent(activation)}/budgets/${encodeURIComponent(network.id)}`,
+        `/wallets/${encodeURIComponent(savedSubstrate)}/activations/${encodeURIComponent(savedActivation)}/budgets/${encodeURIComponent(network.id)}`,
         {
           method: "PUT",
           body: requestBody(payload),
         },
       );
 
-      setNetworkBudgets((current) =>
-        current.map((row) =>
-          row.network.id === network.id
-            ? {
-                ...row,
-                configured: true,
-                budget:
-                  result.budget ?? {
-                    min_events: payload.minEvents,
-                    max_events: payload.maxEvents,
-                    max_retained_mass: payload.maxRetainedMass,
-                  },
-              }
-            : row,
-        ),
-      );
+      // The response must describe exactly the activation + network we saved.
+      if (
+        (result?.activation !== undefined &&
+          result?.activation !== null &&
+          String(result.activation) !== savedActivation) ||
+        (result?.network?.id !== undefined && result.network.id !== network.id)
+      ) {
+        throw new Error(
+          "The API response did not match the activation and network that were saved.",
+        );
+      }
+
+      const saved = result.budget ?? {
+        min_events: payload.minEvents,
+        max_events: payload.maxEvents,
+        max_retained_mass: payload.maxRetainedMass,
+      };
+
+      const stillSelected =
+        selectedSubstrateRef.current === savedSubstrate &&
+        selectedActivationRef.current === savedActivation;
+
+      if (stillSelected) {
+        setNetworkBudgets((current) =>
+          current.map((row) =>
+            row.network.id === network.id
+              ? { ...row, configured: true, budget: saved }
+              : row,
+          ),
+        );
+      }
+
+      setDrafts((current) => ({ ...current, [key]: draftFromBudget(saved) }));
 
       setBudgetNotices((current) => ({
         ...current,
-        [key]: `Saved for ${network.id} · activation ${activation}.`,
+        [key]: `Saved for ${network.id} · activation ${savedActivation}.`,
       }));
     } catch (err) {
       setBudgetErrors((current) => ({
@@ -1820,6 +1928,8 @@ export default function EventStorePage() {
             : "Unable to save this network budget.",
       }));
     } finally {
+      const { [key]: _done, ...remaining } = savingKeysRef.current;
+      savingKeysRef.current = remaining;
       setSavingKeys((current) => {
         const next = { ...current };
         delete next[key];
@@ -1852,7 +1962,7 @@ export default function EventStorePage() {
       await loadWirePackets(substrate, act, networkList);
       await loadPayloadBoards(substrate, act, networkList);
       setNotice(
-        "Event snapshot, payload render, budgets, wire packet streams, and payload boards refreshed.",
+        "Event snapshot, payload render, budgets, wirepackets file status, and payload boards refreshed.",
       );
     }
   }
@@ -1927,15 +2037,25 @@ export default function EventStorePage() {
     return groups;
   }, [payloads]);
 
-  const wirePacketTotal = useMemo(
-    () =>
-      Object.values(wireStreams).reduce(
-        (sum, stream) =>
-          sum + (Array.isArray(stream?.packets) ? stream.packets.length : 0),
-        0,
-      ),
-    [wireStreams],
-  );
+  // The wirepackets file is keyed by activation + commitment, so every network
+  // request returns the same file. Count each distinct path once.
+  const wireFile = useMemo(() => {
+    const seen = new Map();
+
+    Object.values(wireStreams).forEach((stream) => {
+      if (!stream || stream.error || !stream.exists || !stream.file) return;
+      if (!seen.has(stream.file.path)) seen.set(stream.file.path, stream.file);
+    });
+
+    const files = [...seen.values()];
+    const known = files.filter((file) => file.bytes !== null);
+
+    return {
+      count: files.length,
+      bytes: known.reduce((sum, file) => sum + file.bytes, 0),
+      complete: known.length === files.length,
+    };
+  }, [wireStreams]);
 
   return (
     <main className="min-h-screen bg-[#f7f8fa] px-3 py-4 text-zinc-950 sm:px-5 sm:py-6 lg:px-8 dark:bg-zinc-950 dark:text-zinc-100">
@@ -1953,9 +2073,9 @@ export default function EventStorePage() {
             <p className="mt-2 max-w-2xl text-xs leading-5 text-zinc-500 sm:text-sm sm:leading-6 dark:text-zinc-400">
               The substrate is the host. Event records use the payloads API;
               settlement payload shape follows payload.rs (PayloadKind,
-              AuthorizedPayload). Wire packet streams use{" "}
-              <span className="font-mono">
-                …/&#123;activation&#125;/events/&#123;commitment&#125;/networks/wirepackets
+              AuthorizedPayload). The wirepackets file lives at{" "}
+              <span className="break-all font-mono">
+                {WIREPACKETS_CANONICAL}
               </span>
               . Depth objects remain ancillary display only.
             </p>
@@ -1973,7 +2093,7 @@ export default function EventStorePage() {
 
         <Panel
           title="Substrate host"
-          description="Choose the persistent substrate and activation. Payloads are loaded per event record from the render API. Wire packet streams are polled per network under the substrate commitment."
+          description="Choose the persistent substrate and activation. Payloads are loaded per event record from the render API. Wirepackets file status, payload boards, and budgets are polled for the selected activation."
           action={
             <button
               type="button"
@@ -2056,13 +2176,23 @@ export default function EventStorePage() {
               {configuredNetworkCount} / {renderedNetworks.length}
             </Field>
             <Field label="Known networks">{renderedNetworks.length}</Field>
-            <Field label="Wire packets">{wirePacketTotal}</Field>
-            <Field label="Wire stream">
+            <Field label="Wirepackets file size">
+              {loadingWire
+                ? "Loading"
+                : wireFile.count === 0
+                  ? "No file"
+                  : wireFile.complete
+                    ? formatBytes(wireFile.bytes)
+                    : "Not reported"}
+            </Field>
+            <Field label="Wirepackets status">
               {loadingWire
                 ? "Loading"
                 : Object.keys(wireStreams).length
-                  ? "Loaded"
-                  : "Empty"}
+                  ? wireFile.count > 0
+                    ? "File present"
+                    : "No file"
+                  : "Not loaded"}
             </Field>
           </dl>
 
@@ -2083,7 +2213,7 @@ export default function EventStorePage() {
 
         <Panel
           title={`Network hierarchy · activation ${activation}`}
-          description="Each network identifier is a container under the substrate host. Wire packet streams sit behind the network · activation · commitment path. transit_inputs and exile_outputs come from the API direction enum on each rendered payload."
+          description="Each network identifier is a container under the substrate host. Budgets, payload boards, and depth payloads are scoped to the selected activation and network. The wirepackets file is keyed by activation · commitment. transit_inputs and exile_outputs come from the API direction enum on each rendered payload."
           action={
             <span className="text-xs text-zinc-500 dark:text-zinc-400">
               {renderedNetworks.length} networks
@@ -2108,7 +2238,7 @@ export default function EventStorePage() {
                 const budget = networkEntry?.budget ?? null;
                 const configured = Boolean(networkEntry?.configured && budget);
 
-                const key = networkKey(activation, network.id);
+                const key = networkKey(substrate, activation, network.id);
                 const draft = drafts[key] ?? draftFromBudget(budget);
                 const saving = Boolean(savingKeys[key]);
                 const expanded = Boolean(expandedNetworks[key]);
@@ -2404,7 +2534,7 @@ export default function EventStorePage() {
         </Panel>
 
         <footer className="border-t border-zinc-200 pt-4 text-xs leading-5 text-zinc-500 dark:border-zinc-800">
-          QTM Event Store · Substrate host · Wire packet streams · Payload
+          QTM Event Store · Substrate host · Wirepackets file · Payload
           board (payload.rs) · Direction enum · Network-scoped depth ·
           Activation budgets · {API_BASE}
         </footer>
