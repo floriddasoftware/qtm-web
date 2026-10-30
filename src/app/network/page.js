@@ -8,9 +8,9 @@ const API_BASE = (
   "https://qtm-api-anwp.onrender.com"
 ).replace(/\/+$/, "");
 
-const REFRESH_INTERVAL_MS = 80000;
+const REFRESH_INTERVAL_MS = 60000;
 const SUBSTRATE_QUERY_KEY = "substrate";
-const MUTATION_HOLD_MS = 8000;
+const MUTATION_HOLD_MS = 1000;
 
 const KNOWN_OBSERVATION_KEYS = [
   "running",
