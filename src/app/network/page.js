@@ -103,6 +103,462 @@ function normalizeEntries(result, keys = []) {
   return [];
 }
 
+/* ---------- Pipeline data: wirepackets and payload board ---------- */
+
+const WIREPACKETS_READ_LIMIT = 8 * 1024 * 1024;
+const WIREPACKET_ROW_LIMIT = 100;
+const PACKET_MAGIC = "QTMGSP02";
+// Mirrors WirePacket::MIN_SIZE / MAX_SIZE in bit-miner broadcast.rs:
+// magic 8 + txid 32 + vout 4 + value 8 + script length 4 + commitment 32
+const PACKET_MIN_SIZE = 8 + 32 + 4 + 8 + 4 + 32;
+const PACKET_MAX_SIZE = 1_048_576;
+
+// Streams the stored wirepackets bytes. The route mirrors the canonical file:
+//   activations/<activation>/event/wirepackets  (no commitment segment; the
+//   commitment travels inside every packet).
+function wirepacketsFileUrl(substrate, activation) {
+  return `${API_BASE}/wallets/${encodeURIComponent(substrate)}/activations/${encodeURIComponent(String(activation))}/event/wirepackets/file`;
+}
+
+function bytesToHex(bytes) {
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    out += bytes[i].toString(16).padStart(2, "0");
+  }
+  return out;
+}
+
+function formatBytes(bytes) {
+  if (!Number.isSafeInteger(bytes) || bytes < 0) return "—";
+  const exact = `${bytes.toLocaleString("en-US")} byte${bytes === 1 ? "" : "s"}`;
+  if (bytes < 1024) return exact;
+  const units = ["KiB", "MiB", "GiB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${exact} (${value.toFixed(value >= 100 ? 0 : 2)} ${units[unit]})`;
+}
+
+// File framing written by the observation stream:
+//   [u32 big-endian length][serialized WirePacket] repeated
+function parseWireFrames(buffer) {
+  const data = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  const frames = [];
+  let offset = 0;
+  let problem = null;
+
+  while (offset < data.length) {
+    const remaining = data.length - offset;
+
+    if (remaining < 4) {
+      problem = `${remaining} trailing byte(s) at offset ${offset} are too short for a length prefix.`;
+      break;
+    }
+
+    const length = view.getUint32(offset, false);
+    const start = offset + 4;
+
+    // Same bounds TcpReceiver enforces on a frame length.
+    if (length < PACKET_MIN_SIZE || length > PACKET_MAX_SIZE) {
+      problem = `Frame ${frames.length} at offset ${offset} has invalid length ${length}.`;
+      break;
+    }
+
+    if (start + length > data.length) {
+      problem = `Frame ${frames.length} at offset ${offset} declares ${length} bytes but ${data.length - start} remain.`;
+      break;
+    }
+
+    frames.push({ index: frames.length, offset, length, start });
+    offset = start + length;
+  }
+
+  return { data, frames, problem, bytes: data.length };
+}
+
+// Mirrors WirePacket::deserialize (bit-miner broadcast.rs), QTMGSP02:
+//   magic[8] txid[32] vout u32le value u64le script_len u32le script commitment[32]
+// The txid is stored in consensus byte order; it is reversed here to match the
+// displayed Bitcoin txid. The commitment is shown as commitment_id() does:
+// plain hex of the 32 bytes.
+function decodeWirePacket(bytes) {
+  if (bytes.length < PACKET_MIN_SIZE) return { error: "wire packet too short" };
+  if (bytes.length > PACKET_MAX_SIZE) {
+    return { error: "wire packet exceeds maximum size" };
+  }
+
+  const magic = String.fromCharCode(...bytes.subarray(0, 8));
+  if (magic !== PACKET_MAGIC) return { error: "invalid wire packet magic" };
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const scriptLen = view.getUint32(52, true);
+  const remaining = bytes.length - 56;
+
+  if (remaining < 32 || scriptLen > remaining - 32) {
+    return { error: "script length exceeds packet boundary" };
+  }
+
+  if (56 + scriptLen + 32 !== bytes.length) {
+    return { error: "trailing bytes in wire packet" };
+  }
+
+  return {
+    txid: bytesToHex(bytes.slice(8, 40).reverse()),
+    vout: view.getUint32(40, true),
+    value: view.getBigUint64(44, true).toString(),
+    scriptLen,
+    commitment: bytesToHex(bytes.subarray(56 + scriptLen)),
+  };
+}
+
+function reportedBool(value) {
+  return typeof value === "boolean" ? value : null;
+}
+
+function reportedText(value) {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text.length > 0 ? text : null;
+}
+
+function parseByteCount(value) {
+  const parsed =
+    typeof value === "string" && /^\d+$/.test(value.trim())
+      ? Number(value.trim())
+      : value;
+
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function isNotFound(reason) {
+  const message = reason instanceof Error ? reason.message : String(reason ?? "");
+  return message.includes("[HTTP 404]");
+}
+
+// One call per API resource. Each result keeps its own status so one failing
+// resource never hides the others.
+async function fetchPipelineData(basePath, encodedNetwork, signal) {
+  const [status, pipelines, wirepackets, payloadBoard] =
+    await Promise.allSettled([
+      apiRequest(`${basePath}/networks/${encodedNetwork}/observation`, signal),
+      apiRequest(`${basePath}/observations`, signal),
+      apiRequest(`${basePath}/networks/${encodedNetwork}/wirepackets`, signal),
+      apiRequest(`${basePath}/networks/${encodedNetwork}/payload-board`, signal),
+    ]);
+
+  return { status, pipelines, wirepackets, payloadBoard };
+}
+
+function normalizeWirepacketsMeta(body) {
+  if (!isPlainObject(body)) return null;
+
+  const entry = Array.isArray(body.packets)
+    ? body.packets.find((item) => isPlainObject(item) && item.path)
+    : null;
+
+  return {
+    exists: body.exists === true,
+    path: reportedText(body.path),
+    file: entry
+      ? { path: String(entry.path), bytes: parseByteCount(entry.bytes) }
+      : null,
+  };
+}
+
+function normalizePayloadBoardKinds(body) {
+  const kinds = Array.isArray(body?.kinds) ? body.kinds : [];
+
+  return kinds
+    .filter((entry) => isPlainObject(entry) && entry.in_scope === true)
+    .map((entry) => ({
+      kind: reportedText(entry.kind) ?? "unknown",
+      available: entry.available === true,
+      depth_path: reportedText(entry.depth_path),
+      depth_record: reportedText(entry.depth_record),
+      depth_objects: Array.isArray(entry.depth_objects)
+        ? entry.depth_objects.filter(isPlainObject)
+        : [],
+    }));
+}
+
+function buildPipelineData(scope, results) {
+  const state = (result, allowMissing = false) =>
+    result.status === "fulfilled"
+      ? "ok"
+      : allowMissing && isNotFound(result.reason)
+        ? "unavailable"
+        : "failed";
+
+  const errors = [];
+  const labels = {
+    status: "status",
+    pipelines: "pipelines",
+    wirepackets: "wirepackets",
+    payloadBoard: "payload board",
+  };
+
+  for (const [key, label] of Object.entries(labels)) {
+    const result = results[key];
+    // 404 on status = no live observation yet.
+    if (result.status === "rejected" && !isNotFound(result.reason)) {
+      if (result.reason?.name === "AbortError") continue;
+      errors.push(
+        `${label}: ${result.reason instanceof Error ? result.reason.message : "unavailable"}`,
+      );
+    }
+  }
+
+  return {
+    scope,
+    wirepackets:
+      results.wirepackets.status === "fulfilled"
+        ? normalizeWirepacketsMeta(results.wirepackets.value)
+        : null,
+    kinds:
+      results.payloadBoard.status === "fulfilled"
+        ? normalizePayloadBoardKinds(results.payloadBoard.value)
+        : null,
+    retrieval: {
+      status: state(results.status, true),
+      pipelines: state(results.pipelines),
+      wirepackets: state(results.wirepackets),
+      payload_board: state(results.payloadBoard),
+    },
+    errors,
+  };
+}
+
+function WirepacketsFileViewer({ substrate, activation, meta }) {
+  const [state, setState] = useState({ status: "idle" });
+  const requestRef = useRef(0);
+  const url = wirepacketsFileUrl(substrate, activation);
+
+  useEffect(() => {
+    requestRef.current += 1;
+    setState({ status: "idle" });
+  }, [substrate, activation]);
+
+  const readFile = useCallback(async () => {
+    const requestId = ++requestRef.current;
+    setState({ status: "loading" });
+
+    try {
+      const response = await fetch(url, {
+        cache: "no-store",
+        headers: { Accept: "application/octet-stream" },
+      });
+
+      if (requestId !== requestRef.current) return;
+
+      if (response.status === 404) {
+        setState({
+          status: "error",
+          message: "No wirepackets file exists at the canonical path yet.",
+        });
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(`The API returned HTTP ${response.status} for the wirepackets file.`);
+      }
+
+      const buffer = await response.arrayBuffer();
+      if (requestId !== requestRef.current) return;
+
+      if (buffer.byteLength > WIREPACKETS_READ_LIMIT) {
+        setState({
+          status: "error",
+          message: `The file is ${formatBytes(buffer.byteLength)}, over the in-page read limit. Use Download.`,
+        });
+        return;
+      }
+
+      const parsed = parseWireFrames(buffer);
+      const packets = parsed.frames.map((frame) => ({
+        ...frame,
+        packet: decodeWirePacket(
+          parsed.data.subarray(frame.start, frame.start + frame.length),
+        ),
+      }));
+
+      setState({
+        status: "ready",
+        readAt: new Date(),
+        bytes: parsed.bytes,
+        problem: parsed.problem,
+        packets,
+      });
+    } catch (cause) {
+      if (requestId !== requestRef.current) return;
+      setState({
+        status: "error",
+        message:
+          cause instanceof Error && cause.message
+            ? cause.message
+            : "Unable to read the wirepackets file.",
+      });
+    }
+  }, [url]);
+
+  const ready = state.status === "ready";
+
+  // Everything shown comes from the packets: each one carries its outpoint,
+  // value, script and commitment.
+  const decoded = ready
+    ? state.packets.filter((item) => !item.packet.error)
+    : [];
+  const txidCount = new Set(decoded.map((item) => item.packet.txid)).size;
+  const commitmentIds = [...new Set(decoded.map((item) => item.packet.commitment))];
+  const rows = ready
+    ? state.packets.slice(0, WIREPACKET_ROW_LIMIT).map((item) => ({
+        "#": item.index,
+        txid: item.packet.txid ?? "—",
+        vout: item.packet.vout ?? "—",
+        value_sats: item.packet.value ?? "—",
+        script_bytes: item.packet.scriptLen ?? "—",
+        commitment_id: item.packet.commitment ?? "—",
+        problem: item.packet.error ?? "",
+      }))
+    : [];
+
+  return (
+    <div className="min-w-0 space-y-2">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <button
+          type="button"
+          className={BUTTON}
+          disabled={!meta?.exists || state.status === "loading"}
+          onClick={readFile}
+        >
+          {state.status === "loading" ? "Reading…" : ready ? "Read again" : "Read packets"}
+        </button>
+        {meta?.exists && (
+          <a className={BUTTON} href={url} download target="_blank" rel="noopener noreferrer">
+            Open file
+          </a>
+        )}
+      </div>
+
+      {state.status === "error" && <ErrorMessage>{state.message}</ErrorMessage>}
+
+      {ready && (
+        <>
+          <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-6">
+            <CompactValue label="Bytes read" value={formatBytes(state.bytes)} />
+            <CompactValue label="Packets" value={state.packets.length} />
+            <CompactValue label="Transactions" value={txidCount} />
+            <CompactValue
+              label="Commitments"
+              value={
+                commitmentIds.length === 1 ? "1 (consistent)" : commitmentIds.length
+              }
+            />
+            <CompactValue label="Framing" value={state.problem ? "invalid" : "valid"} />
+            <CompactValue label="Read at" value={state.readAt.toLocaleTimeString()} />
+          </div>
+          {state.problem && <ErrorMessage>{state.problem}</ErrorMessage>}
+          <ObjectTable
+            rows={rows}
+            columns={["#", "txid", "vout", "value_sats", "script_bytes", "commitment_id", "problem"]}
+          />
+          {state.packets.length > WIREPACKET_ROW_LIMIT && (
+            <p className={`text-[10px] ${MUTED}`}>
+              Showing the first {WIREPACKET_ROW_LIMIT} of {state.packets.length} packets. Use Open file for the rest.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function PipelineDataPanel({ data, substrate, activation }) {
+  const meta = data.wirepackets;
+  const retrieval = data.retrieval;
+
+  return (
+    <div className="min-w-0 space-y-3 border-t border-zinc-200 p-2 dark:border-zinc-800 sm:p-2.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {Object.entries(retrieval).map(([key, value]) => (
+          <DiagnosticBadge key={key} status={value === "ok" ? "live" : "unknown"}>
+            {humanizeKey(key)}: {value}
+          </DiagnosticBadge>
+        ))}
+      </div>
+
+      {data.errors.length > 0 && (
+        <ErrorMessage>{data.errors.join(" | ")}</ErrorMessage>
+      )}
+
+      {/* Persisted wirepackets file */}
+      <section className="min-w-0">
+        <h3 className="text-xs font-semibold sm:text-sm">Wirepackets file</h3>
+        {!meta ? (
+          <p className={`mt-1 text-xs ${MUTED}`}>Wirepackets metadata is unavailable.</p>
+        ) : (
+          <div className="mt-1 min-w-0 space-y-2">
+            <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
+              <CompactValue label="File present" value={meta.exists} />
+              <CompactValue
+                label="Size"
+                value={meta.exists && meta.file ? formatBytes(meta.file.bytes) : "No file"}
+              />
+              <CompactValue label="Route" value="…/event/wirepackets/file" mono />
+            </div>
+            <p className={`break-all font-mono text-[10px] ${MUTED}`}>
+              {displayValue(meta.file?.path ?? meta.path)}
+            </p>
+            <WirepacketsFileViewer
+              substrate={substrate}
+              activation={activation}
+              meta={meta}
+            />
+          </div>
+        )}
+      </section>
+
+      {/* Network-scoped payload board with persisted depth objects */}
+      <section className="min-w-0">
+        <h3 className="text-xs font-semibold sm:text-sm">Payload board · depth objects</h3>
+        {data.kinds === null ? (
+          <p className={`mt-1 text-xs ${MUTED}`}>Payload board is unavailable.</p>
+        ) : data.kinds.length === 0 ? (
+          <p className={`mt-1 text-xs ${MUTED}`}>
+            No in-scope payload kind is reported for this network.
+          </p>
+        ) : (
+          data.kinds.map((entry) => (
+            <div
+              key={entry.kind}
+              className="mt-2 min-w-0 space-y-2 rounded-lg border border-zinc-200 p-2 dark:border-zinc-800"
+            >
+              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+                <CompactValue label="Kind" value={entry.kind} />
+                <CompactValue label="Network registered" value={entry.available} />
+                <CompactValue label="Depth record" value={entry.depth_record} mono />
+                <CompactValue label="Depth objects" value={entry.depth_objects.length} />
+              </div>
+              <p className={`break-all font-mono text-[10px] ${MUTED}`}>
+                {displayValue(entry.depth_path)}
+              </p>
+              {entry.depth_objects.length > 0 && (
+                <ObjectTable
+                  rows={entry.depth_objects}
+                  columns={["position", "identifier", "mass", "from"]}
+                />
+              )}
+            </div>
+          ))
+        )}
+      </section>
+    </div>
+  );
+}
+
 function displayValue(value) {
   if (value === null || value === undefined || value === "") return "—";
   if (typeof value === "boolean") return value ? "yes" : "no";
@@ -452,6 +908,7 @@ export default function NetworkPage() {
   const [observationActionLoading, setObservationActionLoading] = useState(false);
   const [observationError, setObservationError] = useState("");
   const [lastObservationCheck, setLastObservationCheck] = useState(null);
+  const [pipelineData, setPipelineData] = useState(null);
 
   const [networkLoading, setNetworkLoading] = useState(true);
   const [substrateLoading, setSubstrateLoading] = useState(true);
@@ -522,6 +979,7 @@ export default function NetworkPage() {
     setObservationScope(scope);
     setObservation(null);
     setObservationList([]);
+    setPipelineData(null);
     setObservationStale(false);
     setObservationNotice("");
   }, []);
@@ -833,13 +1291,13 @@ export default function NetworkPage() {
       const basePath = `/wallets/${encodedName}/activations/${activation}`;
 
       try {
-        const [statusResult, listResult] = await Promise.allSettled([
-          apiRequest(
-            `${basePath}/networks/${encodedNetwork}/observation`,
-            controller.signal,
-          ),
-          apiRequest(`${basePath}/observations`, controller.signal),
-        ]);
+        const results = await fetchPipelineData(
+          basePath,
+          encodedNetwork,
+          controller.signal,
+        );
+        const statusResult = results.status;
+        const listResult = results.pipelines;
 
         if (!isCurrent()) return;
 
@@ -852,6 +1310,8 @@ export default function NetworkPage() {
           listResult.reason?.name === "AbortError";
 
         if (statusAborted || listAborted) return;
+
+        setPipelineData(buildPipelineData(contextKey, results));
 
         if (listResult.status === "fulfilled") {
           setObservationList(
@@ -941,6 +1401,7 @@ export default function NetworkPage() {
     claimObservationScope(scope);
     setObservationActionLoading(true);
     setObservationError("");
+    setObservationNotice("Starting pipeline");
 
     const stillSameScope = () =>
       mutationVersion === observationMutationRef.current &&
@@ -949,35 +1410,68 @@ export default function NetworkPage() {
       selectedPathRef.current === pathId;
 
     try {
-      const encodedName = encodeURIComponent(name);
+      const basePath = `/wallets/${encodeURIComponent(name)}/activations/${activation}`;
       const encodedNetwork = encodeURIComponent(networkId);
-      const basePath =
-        `/wallets/${encodedName}/activations/${activation}` +
-        `/networks/${encodedNetwork}/observation`;
 
-      const started = await apiRequest(basePath, undefined, {
-        method: "POST",
-        body: pathHint ? { path: pathHint } : {},
-      });
+      // 1. POST …/networks/:network/observation → start_bitcoin_observation.
+      //    Starts (or joins) the single stream owned by the stream manager for
+      //    this substrate · activation.
+      const started = await apiRequest(
+        `${basePath}/networks/${encodedNetwork}/observation`,
+        undefined,
+        { method: "POST", body: pathHint ? { path: pathHint } : {} },
+      );
 
       if (!stillSameScope()) return;
 
-      const hasBody = isPlainObject(started) && Object.keys(started).length > 0;
-      const payload = hasBody
-        ? started
-        : {
-            message: "Start request accepted (empty response body).",
-            ...(pathHint ? { path: pathHint } : {}),
-          };
+      if (!isPlainObject(started) || started.running !== true) {
+        throw new Error(
+          started?.message ||
+            "The API did not confirm that the observation stream is running.",
+        );
+      }
 
-      commitObservation(scope, payload);
+      // The start itself succeeded. Show it before the follow-up reads.
+      commitObservation(scope, started);
       setObservationStale(false);
-      setObservationNotice("Start accepted");
+      setObservationNotice("Reading pipeline data");
 
-      observationHoldRef.current =
-        payload.running === false
-          ? { scope: "", until: 0, running: false }
-          : { scope, until: Date.now() + MUTATION_HOLD_MS, running: true };
+      // 2. Read everything the API currently has: status, activation
+      //    pipelines, wirepackets metadata and the payload board (depth
+      //    objects). The stream works asynchronously, so an empty result right
+      //    after start is normal.
+      const results = await fetchPipelineData(basePath, encodedNetwork);
+
+      if (!stillSameScope()) return;
+
+      const status =
+        results.status.status === "fulfilled" && isPlainObject(results.status.value)
+          ? results.status.value
+          : null;
+
+      commitObservation(scope, status ? { ...started, ...status } : started);
+
+      if (results.pipelines.status === "fulfilled") {
+        setObservationList(
+          normalizeEntries(results.pipelines.value, ["pipelines", "observations"]),
+        );
+      }
+
+      const data = buildPipelineData(scope, results);
+      setPipelineData(data);
+
+      setObservationStale(false);
+      setObservationNotice(
+        data.errors.length
+          ? "Pipeline running · some data unavailable"
+          : "Pipeline running · data retrieved",
+      );
+
+      observationHoldRef.current = {
+        scope,
+        until: Date.now() + MUTATION_HOLD_MS,
+        running: true,
+      };
 
       setLastObservationCheck(new Date());
     } catch (error) {
@@ -986,6 +1480,7 @@ export default function NetworkPage() {
       setObservationError(
         error instanceof Error ? error.message : "Unable to start observation.",
       );
+      setObservationNotice("");
     } finally {
       if (mutationVersion === observationMutationRef.current) {
         setObservationActionLoading(false);
@@ -1252,11 +1747,21 @@ export default function NetworkPage() {
 
   const scopedObservation = scopeMatches ? observation : null;
   const scopedObservationList = scopeMatches ? observationList : [];
+  const scopedPipelineData =
+    pipelineData && pipelineData.scope === currentScopeKey ? pipelineData : null;
 
   const observationListRows = scopedObservationList.map((row) => {
     if (!isPlainObject(row)) return row;
-    const { commitment: _domainCommitment, event: _event, ...rest } = row;
-    return rest;
+    // listen_port is derived from the commitment (listen_port_from_commitment);
+    // it is labelled as such and is not evidence of a bound listener.
+    const {
+      commitment: _domainCommitment,
+      event: _event,
+      listen_port: derivedPort,
+      message: _message,
+      ...rest
+    } = row;
+    return { network: rest.network, derived_port: derivedPort, ...rest };
   });
 
   const observationRunning = Boolean(scopedObservation?.running);
@@ -1578,8 +2083,13 @@ export default function NetworkPage() {
 
           {scopedObservation && (
             <div className="min-w-0 space-y-2 border-t border-zinc-200 p-2 dark:border-zinc-800 sm:p-2.5">
-              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-5">
                 <CompactValue label="Running" value={scopedObservation.running ? "yes" : "no"} />
+                <CompactValue
+                  label="Derived port"
+                  value={scopedObservation.listen_port}
+                  title="Derived from the substrate commitment; not a bound listener"
+                />
                 <CompactValue label="Path hint" value={scopedObservation.path} />
                 <CompactValue
                   label="Runtime"
@@ -1587,6 +2097,15 @@ export default function NetworkPage() {
                 />
                 <CompactValue label="Clips" value={observationClips.length} />
               </div>
+
+              {scopedObservation.listen_port !== undefined && (
+                <p className={`text-[10px] leading-4 ${MUTED}`}>
+                  Derived port {displayValue(scopedObservation.listen_port)} comes from
+                  listen_port_from_commitment() over the commitment bytes that travel with
+                  the wire packets. The stream is a Mempool.space WebSocket; the API does
+                  not report a bound listener on this port.
+                </p>
+              )}
 
               {hasExtraObservationFields && (
                 <details className="min-w-0 rounded-lg border border-zinc-200 dark:border-zinc-800">
@@ -1620,6 +2139,14 @@ export default function NetworkPage() {
                 <ObjectTable rows={observationListRows} columns={["network", "listen_port", "running", "path"]} />
               </div>
             </div>
+          )}
+
+          {scopedPipelineData && (
+            <PipelineDataPanel
+              data={scopedPipelineData}
+              substrate={selectedSubstrate}
+              activation={selectedActivation}
+            />
           )}
 
           {observationHasNetworkContext && !scopedObservation && !observationLoading && !observationActionLoading && !observationError && (
