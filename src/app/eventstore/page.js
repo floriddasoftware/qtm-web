@@ -400,17 +400,18 @@ function normalizeWireStream(body, name, activationValue, networkId) {
   }
 
   return {
-  substrate: body?.substrate ?? name,
-  activation: reportedActivation,
-  network: body?.network ?? networkId,
-  path,
-  exists,
-  file,
-  canonical:
-    path !== null &&
-    isCanonicalWirepacketsPath(path, reportedActivation),
-  error,
-};
+    substrate: body?.substrate ?? name,
+    activation: reportedActivation,
+    network: body?.network ?? networkId,
+    path,
+    exists,
+    file,
+    canonical:
+      path !== null &&
+      isCanonicalWirepacketsPath(path, reportedActivation),
+    error,
+  };
+}
 
 /**
  * Map GET .../payload-board to display rows.
@@ -1515,7 +1516,6 @@ export default function EventStorePage() {
     },
     [],
   );
-
 
   /**
    * Payload board for listeners — payload.rs model only.
