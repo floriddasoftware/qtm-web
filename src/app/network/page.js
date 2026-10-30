@@ -13,15 +13,16 @@ const SUBSTRATE_QUERY_KEY = "substrate";
 const MUTATION_HOLD_MS = 1000;
 
 const KNOWN_OBSERVATION_KEYS = [
+  "substrate",
+  "activation",
+  "network",
   "running",
-  "commitment",
-  "listen_port",
+  "pid",
   "path",
-  "message",
-  "runtime",
   "clips",
-  "event",
-  "submissions",
+  "runtime",
+  "already_running",
+  "message",
 ];
 
 const BUTTON =
@@ -1386,7 +1387,9 @@ export default function NetworkPage() {
     const pathId = selectedPathRef.current;
     const networkId = selectedNetworkId;
 
-    const pathHint = selectedNetwork ? getPathIdentifier(selectedNetwork) : pathId;
+    const pathHint = selectedNetwork
+      ? getPathIdentifier(selectedNetwork)
+      : pathId;
 
     if (!name || !networkId) return;
 
@@ -1402,7 +1405,7 @@ export default function NetworkPage() {
     claimObservationScope(scope);
     setObservationActionLoading(true);
     setObservationError("");
-    setObservationNotice("Starting pipeline");
+    setObservationNotice("Starting bit-miner");
 
     const stillSameScope = () =>
       mutationVersion === observationMutationRef.current &&
@@ -1410,77 +1413,138 @@ export default function NetworkPage() {
       selectedActivationRef.current === activation &&
       selectedPathRef.current === pathId;
 
-    try {
-      const basePath = `/wallets/${encodeURIComponent(name)}/activations/${activation}`;
-      const encodedNetwork = encodeURIComponent(networkId);
+    const basePath =
+      `/wallets/${encodeURIComponent(name)}/activations/${activation}`;
 
-      // 1. POST …/networks/:network/observation → start_bitcoin_observation.
-      //    Starts (or joins) the single stream owned by the stream manager for
-      //    this substrate · activation.
+    const encodedNetwork = encodeURIComponent(networkId);
+
+    try {
+      // 1. POST …/networks/:network/observation → start_bitminer.
+      //    Response: { pid, already_running, message }. It does NOT carry
+      //    `running`, so it is only an acceptance, not proof of liveness.
       const started = await apiRequest(
         `${basePath}/networks/${encodedNetwork}/observation`,
         undefined,
-        { method: "POST", body: pathHint ? { path: pathHint } : {} },
+        {
+          method: "POST",
+          body: pathHint ? { path: pathHint } : {},
+        },
       );
 
       if (!stillSameScope()) return;
 
-      if (!isPlainObject(started) || started.running !== true) {
+      const accepted =
+        isPlainObject(started) &&
+        (
+          started.already_running === true ||
+          (
+            Number.isInteger(started.pid) &&
+            started.pid > 0
+          )
+        );
+
+      if (!accepted) {
         throw new Error(
           started?.message ||
-            "The API did not confirm that the observation stream is running.",
+            "The API did not confirm that bit-miner was started.",
         );
       }
 
-      // The start itself succeeded. Show it before the follow-up reads.
-      commitObservation(scope, started);
-      setObservationStale(false);
-      setObservationNotice("Reading pipeline data");
+      // Keep the POST response, but leave `running` unconfirmed until GET
+      // status says otherwise.
+      const acceptedState = {
+        ...started,
+        substrate: name,
+        activation,
+        network: networkId,
+        running: null,
+        path: pathHint || null,
+        clips: [],
+      };
 
-      // 2. Read everything the API currently has: status, activation
-      //    pipelines, wirepackets metadata and the payload board (depth
-      //    objects). The stream works asynchronously, so an empty result right
-      //    after start is normal.
-      const results = await fetchPipelineData(basePath, encodedNetwork);
+      commitObservation(scope, acceptedState);
+      setObservationStale(false);
+      setObservationNotice("Process accepted · checking status");
+
+      // 2. GET status (plus pipelines, wirepackets, payload board) to verify
+      //    the process is actually alive.
+      const results = await fetchPipelineData(
+        basePath,
+        encodedNetwork,
+      );
 
       if (!stillSameScope()) return;
 
       const status =
-        results.status.status === "fulfilled" && isPlainObject(results.status.value)
+        results.status.status === "fulfilled" &&
+        isPlainObject(results.status.value)
           ? results.status.value
           : null;
 
-      commitObservation(scope, status ? { ...started, ...status } : started);
+      const finalObservation = status
+        ? {
+            ...acceptedState,
+            ...status,
+            path: status.path || acceptedState.path,
+          }
+        : acceptedState;
+
+      commitObservation(scope, finalObservation);
 
       if (results.pipelines.status === "fulfilled") {
         setObservationList(
-          normalizeEntries(results.pipelines.value, ["pipelines", "observations"]),
+          normalizeEntries(
+            results.pipelines.value,
+            ["pipelines", "observations"],
+          ),
         );
       }
 
       const data = buildPipelineData(scope, results);
       setPipelineData(data);
 
-      setObservationStale(false);
-      setObservationNotice(
-        data.errors.length
-          ? "Pipeline running · some data unavailable"
-          : "Pipeline running · data retrieved",
-      );
+      if (status?.running === true) {
+        setObservationNotice(
+          data.errors.length
+            ? "Bit-miner running · some data unavailable"
+            : "Bit-miner running · status confirmed",
+        );
+
+        setObservationError("");
+      } else if (status?.running === false) {
+        setObservationNotice("Process exited · not running");
+
+        setObservationError(
+          "The API accepted the launch, but bit-miner is no longer running. Check the qtm-api process logs for the miner's startup error.",
+        );
+      } else {
+        setObservationNotice("Launch accepted · status unavailable");
+
+        setObservationError(
+          results.status.status === "rejected"
+            ? results.status.reason?.message ||
+                "Unable to verify the bit-miner process."
+            : "The API did not return a valid process status.",
+        );
+      }
 
       observationHoldRef.current = {
         scope,
         until: Date.now() + MUTATION_HOLD_MS,
-        running: true,
+        running: status?.running === true,
       };
 
+      setObservationStale(false);
       setLastObservationCheck(new Date());
     } catch (error) {
       if (error?.name === "AbortError" || !stillSameScope()) return;
 
       setObservationError(
-        error instanceof Error ? error.message : "Unable to start observation.",
+        error instanceof Error
+          ? error.message
+          : "Unable to start bit-miner.",
       );
+
       setObservationNotice("");
     } finally {
       if (mutationVersion === observationMutationRef.current) {
@@ -1493,76 +1557,6 @@ export default function NetworkPage() {
     claimObservationScope,
     commitObservation,
   ]);
-
-  const stopObservation = useCallback(async () => {
-    const name = selectedSubstrateRef.current;
-    const activation = selectedActivationRef.current;
-    const pathId = selectedPathRef.current;
-    const networkId = selectedNetworkId;
-
-    if (!name || !networkId) return;
-
-    const scope = buildScopeKey(name, activation, networkId, pathId);
-
-    observationMutationRef.current += 1;
-    const mutationVersion = observationMutationRef.current;
-
-    observationRequestRef.current?.abort();
-    observationRequestIdRef.current += 1;
-
-    setObservationLoading(false);
-    claimObservationScope(scope);
-    setObservationActionLoading(true);
-    setObservationError("");
-
-    const stillSameScope = () =>
-      mutationVersion === observationMutationRef.current &&
-      selectedSubstrateRef.current === name &&
-      selectedActivationRef.current === activation &&
-      selectedPathRef.current === pathId;
-
-    try {
-      const encodedName = encodeURIComponent(name);
-      const encodedNetwork = encodeURIComponent(networkId);
-      const basePath =
-        `/wallets/${encodedName}/activations/${activation}` +
-        `/networks/${encodedNetwork}/observation`;
-
-      const stopped = await apiRequest(basePath, undefined, {
-        method: "DELETE",
-      });
-
-      if (!stillSameScope()) return;
-
-      const payload = {
-        ...(isPlainObject(stopped) ? stopped : {}),
-        running: false,
-      };
-
-      if (!payload.message) payload.message = "Stop request accepted.";
-
-      commitObservation(scope, payload);
-      setObservationList([]);
-      setObservationStale(false);
-      setObservationNotice("Stop accepted");
-      observationHoldRef.current = {
-        scope,
-        until: Date.now() + MUTATION_HOLD_MS,
-        running: false,
-      };
-      setLastObservationCheck(new Date());
-    } catch (error) {
-      if (error?.name === "AbortError" || !stillSameScope()) return;
-
-      setObservationError(
-        error instanceof Error ? error.message : "Unable to stop observation.",
-      );
-    } finally {
-      if (mutationVersion === observationMutationRef.current) {
-        setObservationActionLoading(false);
-      }
-    }
-  }, [selectedNetworkId, claimObservationScope, commitObservation]);
 
   useEffect(() => {
     loadNetworks();
@@ -1751,31 +1745,21 @@ export default function NetworkPage() {
   const scopedPipelineData =
     pipelineData && pipelineData.scope === currentScopeKey ? pipelineData : null;
 
-  const observationListRows = scopedObservationList.map((row) => {
-    if (!isPlainObject(row)) return row;
-    // listen_port is derived from the commitment (listen_port_from_commitment);
-    // it is labelled as such and is not evidence of a bound listener.
-    const {
-      commitment: _domainCommitment,
-      event: _event,
-      listen_port: derivedPort,
-      message: _message,
-      ...rest
-    } = row;
-    return { network: rest.network, derived_port: derivedPort, ...rest };
-  });
+  const observationListRows = scopedObservationList;
 
-  const observationRunning = Boolean(scopedObservation?.running);
+  const observationRunning = scopedObservation?.running === true;
 
   const observationBadge = observationError
     ? { status: "error", label: "Error" }
-    : observationRunning
+    : scopedObservation?.running === true
       ? { status: "running", label: "Running" }
-      : observationLoading && !scopedObservation
-        ? { status: "checking", label: "Checking" }
-        : scopedObservation
-          ? { status: "live", label: "Idle" }
-          : { status: "unknown", label: "Not started" };
+      : scopedObservation?.running === false
+        ? { status: "live", label: "Stopped" }
+        : observationLoading
+          ? { status: "checking", label: "Checking" }
+          : scopedObservation
+            ? { status: "unknown", label: "Status unavailable" }
+            : { status: "unknown", label: "Not started" };
 
   const observationClips = Array.isArray(scopedObservation?.clips)
     ? scopedObservation.clips
@@ -1847,15 +1831,7 @@ return (
                   : "Substrate not confirmed"}
           </DiagnosticBadge>
           <DiagnosticBadge status={observationBadge.status}>
-            {observationBadge.status === "running"
-              ? "Observation running"
-              : observationBadge.status === "checking"
-                ? "Observation checking"
-                : observationBadge.status === "error"
-                  ? "Observation error"
-                  : observationBadge.status === "live"
-                    ? "Observation idle"
-                    : "Observation not started"}
+            {`Observation ${observationBadge.label.toLowerCase()}`}
           </DiagnosticBadge>
         </div>
 
@@ -2060,23 +2036,26 @@ return (
               <button
                 type="button"
                 onClick={startObservation}
-                disabled={!selectedSubstrate || !selectedNetworkId || observationActionLoading || observationRunning}
+                disabled={
+                  !selectedSubstrate ||
+                  !selectedNetworkId ||
+                  observationActionLoading ||
+                  observationRunning
+                }
                 className={BUTTON_PRIMARY}
               >
-                {observationActionLoading && !observationRunning ? "Starting…" : "Start"}
+                {observationActionLoading ? "Starting…" : "Start"}
               </button>
-              <button
-                type="button"
-                onClick={stopObservation}
-                disabled={!selectedSubstrate || !selectedNetworkId || observationActionLoading || !observationRunning}
-                className={BUTTON}
-              >
-                {observationActionLoading && observationRunning ? "Stopping…" : "Stop"}
-              </button>
+
               <button
                 type="button"
                 onClick={() => loadObservation()}
-                disabled={!selectedSubstrate || !selectedNetworkId || observationLoading || observationActionLoading}
+                disabled={
+                  !selectedSubstrate ||
+                  !selectedNetworkId ||
+                  observationLoading ||
+                  observationActionLoading
+                }
                 className={BUTTON}
               >
                 Refresh status
@@ -2112,51 +2091,48 @@ return (
 
         {scopedObservation && (
           <div className="min-w-0 space-y-2 border-t border-zinc-200 p-2 dark:border-zinc-800 sm:p-2.5">
-            <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-6">
+            <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-5">
               <CompactValue
                 label="Running"
-                value={scopedObservation.running ? "yes" : "no"}
-              />
-              <CompactValue
-                label="Miner submissions"
                 value={
-                  Number.isSafeInteger(scopedObservation.submissions)
-                    ? scopedObservation.submissions.toLocaleString()
-                    : "—"
+                  scopedObservation.running === true
+                    ? "yes"
+                    : scopedObservation.running === false
+                      ? "no"
+                      : "unconfirmed"
                 }
-                title="Live pipeline.miner.submissions supplied by qtm-api"
               />
+
               <CompactValue
-                label="Derived port"
-                value={scopedObservation.listen_port}
-                title="Derived from the substrate commitment; not a bound listener"
+                label="PID"
+                value={scopedObservation.pid ?? "—"}
               />
-              <CompactValue label="Path hint" value={scopedObservation.path} />
+
+              <CompactValue
+                label="Path hint"
+                value={
+                  scopedObservation.path ||
+                  selectedPath ||
+                  "—"
+                }
+              />
+
               <CompactValue
                 label="Runtime"
                 value={
                   scopedObservation.runtime?.unix_seconds !== undefined
-                    ? formatTimestamp(scopedObservation.runtime.unix_seconds)
+                    ? formatTimestamp(
+                        scopedObservation.runtime.unix_seconds,
+                      )
                     : "—"
                 }
               />
-              <CompactValue label="Clips" value={observationClips.length} />
+
+              <CompactValue
+                label="Clips"
+                value={observationClips.length}
+              />
             </div>
-
-            <p className={`text-[10px] leading-4 ${MUTED}`}>
-              Miner submissions is the live counter returned by the shared
-              pipeline for this substrate and activation. It is not calculated
-              from observed transactions or finalized settlements.
-            </p>
-
-            {scopedObservation.listen_port !== undefined && (
-              <p className={`text-[10px] leading-4 ${MUTED}`}>
-                Derived port {displayValue(scopedObservation.listen_port)} comes from
-                listen_port_from_commitment() over the commitment bytes that travel with
-                the wire packets. The stream is a Mempool.space WebSocket; the API does
-                not report a bound listener on this port.
-              </p>
-            )}
 
             {hasExtraObservationFields && (
               <details className="min-w-0 rounded-lg border border-zinc-200 dark:border-zinc-800">
@@ -2199,7 +2175,7 @@ return (
             <div className="min-w-0 px-3 pb-2 sm:px-4">
               <ObjectTable
                 rows={observationListRows}
-                columns={["network", "submissions", "listen_port", "running", "path"]}
+                columns={["network", "running", "pid", "path"]}
               />
             </div>
           </div>
