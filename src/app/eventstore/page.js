@@ -177,13 +177,13 @@ function formatBytes(bytes) {
   return `${exact} (${value.toFixed(value >= 100 ? 0 : 2)} ${units[unit]})`;
 }
 
-// True when the API-reported path ends with the canonical shape for this
-// activation + commitment. Separators are normalized so Windows hosts match.
-function isCanonicalWirepacketsPath(path, activation, commitment) {
-  if (typeof path !== "string" || !commitment) return false;
+function isCanonicalWirepacketsPath(path, activation) {
+  if (typeof path !== "string") return false;
+
   const normalized = path.replace(/\\/g, "/");
+
   return normalized.endsWith(
-    `/activations/${activation}/event/${commitment}/wirepackets`,
+    `/activations/${activation}/event/wirepackets`,
   );
 }
 
@@ -400,19 +400,17 @@ function normalizeWireStream(body, name, activationValue, networkId) {
   }
 
   return {
-    substrate: body?.substrate ?? name,
-    activation: reportedActivation,
-    network: body?.network ?? networkId,
-    commitment,
-    path,
-    exists,
-    file,
-    canonical:
-      path !== null &&
-      isCanonicalWirepacketsPath(path, reportedActivation, commitment),
-    error,
-  };
-}
+  substrate: body?.substrate ?? name,
+  activation: reportedActivation,
+  network: body?.network ?? networkId,
+  path,
+  exists,
+  file,
+  canonical:
+    path !== null &&
+    isCanonicalWirepacketsPath(path, reportedActivation),
+  error,
+};
 
 /**
  * Map GET .../payload-board to display rows.
