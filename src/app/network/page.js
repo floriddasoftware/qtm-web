@@ -10,7 +10,7 @@ const API_BASE = (
 
 const REFRESH_INTERVAL_MS = 60000;
 const SUBSTRATE_QUERY_KEY = "substrate";
-const MUTATION_HOLD_MS = 1000;
+const MUTATION_HOLD_MS = 8000;
 
 const KNOWN_OBSERVATION_KEYS = [
   "substrate",
@@ -105,350 +105,19 @@ function normalizeEntries(result, keys = []) {
   return [];
 }
 
-
-
-function reportedBool(value) {
-  return typeof value === "boolean" ? value : null;
-}
-
-function reportedText(value) {
-  if (value === undefined || value === null) return null;
-  const text = String(value).trim();
-  return text.length > 0 ? text : null;
-}
-
-function parseByteCount(value) {
-  const parsed =
-    typeof value === "string" && /^\d+$/.test(value.trim())
-      ? Number(value.trim())
-      : value;
-
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
-}
-
-function isNotFound(reason) {
-  const message = reason instanceof Error ? reason.message : String(reason ?? "");
-  return message.includes("[HTTP 404]");
-}
+/* ---------- Observation data ---------- */
 
 // One call per API resource. Each result keeps its own status so one failing
-// resource never hides the others.
-async function fetchPipelineData(basePath, encodedNetwork, signal) {
-  const [status, pipelines, wirepackets, payloadBoard] =
-    await Promise.allSettled([
-      apiRequest(`${basePath}/networks/${encodedNetwork}/observation`, signal),
-      apiRequest(`${basePath}/observations`, signal),
-      apiRequest(`${basePath}/networks/${encodedNetwork}/wirepackets`, signal),
-      apiRequest(`${basePath}/networks/${encodedNetwork}/payload-board`, signal),
-    ]);
+// resource never hides the other.
+//   status    → GET …/networks/:network/observation  (running, pid, path, clips, runtime)
+//   pipelines → GET …/observations                   (activation observation list)
+async function fetchObservationData(basePath, encodedNetwork, signal) {
+  const [status, pipelines] = await Promise.allSettled([
+    apiRequest(`${basePath}/networks/${encodedNetwork}/observation`, signal),
+    apiRequest(`${basePath}/observations`, signal),
+  ]);
 
-  return { status, pipelines, wirepackets, payloadBoard };
-}
-
-function normalizeWirepacketsMeta(body) {
-  if (!isPlainObject(body)) return null;
-
-  const entry = Array.isArray(body.packets)
-    ? body.packets.find((item) => isPlainObject(item) && item.path)
-    : null;
-
-  return {
-    exists: body.exists === true,
-    path: reportedText(body.path),
-    file: entry
-      ? { path: String(entry.path), bytes: parseByteCount(entry.bytes) }
-      : null,
-  };
-}
-
-function normalizePayloadBoardKinds(body) {
-  const kinds = Array.isArray(body?.kinds) ? body.kinds : [];
-
-  return kinds
-    .filter((entry) => isPlainObject(entry) && entry.in_scope === true)
-    .map((entry) => ({
-      kind: reportedText(entry.kind) ?? "unknown",
-      available: entry.available === true,
-      depth_path: reportedText(entry.depth_path),
-      depth_record: reportedText(entry.depth_record),
-      depth_objects: Array.isArray(entry.depth_objects)
-        ? entry.depth_objects.filter(isPlainObject)
-        : [],
-    }));
-}
-
-function buildPipelineData(scope, results) {
-  const state = (result, allowMissing = false) =>
-    result.status === "fulfilled"
-      ? "ok"
-      : allowMissing && isNotFound(result.reason)
-        ? "unavailable"
-        : "failed";
-
-  const errors = [];
-  const labels = {
-    status: "status",
-    pipelines: "pipelines",
-    wirepackets: "wirepackets",
-    payloadBoard: "payload board",
-  };
-
-  for (const [key, label] of Object.entries(labels)) {
-    const result = results[key];
-    // 404 on status = no live observation yet.
-    if (result.status === "rejected" && !isNotFound(result.reason)) {
-      if (result.reason?.name === "AbortError") continue;
-      errors.push(
-        `${label}: ${result.reason instanceof Error ? result.reason.message : "unavailable"}`,
-      );
-    }
-  }
-
-  return {
-    scope,
-    wirepackets:
-      results.wirepackets.status === "fulfilled"
-        ? normalizeWirepacketsMeta(results.wirepackets.value)
-        : null,
-    kinds:
-      results.payloadBoard.status === "fulfilled"
-        ? normalizePayloadBoardKinds(results.payloadBoard.value)
-        : null,
-    retrieval: {
-      status: state(results.status, true),
-      pipelines: state(results.pipelines),
-      wirepackets: state(results.wirepackets),
-      payload_board: state(results.payloadBoard),
-    },
-    errors,
-  };
-}
-
-function WirepacketsFileViewer({ substrate, activation, meta }) {
-  const [state, setState] = useState({ status: "idle" });
-  const requestRef = useRef(0);
-  const url = wirepacketsFileUrl(substrate, activation);
-
-  useEffect(() => {
-    requestRef.current += 1;
-    setState({ status: "idle" });
-  }, [substrate, activation]);
-
-  const readFile = useCallback(async () => {
-    const requestId = ++requestRef.current;
-    setState({ status: "loading" });
-
-    try {
-      const response = await fetch(url, {
-        cache: "no-store",
-        headers: { Accept: "application/octet-stream" },
-      });
-
-      if (requestId !== requestRef.current) return;
-
-      if (response.status === 404) {
-        setState({
-          status: "error",
-          message: "No wirepackets file exists at the canonical path yet.",
-        });
-        return;
-      }
-
-      if (!response.ok) {
-        throw new Error(`The API returned HTTP ${response.status} for the wirepackets file.`);
-      }
-
-      const buffer = await response.arrayBuffer();
-      if (requestId !== requestRef.current) return;
-
-      if (buffer.byteLength > WIREPACKETS_READ_LIMIT) {
-        setState({
-          status: "error",
-          message: `The file is ${formatBytes(buffer.byteLength)}, over the in-page read limit. Use Download.`,
-        });
-        return;
-      }
-
-      const parsed = parseWireFrames(buffer);
-      const packets = parsed.frames.map((frame) => ({
-        ...frame,
-        packet: decodeWirePacket(
-          parsed.data.subarray(frame.start, frame.start + frame.length),
-        ),
-      }));
-
-      setState({
-        status: "ready",
-        readAt: new Date(),
-        bytes: parsed.bytes,
-        problem: parsed.problem,
-        packets,
-      });
-    } catch (cause) {
-      if (requestId !== requestRef.current) return;
-      setState({
-        status: "error",
-        message:
-          cause instanceof Error && cause.message
-            ? cause.message
-            : "Unable to read the wirepackets file.",
-      });
-    }
-  }, [url]);
-
-  const ready = state.status === "ready";
-
-  // Everything shown comes from the packets: each one carries its outpoint,
-  // value, script and commitment.
-  const decoded = ready
-    ? state.packets.filter((item) => !item.packet.error)
-    : [];
-  const txidCount = new Set(decoded.map((item) => item.packet.txid)).size;
-  const commitmentIds = [...new Set(decoded.map((item) => item.packet.commitment))];
-  const rows = ready
-    ? state.packets.slice(0, WIREPACKET_ROW_LIMIT).map((item) => ({
-        "#": item.index,
-        txid: item.packet.txid ?? "—",
-        vout: item.packet.vout ?? "—",
-        value_sats: item.packet.value ?? "—",
-        script_bytes: item.packet.scriptLen ?? "—",
-        commitment_id: item.packet.commitment ?? "—",
-        problem: item.packet.error ?? "",
-      }))
-    : [];
-
-  return (
-    <div className="min-w-0 space-y-2">
-      <div className="flex flex-wrap items-center gap-1.5">
-        <button
-          type="button"
-          className={BUTTON}
-          disabled={!meta?.exists || state.status === "loading"}
-          onClick={readFile}
-        >
-          {state.status === "loading" ? "Reading…" : ready ? "Read again" : "Read packets"}
-        </button>
-        {meta?.exists && (
-          <a className={BUTTON} href={url} download target="_blank" rel="noopener noreferrer">
-            Open file
-          </a>
-        )}
-      </div>
-
-      {state.status === "error" && <ErrorMessage>{state.message}</ErrorMessage>}
-
-      {ready && (
-        <>
-          <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-6">
-            <CompactValue label="Bytes read" value={formatBytes(state.bytes)} />
-            <CompactValue label="Packets" value={state.packets.length} />
-            <CompactValue label="Transactions" value={txidCount} />
-            <CompactValue
-              label="Commitments"
-              value={
-                commitmentIds.length === 1 ? "1 (consistent)" : commitmentIds.length
-              }
-            />
-            <CompactValue label="Framing" value={state.problem ? "invalid" : "valid"} />
-            <CompactValue label="Read at" value={state.readAt.toLocaleTimeString()} />
-          </div>
-          {state.problem && <ErrorMessage>{state.problem}</ErrorMessage>}
-          <ObjectTable
-            rows={rows}
-            columns={["#", "txid", "vout", "value_sats", "script_bytes", "commitment_id", "problem"]}
-          />
-          {state.packets.length > WIREPACKET_ROW_LIMIT && (
-            <p className={`text-[10px] ${MUTED}`}>
-              Showing the first {WIREPACKET_ROW_LIMIT} of {state.packets.length} packets. Use Open file for the rest.
-            </p>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-function PipelineDataPanel({ data, substrate, activation }) {
-  const meta = data.wirepackets;
-  const retrieval = data.retrieval;
-
-  return (
-    <div className="min-w-0 space-y-3 border-t border-zinc-200 p-2 dark:border-zinc-800 sm:p-2.5">
-      <div className="flex flex-wrap items-center gap-1.5">
-        {Object.entries(retrieval).map(([key, value]) => (
-          <DiagnosticBadge key={key} status={value === "ok" ? "live" : "unknown"}>
-            {humanizeKey(key)}: {value}
-          </DiagnosticBadge>
-        ))}
-      </div>
-
-      {data.errors.length > 0 && (
-        <ErrorMessage>{data.errors.join(" | ")}</ErrorMessage>
-      )}
-
-      {/* Persisted wirepackets file */}
-      <section className="min-w-0">
-        <h3 className="text-xs font-semibold sm:text-sm">Wirepackets file</h3>
-        {!meta ? (
-          <p className={`mt-1 text-xs ${MUTED}`}>Wirepackets metadata is unavailable.</p>
-        ) : (
-          <div className="mt-1 min-w-0 space-y-2">
-            <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
-              <CompactValue label="File present" value={meta.exists} />
-              <CompactValue
-                label="Size"
-                value={meta.exists && meta.file ? formatBytes(meta.file.bytes) : "No file"}
-              />
-              <CompactValue label="Route" value="…/event/wirepackets/file" mono />
-            </div>
-            <p className={`break-all font-mono text-[10px] ${MUTED}`}>
-              {displayValue(meta.file?.path ?? meta.path)}
-            </p>
-            <WirepacketsFileViewer
-              substrate={substrate}
-              activation={activation}
-              meta={meta}
-            />
-          </div>
-        )}
-      </section>
-
-      {/* Network-scoped payload board with persisted depth objects */}
-      <section className="min-w-0">
-        <h3 className="text-xs font-semibold sm:text-sm">Payload board · depth objects</h3>
-        {data.kinds === null ? (
-          <p className={`mt-1 text-xs ${MUTED}`}>Payload board is unavailable.</p>
-        ) : data.kinds.length === 0 ? (
-          <p className={`mt-1 text-xs ${MUTED}`}>
-            No in-scope payload kind is reported for this network.
-          </p>
-        ) : (
-          data.kinds.map((entry) => (
-            <div
-              key={entry.kind}
-              className="mt-2 min-w-0 space-y-2 rounded-lg border border-zinc-200 p-2 dark:border-zinc-800"
-            >
-              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-                <CompactValue label="Kind" value={entry.kind} />
-                <CompactValue label="Network registered" value={entry.available} />
-                <CompactValue label="Depth record" value={entry.depth_record} mono />
-                <CompactValue label="Depth objects" value={entry.depth_objects.length} />
-              </div>
-              <p className={`break-all font-mono text-[10px] ${MUTED}`}>
-                {displayValue(entry.depth_path)}
-              </p>
-              {entry.depth_objects.length > 0 && (
-                <ObjectTable
-                  rows={entry.depth_objects}
-                  columns={["position", "identifier", "mass", "from"]}
-                />
-              )}
-            </div>
-          ))
-        )}
-      </section>
-    </div>
-  );
+  return { status, pipelines };
 }
 
 function displayValue(value) {
@@ -800,7 +469,6 @@ export default function NetworkPage() {
   const [observationActionLoading, setObservationActionLoading] = useState(false);
   const [observationError, setObservationError] = useState("");
   const [lastObservationCheck, setLastObservationCheck] = useState(null);
-  const [pipelineData, setPipelineData] = useState(null);
 
   const [networkLoading, setNetworkLoading] = useState(true);
   const [substrateLoading, setSubstrateLoading] = useState(true);
@@ -871,7 +539,6 @@ export default function NetworkPage() {
     setObservationScope(scope);
     setObservation(null);
     setObservationList([]);
-    setPipelineData(null);
     setObservationStale(false);
     setObservationNotice("");
   }, []);
@@ -1183,7 +850,7 @@ export default function NetworkPage() {
       const basePath = `/wallets/${encodedName}/activations/${activation}`;
 
       try {
-        const results = await fetchPipelineData(
+        const results = await fetchObservationData(
           basePath,
           encodedNetwork,
           controller.signal,
@@ -1202,8 +869,6 @@ export default function NetworkPage() {
           listResult.reason?.name === "AbortError";
 
         if (statusAborted || listAborted) return;
-
-        setPipelineData(buildPipelineData(contextKey, results));
 
         if (listResult.status === "fulfilled") {
           setObservationList(
@@ -1356,9 +1021,9 @@ export default function NetworkPage() {
       setObservationStale(false);
       setObservationNotice("Process accepted · checking status");
 
-      // 2. GET status (plus pipelines, wirepackets, payload board) to verify
-      //    the process is actually alive.
-      const results = await fetchPipelineData(
+      // 2. GET status (and the activation observation list) to verify the
+      //    process is actually alive.
+      const results = await fetchObservationData(
         basePath,
         encodedNetwork,
       );
@@ -1390,13 +1055,10 @@ export default function NetworkPage() {
         );
       }
 
-      const data = buildPipelineData(scope, results);
-      setPipelineData(data);
-
       if (status?.running === true) {
         setObservationNotice(
-          data.errors.length
-            ? "Bit-miner running · some data unavailable"
+          results.pipelines.status === "rejected"
+            ? "Bit-miner running · observation list unavailable"
             : "Bit-miner running · status confirmed",
         );
 
@@ -1632,8 +1294,6 @@ export default function NetworkPage() {
 
   const scopedObservation = scopeMatches ? observation : null;
   const scopedObservationList = scopeMatches ? observationList : [];
-  const scopedPipelineData =
-    pipelineData && pipelineData.scope === currentScopeKey ? pipelineData : null;
 
   const observationListRows = scopedObservationList;
 
@@ -2071,17 +1731,9 @@ return (
           </div>
         )}
 
-        {scopedPipelineData && (
-          <PipelineDataPanel
-            data={scopedPipelineData}
-            substrate={selectedSubstrate}
-            activation={selectedActivation}
-          />
-        )}
-
         {observationHasNetworkContext && !scopedObservation && !observationLoading && !observationActionLoading && !observationError && (
           <p className={`px-3 py-3 text-center text-xs sm:px-4 ${MUTED}`}>
-            No live observation for this path. Start one to request observation through the QTM runtime.
+            No live observation for this path. Press Start to launch bit-miner for this path.
           </p>
         )}
 
