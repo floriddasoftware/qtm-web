@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 // Prefer NEXT_PUBLIC_QTM_API_BASE; fall back to the public qtm-api deployment.
 const API_BASE = (
   process.env.NEXT_PUBLIC_QTM_API_BASE ||
-  "https://qtm-api-anwp.onrender.com"
+  "https://qtm-api-hxcs.onrender.com"
 ).replace(/\/+$/, "");
 
 const REFRESH_INTERVAL_MS = 8000;
