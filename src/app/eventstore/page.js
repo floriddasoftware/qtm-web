@@ -11,11 +11,20 @@ const REFRESH_INTERVAL_MS = 8000;
 const U128_MAX = 340282366920938463463374607431768211455n;
 
 const INPUT =
-  "h-10 w-full min-w-0 rounded-xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:border-zinc-500 focus:ring-4 focus:ring-zinc-500/10 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950";
+  "h-10 w-full min-w-0 text-center transition rounded-lg border border-zinc-200 bg-white px-3 text-sm outline-none focus:border-zinc-500 focus:ring-4 focus:ring-zinc-500/10 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950";
 const BUTTON =
-  "inline-flex min-h-10 items-center justify-center rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800";
+  "inline-flex min-h-10 items-center justify-center text-center active:scale-[0.98] rounded-lg border border-zinc-200 bg-white px-4 py-2 text-sm font-medium transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800";
 const PANEL =
-  "min-w-0 overflow-hidden rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm sm:p-5 dark:border-zinc-800 dark:bg-zinc-900";
+  "qtm-pop min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white p-4 shadow-sm sm:p-5 dark:border-zinc-800 dark:bg-zinc-900";
+
+const QTM_STYLES = `
+@keyframes qtm-pop {
+  from { opacity: 0; transform: translateY(10px) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+.qtm-pop { animation: qtm-pop 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@media (prefers-reduced-motion: reduce) { .qtm-pop { animation: none; } }
+`;
 
 async function apiRequest(path, options = {}) {
   let response;
@@ -145,7 +154,7 @@ function Notice({ children, type = "error" }) {
   return (
     <p
       role={type === "error" ? "alert" : "status"}
-      className={`break-words text-xs leading-4 ${color}`}
+      className={`qtm-pop break-words text-center text-xs leading-5 ${color}`}
     >
       {children}
     </p>
@@ -154,8 +163,7 @@ function Notice({ children, type = "error" }) {
 
 function Field({ label, children }) {
   return (
-    <div className="min-w-0">
-      <dt className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+    <div className="min-w-0 text-center"> <dt className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
         {label}
       </dt>
       <dd className="mt-1 break-words text-sm font-medium leading-5">
@@ -168,16 +176,20 @@ function Field({ label, children }) {
 function Panel({ title, description, action, children, className = "" }) {
   return (
     <section className={`${PANEL} ${className}`}>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
+      <div className="flex flex-col gap-3">
+        <div className="min-w-0 text-center">
           <h2 className="text-sm font-semibold tracking-tight sm:text-base">{title}</h2>
           {description && (
-            <p className="mt-1.5 max-w-3xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+            <p className="mx-auto mt-1.5 max-w-3xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
               {description}
             </p>
           )}
         </div>
-        {action}
+        {action && (
+          <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 text-right">
+            {action}
+          </div>
+        )}
       </div>
       {children}
     </section>
@@ -186,7 +198,7 @@ function Panel({ title, description, action, children, className = "" }) {
 
 function BudgetSummary({ budget }) {
   return (
-    <dl className="mt-3 grid grid-cols-3 gap-2">
+    <dl className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-3">
       <Field label="Minimum events">{money(budget?.min_events)}</Field>
       <Field label="Maximum events">{money(budget?.max_events)}</Field>
       <Field label="Maximum retained mass">{money(budget?.max_retained_mass)}</Field>
@@ -211,7 +223,7 @@ function BudgetEditor({ budget, disabled, onSave }) {
 
   return (
     <form
-      className="mt-4 grid grid-cols-1 gap-3 border-t border-zinc-200 pt-4 sm:grid-cols-3 dark:border-zinc-800"
+      className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(11rem,1fr))] gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-800"
       onSubmit={(event) => {
         event.preventDefault();
         onSave(draft);
@@ -223,7 +235,7 @@ function BudgetEditor({ budget, disabled, onSave }) {
         ["max_retained_mass", "Maximum retained mass (u128)"],
       ].map(([key, label]) => (
         <label key={key} className="block min-w-0">
-          <span className="mb-1.5 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
+          <span className="mb-1.5 block text-center text-xs font-medium text-zinc-600 dark:text-zinc-300">
             {label}
           </span>
           <input
@@ -237,7 +249,7 @@ function BudgetEditor({ budget, disabled, onSave }) {
           />
         </label>
       ))}
-      <div className="sm:col-span-3">
+      <div className="col-span-full flex justify-end">
         <button className={BUTTON} type="submit" disabled={disabled}>
           Save network budget
         </button>
@@ -248,23 +260,22 @@ function BudgetEditor({ budget, disabled, onSave }) {
 
 function PayloadBoard({ board, loading }) {
   if (loading && !board) {
-    return <p className="mt-3 text-xs text-zinc-500">Loading network payload board…</p>;
+    return <p className="mt-3 text-center text-xs text-zinc-500">Loading network payload board…</p>;
   }
   if (!board) {
-    return <p className="mt-3 text-xs text-zinc-500">No payload-board response yet.</p>;
+    return <p className="mt-3 text-center text-xs text-zinc-500">No payload-board response yet.</p>;
   }
   return (
     <div className="mt-3 space-y-3">
       {board.error && <Notice>{board.error}</Notice>}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Field label="Board activation">{money(board.activation)}</Field>
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(8rem,1fr))] gap-3"> <Field label="Board activation">{money(board.activation)}</Field>
         <Field label="Commitment">{money(board.commitment)}</Field>
         <Field label="Network">{money(board.network)}</Field>
         <Field label="Payload kinds">{board.kinds?.length ?? 0}</Field>
       </div>
-      {board.message && <p className="text-xs text-zinc-500">{board.message}</p>}
+      {board.message && <p className="text-center text-xs text-zinc-500">{board.message}</p>}
       {board.observation && (
-        <dl className="grid grid-cols-2 gap-3 rounded-xl bg-zinc-50 p-3 dark:bg-zinc-950">
+        <dl className="grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-3 rounded-lg bg-zinc-50 p-3 dark:bg-zinc-950">
           <Field label="Miner process">{board.observation.process_running == null ? "Not reported" : board.observation.process_running ? "Running" : "Stopped"}</Field>
           <Field label="Miner PID">{money(board.observation.pid)}</Field>
           <Field label="Miner feature">{board.observation.bit_minner_feature == null ? "Not reported" : String(board.observation.bit_minner_feature)}</Field>
@@ -273,14 +284,14 @@ function PayloadBoard({ board, loading }) {
       )}
       <div className="space-y-2">
         {(board.kinds || []).map((kind, index) => (
-          <div key={`${kind.kind}-${index}`} className="rounded-xl border border-zinc-200 p-3 dark:border-zinc-800">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-sm font-semibold">{kind.kind}</span>
-              <span className="text-xs text-zinc-500">
+          <div key={`${kind.kind}-${index}`} className="qtm-pop min-w-0 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+            <div className="flex flex-col gap-1">
+              <span className="text-right text-xs text-zinc-500">
                 {kind.available ? "Available" : "Unavailable"} · {kind.in_scope ? "In scope" : "Out of scope"}
               </span>
+              <span className="break-words text-center text-sm font-semibold">{kind.kind}</span>
             </div>
-            <dl className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
+            <dl className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-3">
               <Field label="Depth path">{money(kind.depth_path)}</Field>
               <Field label="Depth record">{money(kind.depth_record)}</Field>
               <Field label="Depth objects">{kind.depth_objects?.length ?? 0}</Field>
@@ -291,7 +302,7 @@ function PayloadBoard({ board, loading }) {
           </div>
         ))}
         {(board.kinds || []).length === 0 && (
-          <p className="text-xs text-zinc-500">No payload kinds were returned for this network.</p>
+          <p className="text-center text-xs text-zinc-500">No payload kinds were returned for this network.</p>
         )}
       </div>
     </div>
@@ -300,20 +311,18 @@ function PayloadBoard({ board, loading }) {
 
 function StreamCard({ substrate, activation, network, status, busy, results, onAction, onRefresh }) {
   return (
-    <section className="min-w-0 rounded-xl border border-zinc-200 p-3 dark:border-zinc-800">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
+    <section className="qtm-pop min-w-0 rounded-lg border border-zinc-200 p-3 sm:p-4 dark:border-zinc-800">
+      <div className="flex flex-col gap-3">
+        <div className="min-w-0 text-center">
           <h4 className="text-sm font-semibold">Bitcoin pipeline stream</h4>
           <p className="mt-1 text-xs text-zinc-500">
             {status?.running === true ? "Stream process running" : status?.running === false ? "Stream process stopped" : "Stream status not loaded"}
             {status?.pid ? ` · PID ${status.pid}` : ""}
           </p>
-          <p className="mt-1 break-all font-mono text-[10px] text-zinc-500">
-            {substrate} · activation {activation} · {network.id}
+          <p className="mt-1 break-all text-right font-mono text-[10px] text-zinc-500"> {substrate} · activation {activation} · {network.id}
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <button type="button" className={BUTTON} disabled={busy || status?.running === true} onClick={() => onAction("start", network)}>
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(6.5rem,1fr))] gap-2 sm:flex sm:flex-wrap sm:justify-end"> <button type="button" className={BUTTON} disabled={busy || status?.running === true} onClick={() => onAction("start", network)}>
             {busy ? "Working…" : "Stream"}
           </button>
           <button type="button" className={BUTTON} disabled={busy || status?.running !== true} onClick={() => onAction("stop", network)}>
@@ -324,13 +333,13 @@ function StreamCard({ substrate, activation, network, status, busy, results, onA
           </button>
         </div>
       </div>
-      {status?.error && <p className="mt-2 break-words text-xs text-pink-700 dark:text-pink-300">{status.error}</p>}
-      {status?.path && <p className="mt-2 break-all font-mono text-[10px] text-zinc-500">Event path: {status.path}</p>}
-      {status?.log_path && <p className="mt-1 break-all font-mono text-[10px] text-zinc-500">Process log: {status.log_path}</p>}
+      {status?.error && <p className="mt-2 break-words text-center text-xs text-pink-700 dark:text-pink-300">{status.error}</p>}
+      {status?.path && <p className="mt-2 break-all text-right font-mono text-[10px] text-zinc-500">Event path: {status.path}</p>}
+      {status?.log_path && <p className="mt-1 break-all text-right font-mono text-[10px] text-zinc-500">Process log: {status.log_path}</p>}
       <div className="mt-3 border-t border-zinc-200 pt-3 dark:border-zinc-800">
-        <div className="flex items-center justify-between gap-2">
-          <h5 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">API stream responses</h5>
-          <span className="text-[10px] tabular-nums text-zinc-500">{results?.length ?? 0} responses</span>
+        <div className="flex flex-col gap-1">
+          <span className="text-right text-[10px] tabular-nums text-zinc-500">{results?.length ?? 0} responses</span>
+          <h5 className="text-center text-[10px] font-semibold uppercase tracking-wider text-zinc-500">API stream responses</h5>
         </div>
         <div
           aria-live="polite"
@@ -338,20 +347,19 @@ function StreamCard({ substrate, activation, network, status, busy, results, onA
           className="mt-2 max-h-64 space-y-2 overflow-y-auto overscroll-contain rounded-lg bg-zinc-50 p-2 dark:bg-zinc-950"
         >
           {(results || []).map((entry) => (
-            <div key={entry.id} className="border-b border-zinc-200 pb-2 last:border-0 last:pb-0 dark:border-zinc-800">
-              <div className="mb-1 flex flex-wrap justify-between gap-2 text-[10px] text-zinc-500">
-                <span className="font-semibold">{entry.label}</span>
-                <time>{entry.time}</time>
+            <div key={entry.id} className="qtm-pop border-b border-zinc-200 pb-2 last:border-0 last:pb-0 dark:border-zinc-800">
+              <div className="mb-1 flex flex-col gap-0.5 text-[10px] text-zinc-500">
+                <time className="block text-right">{entry.time}</time>
+                <span className="block break-words text-center font-semibold">{entry.label}</span>
               </div>
-              <pre className="overflow-x-auto whitespace-pre-wrap break-all text-[10px] leading-4 text-zinc-700 dark:text-zinc-300">{JSON.stringify(entry.body, null, 2)}</pre>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-all text-left text-[10px] leading-4 text-zinc-700 dark:text-zinc-300">{JSON.stringify(entry.body, null, 2)}</pre>
             </div>
           ))}
           {(!results || results.length === 0) && (
-            <p className="py-3 text-xs text-zinc-500">Press Stream to start the API-managed Bitcoin pipeline and display its returned API responses here.</p>
+            <p className="py-3 text-center text-xs text-zinc-500">Press Stream to start the API-managed Bitcoin pipeline and display its returned API responses here.</p>
           )}
         </div>
-        <p className="mt-2 text-[10px] leading-4 text-zinc-500">
-          The current API returns process start/status responses here. Its Rust stream() helper does not expose individual PipelineOutcome values or a live log HTTP route yet.
+        <p className="mt-2 text-center text-[10px] leading-4 text-zinc-500"> The current API returns process start/status responses here. Its Rust stream() helper does not expose individual PipelineOutcome values or a live log HTTP route yet.
         </p>
       </div>
     </section>
@@ -362,25 +370,24 @@ function WirePackets({ metadata, loading }) {
   const route = metadata?.file_route;
   const href = route ? `${API_BASE}${route.startsWith("/") ? route : `/${route}`}` : null;
   return (
-    <div className="rounded-xl border border-zinc-200 p-3 dark:border-zinc-800">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h4 className="text-xs font-semibold uppercase tracking-wider">Persisted wirepackets file</h4>
-        <span className="text-xs text-zinc-500">
+    <div className="qtm-pop min-w-0 rounded-lg border border-zinc-200 p-3 sm:p-4 dark:border-zinc-800">
+      <div className="flex flex-col gap-1">
+        <span className="text-right text-xs text-zinc-500">
           {loading ? "Loading…" : metadata?.exists ? "File present" : metadata ? "No file" : "Not loaded"}
         </span>
+        <h4 className="text-center text-xs font-semibold uppercase tracking-wider">Persisted wirepackets file</h4>
       </div>
       {metadata && (
-        <dl className="mt-3 grid grid-cols-2 gap-3">
-          <Field label="Scope">{money(metadata.scope)}</Field>
+        <dl className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(8rem,1fr))] gap-3"> <Field label="Scope">{money(metadata.scope)}</Field>
           <Field label="Bytes">{metadata.bytes == null ? "Not reported" : Number(metadata.bytes).toLocaleString()}</Field>
           <Field label="Activation">{money(metadata.activation)}</Field>
           <Field label="Network">{money(metadata.network)}</Field>
         </dl>
       )}
-      {metadata?.path && <p className="mt-2 break-all font-mono text-[11px] text-zinc-500">{metadata.path}</p>}
+      {metadata?.path && <p className="mt-2 break-all text-right font-mono text-[11px] text-zinc-500">{metadata.path}</p>}
       {href ? (
         <a
-          className="mt-3 inline-flex min-h-10 items-center rounded-xl border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-800 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-100 dark:hover:bg-zinc-800"
+          className="mt-3 flex min-h-10 w-full items-center justify-center rounded-lg border border-zinc-200 px-4 py-2 text-center text-sm font-medium text-zinc-800 transition hover:bg-zinc-50 active:scale-[0.98] dark:border-zinc-700 dark:text-zinc-100 dark:hover:bg-zinc-800"
           href={href}
           target="_blank"
           rel="noreferrer"
@@ -388,7 +395,49 @@ function WirePackets({ metadata, loading }) {
           Open persisted wirepackets file
         </a>
       ) : (
-        <p className="mt-3 text-xs text-zinc-500">The API has not returned a file route.</p>
+        <p className="mt-3 text-center text-xs text-zinc-500">The API has not returned a file route.</p>
+      )}
+    </div>
+  );
+}
+
+function Collapsible({ open, children }) {
+  return (
+    <div
+      className={`grid transition-[grid-template-rows,opacity,visibility] duration-300 ease-out motion-reduce:transition-none ${
+        open ? "visible grid-rows-[1fr] opacity-100" : "invisible grid-rows-[0fr] opacity-0"
+      }`}
+    >
+      <div className="min-h-0 min-w-0 overflow-hidden">{children}</div>
+    </div>
+  );
+}
+
+function PayloadItem({ payload }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="qtm-pop min-w-0 rounded-lg bg-zinc-50 p-3 dark:bg-zinc-950">
+      <div className="flex flex-col gap-1">
+        <span className="text-right text-[11px] text-zinc-500">{payload.objects.length} objects</span>
+        <span className="break-all text-center text-xs font-semibold">{payload.record}</span>
+      </div>
+      <p className="mt-1 break-all text-center font-mono text-[11px] text-zinc-500">{payload.depth_identifier}</p>
+      <p className="mt-1 break-all text-right font-mono text-[10px] text-zinc-400">{payload.path}</p>
+      {payload.objects.length > 0 && (
+        <>
+          <button
+            type="button"
+            aria-expanded={open}
+            onClick={() => setOpen((value) => !value)}
+            className="relative mt-2 flex w-full items-center justify-center rounded-lg px-8 py-1.5 text-center text-xs text-zinc-600 transition hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+          >
+            Depth objects
+            <span aria-hidden="true" className={`absolute right-2 transition-transform duration-300 ${open ? "rotate-180" : ""}`}>▾</span>
+          </button>
+          <Collapsible open={open}>
+            <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-all text-left text-[10px] text-zinc-500">{JSON.stringify(payload.objects, null, 2)}</pre>
+          </Collapsible>
+        </>
       )}
     </div>
   );
@@ -897,9 +946,16 @@ export default function EventStorePage() {
 
   const configuredCount = budgets.filter((row) => row.configured && row.budget).length;
 
+  const eventsEmptyText = loadingEvents
+    ? "Loading persisted events…"
+    : substrate
+      ? "No persisted event records were returned."
+      : "Select a substrate to inspect persisted records.";
+
   return (
     <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-5 sm:py-6 dark:bg-zinc-950 dark:text-zinc-50">
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-3">
+      <style>{QTM_STYLES}</style>
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-3 sm:gap-4">
         <Panel
           title="QTM Event Store"
           description="Inspect persisted substrate events, activation-scoped payloads, network budgets, payload boards, Bitcoin observation and the API-owned wirepackets file."
@@ -913,22 +969,22 @@ export default function EventStorePage() {
             </div>
           }
         >
-          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(14rem,1fr))] gap-3">
             <label className="block min-w-0">
-              <span className="mb-1.5 block text-sm font-medium">Persistent substrate</span>
+              <span className="mb-1.5 block text-center text-sm font-medium">Persistent substrate</span>
               <select className={INPUT} value={substrate} disabled={loadingList} onChange={(event) => chooseSubstrate(event.target.value)}>
                 <option value="">{loadingList ? "Loading substrates…" : "Select substrate"}</option>
                 {substrates.map((entry) => <option key={entry.name} value={entry.name}>{entry.name}</option>)}
               </select>
             </label>
             <label className="block min-w-0">
-              <span className="mb-1.5 block text-sm font-medium">Activation</span>
+              <span className="mb-1.5 block text-center text-sm font-medium">Activation</span>
               <select className={INPUT} value={activation} disabled={!substrate} onChange={(event) => chooseActivation(event.target.value)}>
                 {activationOptions.map((value) => <option key={value} value={value}>Activation {value}</option>)}
               </select>
             </label>
           </div>
-          <dl className="mt-5 grid grid-cols-2 gap-4 border-t border-zinc-200 pt-4 sm:grid-cols-4 dark:border-zinc-800">
+          <dl className="mt-5 grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-4 border-t border-zinc-200 pt-4 dark:border-zinc-800">
             <Field label="Substrate">{substrate || "—"}</Field>
             <Field label="Selected activation">{activation || "—"}</Field>
             <Field label="Events in activation">{activationEvents.length}</Field>
@@ -938,7 +994,7 @@ export default function EventStorePage() {
             <Field label="Retained mass in activation">{retainedMass.toString()}</Field>
             <Field label="API base">{API_BASE}</Field>
           </dl>
-          {store?.directory && <p className="mt-4 break-all border-t border-zinc-200 pt-3 font-mono text-xs text-zinc-500 dark:border-zinc-800">Substrate directory: {store.directory}</p>}
+          {store?.directory && <p className="mt-4 break-all border-t border-zinc-200 pt-3 text-right font-mono text-xs text-zinc-500 dark:border-zinc-800">Substrate directory: {store.directory}</p>}
         </Panel>
 
         {error && <Notice>{error}</Notice>}
@@ -949,52 +1005,50 @@ export default function EventStorePage() {
           description="Budgets and payload boards are available for every registered network. Bitcoin observation and wirepackets are shown only for Bitcoin networks."
           action={<span className="text-xs text-zinc-500">{renderedNetworks.length} networks</span>}
         >
-          {loadingPayloads && <p className="mt-3 text-xs text-zinc-500">Rendering payload records for the selected activation…</p>}
-          <div className="mt-4 space-y-3">
-            {renderedNetworks.map((network) => {
+          {loadingPayloads && <p className="mt-3 text-center text-xs text-zinc-500">Rendering payload records for the selected activation…</p>}
+          <div className="mt-4 flex flex-col gap-3"> {renderedNetworks.map((network, netIndex) => {
               const id = network.id;
               const budgetRow = networkBudgetById.get(id);
               const budget = budgetRow?.budget || null;
               const group = payloadGroups.get(id) || { transit_inputs: [], exile_outputs: [], unclassified: [] };
               const isExpanded = !!expanded[id];
               return (
-                <section key={id} className="min-w-0 overflow-hidden rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+                <section key={id} style={{ animationDelay: `${Math.min(netIndex, 8) * 60}ms` }} className="qtm-pop min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
                   <div className="p-4 sm:p-5">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="min-w-0">
+                    <div className="flex flex-col-reverse gap-3">
+                      <div className="min-w-0 text-center">
                         <h3 className="text-base font-semibold">{network.name}</h3>
                         <p className="mt-1 break-all font-mono text-xs text-zinc-500">{id}</p>
                       </div>
-                      <span className="rounded-full border border-zinc-200 px-2.5 py-1 text-[10px] font-semibold text-zinc-600 dark:border-zinc-700 dark:text-zinc-300">
+                      <span className="self-end rounded-full border border-zinc-200 px-2.5 py-1 text-[10px] font-semibold text-zinc-600 dark:border-zinc-700 dark:text-zinc-300">
                         {budgetRow?.configured && budget ? "Budget configured" : "Budget unconfigured"}
                       </span>
                     </div>
-                    <dl className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                      <Field label="Coin">{money(network.coin)}</Field>
+                    <dl className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(8rem,1fr))] gap-3"> <Field label="Coin">{money(network.coin)}</Field>
                       <Field label="Purpose">{money(network.purpose)}</Field>
                       <Field label="Derivation path">{money(network.path)}</Field>
                       <Field label="Payload records">{group.transit_inputs.length + group.exile_outputs.length + group.unclassified.length}</Field>
                     </dl>
-                    <div className="mt-4 rounded-xl border border-zinc-100 bg-zinc-50/80 p-3 dark:border-zinc-800 dark:bg-zinc-950/70">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <h4 className="text-xs font-semibold uppercase tracking-wider text-zinc-600 dark:text-zinc-300">Network budget · activation {activation}</h4>
-                        <button type="button" className={BUTTON} onClick={() => setExpanded((current) => ({ ...current, [id]: !current[id] }))}>
+                    <div className="mt-4 rounded-lg border border-zinc-100 bg-zinc-50/80 p-3 dark:border-zinc-800 dark:bg-zinc-950/70">
+                      <div className="flex flex-col gap-2">
+                        <h4 className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-600 dark:text-zinc-300">Network budget · activation {activation}</h4>
+                        <button type="button" aria-expanded={isExpanded} className={`${BUTTON} self-end`} onClick={() => setExpanded((current) => ({ ...current, [id]: !current[id] }))}>
                           {isExpanded ? "Close editor" : "Edit budget"}
                         </button>
                       </div>
                       <BudgetSummary budget={budget} />
-                      {isExpanded && (
+                      <Collapsible open={isExpanded}>
                         <BudgetEditor budget={budget} disabled={loadingBudgets} onSave={(draft) => saveBudget(network, draft)} />
-                      )}
+                      </Collapsible>
                       {budgetErrors[id] && <div className="mt-3"><Notice>{budgetErrors[id]}</Notice></div>}
                       {budgetNotices[id] && <div className="mt-3"><Notice type="success">{budgetNotices[id]}</Notice></div>}
                     </div>
                   </div>
 
                   <div className="space-y-3 border-t border-zinc-200 p-3 sm:p-4 dark:border-zinc-800">
-                    <div className="rounded-xl border border-zinc-200 p-3 dark:border-zinc-800">
-                      <h4 className="text-xs font-semibold uppercase tracking-wider">Network payload board</h4>
-                      <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">
+                    <div className="qtm-pop min-w-0 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+                      <h4 className="text-center text-xs font-semibold uppercase tracking-wider">Network payload board</h4>
+                      <p className="mt-1 break-all text-right font-mono text-[11px] text-zinc-500">
                         GET /wallets/{substrate}/activations/{activation}/networks/{id}/payload-board
                       </p>
                       <PayloadBoard board={boards[id]} loading={loadingBoards} />
@@ -1021,27 +1075,14 @@ export default function EventStorePage() {
                       ["exile_outputs", "Payloads rendered from exile event records.", group.exile_outputs],
                       ["Unclassified", "Persisted payloads without a recognized direction.", group.unclassified],
                     ].map(([title, description, rows]) => (
-                      <div key={title} className="rounded-xl border border-zinc-200 p-3 dark:border-zinc-800">
-                        <h4 className="text-xs font-semibold uppercase tracking-wider">{title}</h4>
-                        <p className="mt-1 text-xs text-zinc-500">{description}</p>
-                        <div className="mt-3 space-y-2">
+                      <div key={title} className="qtm-pop min-w-0 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+                        <h4 className="text-center text-xs font-semibold uppercase tracking-wider">{title}</h4>
+                        <p className="mt-1 text-center text-xs text-zinc-500">{description}</p>
+                        <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(16rem,1fr))] gap-2">
                           {rows.map((payload, index) => (
-                            <div key={`${payload.record}-${payload.path}-${payload.depth_identifier}-${index}`} className="rounded-lg bg-zinc-50 p-3 dark:bg-zinc-950">
-                              <div className="flex flex-wrap justify-between gap-2">
-                                <span className="text-xs font-semibold">{payload.record}</span>
-                                <span className="text-[11px] text-zinc-500">{payload.objects.length} objects</span>
-                              </div>
-                              <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">{payload.depth_identifier}</p>
-                              <p className="mt-1 break-all font-mono text-[10px] text-zinc-400">{payload.path}</p>
-                              {payload.objects.length > 0 && (
-                                <details className="mt-2">
-                                  <summary className="cursor-pointer text-xs text-zinc-600 dark:text-zinc-300">Depth objects</summary>
-                                  <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-all text-[10px] text-zinc-500">{JSON.stringify(payload.objects, null, 2)}</pre>
-                                </details>
-                              )}
-                            </div>
+                            <PayloadItem key={`${payload.record}-${payload.path}-${payload.depth_identifier}-${index}`} payload={payload} />
                           ))}
-                          {rows.length === 0 && <p className="text-xs text-zinc-500">No payload records for this direction.</p>}
+                          {rows.length === 0 && <p className="col-span-full text-center text-xs text-zinc-500">No payload records for this direction.</p>}
                         </div>
                       </div>
                     ))}
@@ -1050,7 +1091,7 @@ export default function EventStorePage() {
               );
             })}
             {renderedNetworks.length === 0 && (
-              <p className="rounded-xl border border-zinc-200 p-4 text-sm text-zinc-500 dark:border-zinc-800">
+              <p className="rounded-lg border border-zinc-200 p-4 text-center text-sm text-zinc-500 dark:border-zinc-800">
                 {loadingBudgets ? "Loading registered networks…" : "No registered networks or payload networks were returned."}
               </p>
             )}
@@ -1058,10 +1099,10 @@ export default function EventStorePage() {
         </Panel>
 
         <Panel title="Activation utilization" description="Aggregate measurements from event records belonging to the selected activation.">
-          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div className="rounded-xl bg-zinc-50 p-3 dark:bg-zinc-950"><Field label="Selected activation events">{activationEvents.length}</Field></div>
-            <div className="rounded-xl bg-zinc-50 p-3 dark:bg-zinc-950"><Field label="Retained mass">{retainedMass.toString()}</Field></div>
-            <div className="rounded-xl bg-zinc-50 p-3 dark:bg-zinc-950"><Field label="All substrate events">{events.length}</Field></div>
+          <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(10rem,1fr))] gap-3">
+            <div className="qtm-pop rounded-lg bg-zinc-50 p-3 dark:bg-zinc-950"><Field label="Selected activation events">{activationEvents.length}</Field></div>
+            <div className="qtm-pop rounded-lg bg-zinc-50 p-3 dark:bg-zinc-950"><Field label="Retained mass">{retainedMass.toString()}</Field></div>
+            <div className="qtm-pop rounded-lg bg-zinc-50 p-3 dark:bg-zinc-950"><Field label="All substrate events">{events.length}</Field></div>
           </div>
         </Panel>
 
@@ -1069,25 +1110,24 @@ export default function EventStorePage() {
           title="Persisted event diagnostics"
           description="Event records returned by GET /wallets/:name/events. Payload rendering is restricted to the selected activation."
           action={<span className="text-xs text-zinc-500">{events.length} records</span>}
-          className="p-0"
         >
-          <div className="mt-4 overflow-x-auto">
+          <div className="mt-4 hidden overflow-x-auto rounded-lg border border-zinc-200 lg:block dark:border-zinc-800">
             <table className="w-full min-w-[850px] border-collapse text-left text-sm">
               <thead className="bg-zinc-100 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                <tr>{["Activation", "Event type", "Record reference", "Dimension", "Structural value (Σ)", "Depth objects", "Retained mass"].map((heading) => <th key={heading} className="px-4 py-3 font-semibold">{heading}</th>)}</tr>
+                <tr>{["Activation", "Event type", "Record reference", "Dimension", "Structural value (Σ)", "Depth objects", "Retained mass"].map((heading, headingIndex) => <th key={heading} className={`px-4 py-3 font-semibold ${headingIndex === 6 ? "text-right" : "text-center"}`}>{heading}</th>)}</tr>
               </thead>
               <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
                 {events.map((event, index) => {
                   const state = event?.heritage?.state;
                   return (
                     <tr key={`${event.record}-${index}`} className="align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
-                      <td className="whitespace-nowrap px-4 py-3 font-mono">{activationFromEvent(event) ?? money(event.activation)}</td>
-                      <td className="px-4 py-3">{money(event.kind)}</td>
-                      <td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">{money(event.record)}</td>
-                      <td className="break-all px-4 py-3 font-mono">{money(event.dimension ?? state?.dimension)}</td>
-                      <td className="break-all px-4 py-3 font-mono">{money(event.structural_value ?? state?.structural_value)}</td>
-                      <td className="px-4 py-3">{money(event.depth_objects)}</td>
-                      <td className="break-all px-4 py-3 font-mono">{money(event.retained_mass ?? state?.retained_mass)}</td>
+                      <td className="text-center whitespace-nowrap px-4 py-3 font-mono">{activationFromEvent(event) ?? money(event.activation)}</td>
+                      <td className="text-center px-4 py-3">{money(event.kind)}</td>
+                      <td className="text-center max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">{money(event.record)}</td>
+                      <td className="text-center break-all px-4 py-3 font-mono">{money(event.dimension ?? state?.dimension)}</td>
+                      <td className="text-center break-all px-4 py-3 font-mono">{money(event.structural_value ?? state?.structural_value)}</td>
+                      <td className="text-center px-4 py-3">{money(event.depth_objects)}</td>
+                      <td className="break-all px-4 py-3 text-right font-mono">{money(event.retained_mass ?? state?.retained_mass)}</td>
                     </tr>
                   );
                 })}
@@ -1097,9 +1137,30 @@ export default function EventStorePage() {
               </tbody>
             </table>
           </div>
+          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:hidden">
+            {events.map((event, index) => {
+              const state = event?.heritage?.state;
+              return (
+                <article key={`${event.record}-card-${index}`} className="qtm-pop min-w-0 rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                  <p className="text-right font-mono text-[11px] text-zinc-500">Activation {activationFromEvent(event) ?? money(event.activation)}</p>
+                  <h4 className="mt-1 break-all text-center text-sm font-semibold">{money(event.kind)}</h4>
+                  <p className="mt-1 break-all text-center font-mono text-[11px] text-zinc-500">{money(event.record)}</p>
+                  <dl className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(8rem,1fr))] gap-3">
+                    <Field label="Dimension">{money(event.dimension ?? state?.dimension)}</Field>
+                    <Field label="Structural value (Σ)">{money(event.structural_value ?? state?.structural_value)}</Field>
+                    <Field label="Depth objects">{money(event.depth_objects)}</Field>
+                    <Field label="Retained mass">{money(event.retained_mass ?? state?.retained_mass)}</Field>
+                  </dl>
+                </article>
+              );
+            })}
+            {events.length === 0 && (
+              <p className="col-span-full rounded-lg border border-zinc-200 p-4 text-center text-sm text-zinc-500 dark:border-zinc-800">{eventsEmptyText}</p>
+            )}
+          </div>
         </Panel>
 
-        <footer className="border-t border-zinc-200 pt-4 text-xs leading-5 text-zinc-500 dark:border-zinc-800">
+        <footer className="border-t border-zinc-200 pt-4 text-right text-xs leading-5 text-zinc-500 dark:border-zinc-800">
           QTM Event Store · Substrate host · Activation-scoped events and payloads · Network budgets · Network payload boards · Bitcoin observation · API-persisted wirepackets · {API_BASE}
         </footer>
       </div>
