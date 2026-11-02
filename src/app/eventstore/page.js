@@ -138,23 +138,17 @@ function parseU128(value, label) {
 }
 
 function Notice({ children, type = "error" }) {
-  const styles = {
-    error:
-      "border-pink-200 bg-pink-50 text-pink-800 dark:border-pink-900 dark:bg-pink-950 dark:text-pink-300",
-    warning:
-      "border-pink-200 bg-pink-50 text-pink-800 dark:border-pink-900 dark:bg-pink-950 dark:text-pink-300",
-    success:
-      "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300",
-  };
+  const color =
+    type === "success"
+      ? "text-emerald-700 dark:text-emerald-300"
+      : "text-pink-700 dark:text-pink-300";
   return (
-    <div
+    <p
       role={type === "error" ? "alert" : "status"}
-      className={`break-words rounded-xl border px-3 py-3 text-sm leading-5 ${
-        styles[type] ?? styles.error
-      }`}
+      className={`break-words text-xs leading-4 ${color}`}
     >
       {children}
-    </div>
+    </p>
   );
 }
 
@@ -304,33 +298,63 @@ function PayloadBoard({ board, loading }) {
   );
 }
 
-function ObservationControl({ substrate, activation, network, status, busy, onAction }) {
+function StreamCard({ substrate, activation, network, status, busy, results, onAction, onRefresh }) {
   return (
-    <div className="rounded-xl border border-zinc-200 p-3 dark:border-zinc-800">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h4 className="text-xs font-semibold uppercase tracking-wider">Bitcoin observation</h4>
+    <section className="min-w-0 rounded-xl border border-zinc-200 p-3 dark:border-zinc-800">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h4 className="text-sm font-semibold">Bitcoin pipeline stream</h4>
           <p className="mt-1 text-xs text-zinc-500">
-            {status?.running === true ? "Miner process running" : status?.running === false ? "Miner process stopped" : "Status not loaded"}
+            {status?.running === true ? "Stream process running" : status?.running === false ? "Stream process stopped" : "Stream status not loaded"}
             {status?.pid ? ` · PID ${status.pid}` : ""}
+          </p>
+          <p className="mt-1 break-all font-mono text-[10px] text-zinc-500">
+            {substrate} · activation {activation} · {network.id}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button type="button" className={BUTTON} disabled={busy} onClick={() => onAction("start", network)}>
-            {busy ? "Working…" : "Start"}
+          <button type="button" className={BUTTON} disabled={busy || status?.running === true} onClick={() => onAction("start", network)}>
+            {busy ? "Working…" : "Stream"}
           </button>
-          <button type="button" className={BUTTON} disabled={busy} onClick={() => onAction("stop", network)}>
+          <button type="button" className={BUTTON} disabled={busy || status?.running !== true} onClick={() => onAction("stop", network)}>
             Stop
+          </button>
+          <button type="button" className={BUTTON} disabled={busy} onClick={() => onRefresh(network)}>
+            Refresh
           </button>
         </div>
       </div>
       {status?.error && <p className="mt-2 break-words text-xs text-pink-700 dark:text-pink-300">{status.error}</p>}
-      {status?.path && <p className="mt-2 break-all font-mono text-[11px] text-zinc-500">Event path: {status.path}</p>}
-      {status?.log_path && <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">Log: {status.log_path}</p>}
-      <p className="mt-2 text-[11px] text-zinc-500">
-        {substrate} · activation {activation} · {network.id}
-      </p>
-    </div>
+      {status?.path && <p className="mt-2 break-all font-mono text-[10px] text-zinc-500">Event path: {status.path}</p>}
+      {status?.log_path && <p className="mt-1 break-all font-mono text-[10px] text-zinc-500">Process log: {status.log_path}</p>}
+      <div className="mt-3 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+        <div className="flex items-center justify-between gap-2">
+          <h5 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">API stream responses</h5>
+          <span className="text-[10px] tabular-nums text-zinc-500">{results?.length ?? 0} responses</span>
+        </div>
+        <div
+          aria-live="polite"
+          aria-label="Bitcoin stream API responses"
+          className="mt-2 max-h-64 space-y-2 overflow-y-auto overscroll-contain rounded-lg bg-zinc-50 p-2 dark:bg-zinc-950"
+        >
+          {(results || []).map((entry) => (
+            <div key={entry.id} className="border-b border-zinc-200 pb-2 last:border-0 last:pb-0 dark:border-zinc-800">
+              <div className="mb-1 flex flex-wrap justify-between gap-2 text-[10px] text-zinc-500">
+                <span className="font-semibold">{entry.label}</span>
+                <time>{entry.time}</time>
+              </div>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-all text-[10px] leading-4 text-zinc-700 dark:text-zinc-300">{JSON.stringify(entry.body, null, 2)}</pre>
+            </div>
+          ))}
+          {(!results || results.length === 0) && (
+            <p className="py-3 text-xs text-zinc-500">Press Stream to start the API-managed Bitcoin pipeline and display its returned API responses here.</p>
+          )}
+        </div>
+        <p className="mt-2 text-[10px] leading-4 text-zinc-500">
+          The current API returns process start/status responses here. Its Rust stream() helper does not expose individual PipelineOutcome values or a live log HTTP route yet.
+        </p>
+      </div>
+    </section>
   );
 }
 
@@ -382,6 +406,7 @@ export default function EventStorePage() {
   const [wirePackets, setWirePackets] = useState({});
   const [observations, setObservations] = useState({});
   const [busyObservation, setBusyObservation] = useState({});
+  const [streamResults, setStreamResults] = useState({});
   const [expanded, setExpanded] = useState({});
   const [loadingList, setLoadingList] = useState(false);
   const [loadingEvents, setLoadingEvents] = useState(false);
@@ -672,6 +697,7 @@ export default function EventStorePage() {
     setBoards({});
     setWirePackets({});
     setObservations({});
+    setStreamResults({});
     setStore(null);
     setError("");
     setNotice("");
@@ -700,6 +726,7 @@ export default function EventStorePage() {
     setWirePackets({});
     setBoards({});
     setObservations({});
+    setStreamResults({});
     setPayloads([]);
     setError("");
     setNotice("");
@@ -768,6 +795,91 @@ export default function EventStorePage() {
     }
   };
 
+  const appendStreamResult = (networkId, label, body) => {
+    setStreamResults((current) => ({
+      ...current,
+      [networkId]: [
+        ...(current[networkId] || []),
+        {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          label,
+          time: new Date().toLocaleTimeString(),
+          body,
+        },
+      ].slice(-60),
+    }));
+  };
+
+  const refreshStream = async (network) => {
+    const route = `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(network.id)}/observation`;
+    setBusyObservation((current) => ({ ...current, [network.id]: true }));
+    try {
+      const status = await apiRequest(route);
+      setObservations((current) => ({ ...current, [network.id]: status }));
+      appendStreamResult(network.id, "GET observation status", status);
+    } catch (err) {
+      appendStreamResult(network.id, "GET observation error", {
+        error: err instanceof Error ? err.message : "Unable to refresh stream status.",
+      });
+    } finally {
+      setBusyObservation((current) => ({ ...current, [network.id]: false }));
+    }
+  };
+
+  const streamAction = async (action, network) => {
+    const id = network.id;
+    const route = `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/observation`;
+    setBusyObservation((current) => ({ ...current, [id]: true }));
+    try {
+      const result = await apiRequest(route, {
+        method: action === "start" ? "POST" : "DELETE",
+      });
+      appendStreamResult(id, `${action.toUpperCase()} observation response`, result);
+      setObservations((current) => ({ ...current, [id]: result }));
+      const status = await apiRequest(route);
+      appendStreamResult(id, "GET observation status", status);
+      setObservations((current) => ({ ...current, [id]: status }));
+      setNotice(result?.message || `Bitcoin stream ${action} request completed.`);
+      if (action === "start") {
+        const [board, wire] = await Promise.all([
+          apiRequest(`/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/payload-board`),
+          apiRequest(`/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/wirepackets`),
+        ]);
+        setBoards((current) => ({ ...current, [id]: board }));
+        setWirePackets((current) => ({ ...current, [id]: wire }));
+      }
+    } catch (err) {
+      const failure = { error: err instanceof Error ? err.message : "Bitcoin stream request failed." };
+      appendStreamResult(id, `${action.toUpperCase()} request error`, failure);
+      setError(failure.error);
+    } finally {
+      setBusyObservation((current) => ({ ...current, [id]: false }));
+    }
+  };
+
+  useEffect(() => {
+    const activeNetworks = networks.filter(
+      (network) => bitcoinNetwork(network) && observations[network.id]?.running === true,
+    );
+    if (!substrate || !/^\\d+$/.test(String(activation)) || activeNetworks.length === 0) return;
+
+    const timer = setInterval(async () => {
+      const snapshots = await Promise.allSettled(
+        activeNetworks.map((network) =>
+          apiRequest(`/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(network.id)}/observation`),
+        ),
+      );
+      snapshots.forEach((result, index) => {
+        if (result.status !== "fulfilled") return;
+        const networkId = activeNetworks[index].id;
+        setObservations((current) => ({ ...current, [networkId]: result.value }));
+        appendStreamResult(networkId, "Polled observation status", result.value);
+      });
+    }, REFRESH_INTERVAL_MS);
+
+    return () => clearInterval(timer);
+  }, [networks, observations, substrate, activation]);
+
   const activationEvents = selectedEvents;
   const retainedMass = activationEvents.reduce((sum, event) => {
     const value = event?.retained_mass ?? event?.heritage?.state?.retained_mass ?? "0";
@@ -786,15 +898,19 @@ export default function EventStorePage() {
   const configuredCount = budgets.filter((row) => row.configured && row.budget).length;
 
   return (
-    <main className="min-h-screen bg-zinc-50 px-3 py-5 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
+    <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-5 sm:py-6 dark:bg-zinc-950 dark:text-zinc-50">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-3">
         <Panel
           title="QTM Event Store"
           description="Inspect persisted substrate events, activation-scoped payloads, network budgets, payload boards, Bitcoin observation and the API-owned wirepackets file."
           action={
-            <button type="button" className={BUTTON} disabled={!substrate || loadingEvents || loadingBudgets || loadingPayloads || loadingBoards || loadingWire} onClick={refreshAll}>
-              {loadingEvents || loadingBudgets || loadingPayloads || loadingBoards || loadingWire ? "Refreshing…" : "Refresh"}
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <a href="/network" className={BUTTON}>Network</a>
+              <a href="/" className={BUTTON}>≤ QTM</a>
+              <button type="button" className={BUTTON} disabled={!substrate || loadingEvents || loadingBudgets || loadingPayloads || loadingBoards || loadingWire} onClick={refreshAll}>
+                {loadingEvents || loadingBudgets || loadingPayloads || loadingBoards || loadingWire ? "Refreshing…" : "Refresh"}
+              </button>
+            </div>
           }
         >
           <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -886,13 +1002,15 @@ export default function EventStorePage() {
 
                     {bitcoinNetwork(network) && (
                       <>
-                        <ObservationControl
+                        <StreamCard
                           substrate={substrate}
                           activation={activation}
                           network={network}
                           status={observations[id]}
                           busy={busyObservation[id] === true}
-                          onAction={observationAction}
+                          results={streamResults[id] || []}
+                          onAction={streamAction}
+                          onRefresh={refreshStream}
                         />
                         <WirePackets metadata={wirePackets[id]} loading={loadingWire} />
                       </>
