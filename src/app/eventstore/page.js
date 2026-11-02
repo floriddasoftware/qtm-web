@@ -135,8 +135,9 @@ function budgetValue(budget, key) {
   return undefined;
 }
 
-// Canonical wirepackets location (API-owned, a FILE not a directory):
-//   <substrate>/activations/<activation>/event/<commitment>/wirepackets
+// Canonical wirepackets location (API-owned, a FILE not a directory), resolved
+// by qp_hd::commands::wirepackets_path:
+//   <substrate>/activations/<activation>/event/wirepackets
 const WIREPACKETS_CANONICAL = "activations/<activation>/event/wirepackets";
 
 // Tri-state: true / false only when the API sent a real boolean, otherwise
@@ -259,6 +260,23 @@ function normalizeNetwork(network) {
   };
 }
 
+// The observation and wirepackets routes are Bitcoin-only on qtm-api; never
+// call them for Ethereum, Solana or Tron networks.
+function isBitcoinObservationNetwork(network) {
+  return (
+    String(network?.coin ?? "").toLowerCase() === "bitcoin" ||
+    String(network?.id ?? "").startsWith("bitcoin-")
+  );
+}
+
+// POST starts the miner child process, GET reports it (qtm-api start_bitminer /
+// get_bitminer_status). One route, keyed by substrate + activation.
+function observationRoute(name, activationValue, networkId) {
+  return `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(
+    String(activationValue),
+  )}/networks/${encodeURIComponent(networkId)}/observation`;
+}
+
 function normalizeNetworkBudgets(result, activationValue) {
   const selected = String(activationValue);
 
@@ -369,7 +387,8 @@ function normalizeWireStream(body, name, activationValue, networkId) {
       ? String(body.activation)
       : requestedActivation;
 
-  const commitment = reportedText(body?.commitment);
+  const scope = reportedText(body?.scope);
+  const fileRoute = reportedText(body?.file_route);
   const path = reportedText(body?.path);
   const exists = body?.exists === true;
 
@@ -403,6 +422,8 @@ function normalizeWireStream(body, name, activationValue, networkId) {
     substrate: body?.substrate ?? name,
     activation: reportedActivation,
     network: body?.network ?? networkId,
+    scope,
+    fileRoute,
     path,
     exists,
     file,
@@ -419,8 +440,7 @@ function normalizeWireStream(body, name, activationValue, networkId) {
  *
  * The client only renders what the API serializes. Every state is tri-state:
  * a real boolean/string is shown, anything absent stays null ("not reported").
- * The derived listen-port candidate is intentionally NOT read: it is computed
- * from the commitment and is not evidence of a listener.
+ * Miner process state comes from the API's child-process registry.
  */
 function normalizePayloadBoard(body, name, activationValue, networkId) {
   const kinds = Array.isArray(body?.kinds)
@@ -491,12 +511,9 @@ function normalizePayloadBoard(body, name, activationValue, networkId) {
 
   const observation = rawObservation
     ? {
-        registry_running: reportedBool(rawObservation.registry_running),
-        path_hint: reportedText(rawObservation.path_hint),
+        process_running: reportedBool(rawObservation.process_running),
+        pid: rawObservation.pid ?? null,
         bit_minner_feature: reportedBool(rawObservation.bit_minner_feature),
-        electrum_listener_bound: reportedBool(
-          rawObservation.electrum_listener_bound,
-        ),
         settlement_payload_carried: reportedBool(
           rawObservation.settlement_payload_carried,
         ),
@@ -871,8 +888,7 @@ function PayloadBoardPanel({ network, board, loading, activation }) {
   const scoped = kinds.filter((k) => k.in_scope);
   const observation = board?.observation;
 
-  // Only an explicit `true` from the API is shown as a listener/chain state.
-  const listenerBound = observation?.electrum_listener_bound === true;
+  // Only an explicit `true` from the API is shown as a carried payload.
   const payloadCarried = observation?.settlement_payload_carried === true;
 
   return (
@@ -888,8 +904,9 @@ function PayloadBoardPanel({ network, board, loading, activation }) {
           <span className="mt-1 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">
             API payload model from payload.rs — PayloadKind and
             AuthorizedPayload for network {network.id} · activation{" "}
-            {activation}. Listener and pipeline-chain states appear only when
-            the API explicitly reports them. Depth objects are ancillary.
+            {activation}. Miner process state and a carried settlement payload
+            appear only when the API explicitly reports them. Depth objects are
+            ancillary.
           </span>
         </span>
 
@@ -923,9 +940,15 @@ function PayloadBoardPanel({ network, board, loading, activation }) {
             <dl className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="Commitment">{display(board.commitment)}</Field>
 
-              {observation.registry_running !== null && (
-                <Field label="Observation registry (control plane)">
-                  {observation.registry_running ? "running" : "idle"}
+              {observation.process_running !== null && (
+                <Field label="Miner process">
+                  {observation.process_running
+                    ? `running${
+                        observation.pid !== null && observation.pid !== undefined
+                          ? ` (pid ${observation.pid})`
+                          : ""
+                      }`
+                    : "not running"}
                 </Field>
               )}
 
@@ -935,20 +958,16 @@ function PayloadBoardPanel({ network, board, loading, activation }) {
                 </Field>
               )}
 
-              {listenerBound && (
-                <Field label="Electrum listener">bound</Field>
-              )}
-
               {payloadCarried && (
                 <Field label="Settlement payload">carried</Field>
               )}
             </dl>
           )}
 
-          {!board?.error && observation && !listenerBound && !payloadCarried && (
+          {!board?.error && observation && !payloadCarried && (
             <p className="mb-3 rounded-lg bg-zinc-50 p-3 text-xs leading-5 text-zinc-500 dark:bg-zinc-950 dark:text-zinc-400">
-              The API does not report a bound listener or a carried settlement
-              payload for this context, so none is shown.
+              The API does not report a carried settlement payload for this
+              context (no wirepackets file is persisted), so none is shown.
             </p>
           )}
 
@@ -1076,9 +1095,9 @@ function WirePacketStreamPanel({ network, stream, loading, activation }) {
             Persisted file for network {network.id} · activation {activation}.
             Canonical path:{" "}
             <span className="break-all font-mono">{WIREPACKETS_CANONICAL}</span>
-            . <span className="font-mono">wirepackets</span> is a single file,
-            keyed by activation and commitment; the network is request context
-            only.
+            . <span className="font-mono">wirepackets</span> is a single file
+            per activation; the network only selects the Bitcoin scope. This
+            panel reports the file; it does not start the stream.
           </span>
         </span>
 
@@ -1110,7 +1129,7 @@ function WirePacketStreamPanel({ network, stream, loading, activation }) {
 
           {stream && !stream.error && (
             <dl className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <Field label="Commitment">{display(stream.commitment)}</Field>
+              <Field label="Scope">{display(stream.scope)}</Field>
               <Field label="File present">{stream.exists ? "yes" : "no"}</Field>
               <Field label="Returned path">{display(file?.path ?? stream.path)}</Field>
               <Field label="File size">
@@ -1124,12 +1143,22 @@ function WirePacketStreamPanel({ network, stream, loading, activation }) {
               <Notice type="warning">
                 The returned path does not end with{" "}
                 <span className="font-mono">
-                  /activations/{activation}/event/{display(stream.commitment)}
-                  /wirepackets
+                  /activations/{activation}/event/wirepackets
                 </span>
                 .
               </Notice>
             </div>
+          )}
+
+          {stream?.exists && !stream.error && stream.fileRoute && (
+            <a
+              className={`${BUTTON_CLASS} mt-3 w-full sm:w-auto`}
+              href={`${API_BASE}${stream.fileRoute}`}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Open wirepackets file
+            </a>
           )}
 
           {loading && (
@@ -1154,6 +1183,70 @@ function WirePacketStreamPanel({ network, stream, loading, activation }) {
   );
 }
 
+function ObservationStreamPanel({ network, status, busy, onStart }) {
+  const running = status?.running === true;
+
+  return (
+    <section className="min-w-0 rounded-xl border border-zinc-200 p-3 dark:border-zinc-800 sm:p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-sm font-semibold">
+            Bitcoin observation stream
+          </h3>
+          <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+            {network.id} · activation {status?.activation ?? "selected"}
+          </p>
+        </div>
+
+        <span
+          className={`rounded-full px-2.5 py-1 text-xs font-medium ${
+            running
+              ? "bg-emerald-50 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+              : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+          }`}
+        >
+          {running ? "Running" : "Not running"}
+        </span>
+      </div>
+
+      <button
+        type="button"
+        className={`${BUTTON_CLASS} mt-3 w-full`}
+        disabled={busy}
+        onClick={() => onStart(network)}
+      >
+        {busy
+          ? "Starting / confirming…"
+          : running
+            ? "Confirm running stream"
+            : "Start observation stream"}
+      </button>
+
+      {status?.error && (
+        <div className="mt-3">
+          <Notice type="warning">{status.error}</Notice>
+        </div>
+      )}
+
+      {status && !status.error && (
+        <dl className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Field label="Process">{running ? "Running" : "Stopped"}</Field>
+          <Field label="Process ID">{display(status.pid)}</Field>
+          <Field label="Observation path">{display(status.path)}</Field>
+          <Field label="Event path">{display(status.event_path)}</Field>
+          <Field label="Miner log">{display(status.log_path)}</Field>
+          <Field label="Active clips">
+            {Array.isArray(status.clips) ? status.clips.length : "Not reported"}
+          </Field>
+          <Field label="Runtime">
+            <RuntimeValue runtime={status.runtime} />
+          </Field>
+        </dl>
+      )}
+    </section>
+  );
+}
+
 export default function EventStorePage() {
   const [substrates, setSubstrates] = useState([]);
   const [networks, setNetworks] = useState([]);
@@ -1162,9 +1255,12 @@ export default function EventStorePage() {
   const [activationOptions, setActivationOptions] = useState(["0"]);
   const [store, setStore] = useState(null);
   const [payloads, setPayloads] = useState([]);
-  // Wirepackets FILE: <substrate>/activations/<activation>/event/<commitment>/wirepackets
+  // Wirepackets FILE: <substrate>/activations/<activation>/event/wirepackets
   const [wireStreams, setWireStreams] = useState({});
   const [loadingWire, setLoadingWire] = useState(false);
+  // Bitcoin observation process status per network (GET .../observation)
+  const [observationStates, setObservationStates] = useState({});
+  const [observationBusy, setObservationBusy] = useState({});
   // Payload board: API PayloadKind + AuthorizedPayload (payload.rs) — display only
   const [payloadBoards, setPayloadBoards] = useState({});
   const [loadingBoards, setLoadingBoards] = useState(false);
@@ -1191,6 +1287,7 @@ export default function EventStorePage() {
   const budgetRequestRef = useRef(0);
   const wireRequestRef = useRef(0);
   const boardRequestRef = useRef(0);
+  const observationRequestRef = useRef(0);
   const savingKeysRef = useRef({});
 
   const events = Array.isArray(store?.events) ? store.events : [];
@@ -1434,12 +1531,20 @@ export default function EventStorePage() {
   /**
    * Wirepackets file status for listeners.
    * GET /wallets/:name/activations/:activation/networks/:network/wirepackets
-   * The file lives at <substrate>/activations/<activation>/event/<commitment>/wirepackets
-   * (API-owned path). Network is request context only.
+   * The file lives at <substrate>/activations/<activation>/event/wirepackets
+   * (API-owned path). The route is Bitcoin-only; other networks are skipped.
    */
   const loadWirePackets = useCallback(
     async (name, activationValue, networkRows, options = {}) => {
       if (!name || !Array.isArray(networkRows) || networkRows.length === 0) {
+        setWireStreams({});
+        return {};
+      }
+
+      const bitcoinRows = networkRows.filter(isBitcoinObservationNetwork);
+
+      if (bitcoinRows.length === 0) {
+        wireRequestRef.current += 1;
         setWireStreams({});
         return {};
       }
@@ -1449,7 +1554,7 @@ export default function EventStorePage() {
 
       try {
         const results = await Promise.allSettled(
-          networkRows.map((network) =>
+          bitcoinRows.map((network) =>
             apiRequest(
               `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(String(activationValue))}/networks/${encodeURIComponent(network.id)}/wirepackets`,
             ).then((body) => ({ networkId: network.id, body })),
@@ -1467,7 +1572,7 @@ export default function EventStorePage() {
         const next = {};
 
         results.forEach((result, index) => {
-          const networkId = networkRows[index]?.id;
+          const networkId = bitcoinRows[index]?.id;
           if (!networkId) return;
 
           if (result.status === "fulfilled") {
@@ -1487,7 +1592,8 @@ export default function EventStorePage() {
               substrate: name,
               activation: String(activationValue),
               network: networkId,
-              commitment: null,
+              scope: null,
+              fileRoute: null,
               path: null,
               exists: false,
               file: null,
@@ -1515,6 +1621,129 @@ export default function EventStorePage() {
       }
     },
     [],
+  );
+
+  /**
+   * Bitcoin observation process status (qtm-api child-process registry).
+   * GET /wallets/:name/activations/:activation/networks/:network/observation
+   */
+  const loadObservationStatuses = useCallback(
+    async (name, activationValue, networkRows) => {
+      const bitcoinNetworks = networkRows.filter(isBitcoinObservationNetwork);
+
+      if (!name || !bitcoinNetworks.length) {
+        observationRequestRef.current += 1;
+        setObservationStates({});
+        return {};
+      }
+
+      const requestId = ++observationRequestRef.current;
+
+      const results = await Promise.allSettled(
+        bitcoinNetworks.map(async (network) => ({
+          networkId: network.id,
+          body: await apiRequest(
+            observationRoute(name, activationValue, network.id),
+          ),
+        })),
+      );
+
+      if (
+        requestId !== observationRequestRef.current ||
+        selectedSubstrateRef.current !== name ||
+        selectedActivationRef.current !== String(activationValue)
+      ) {
+        return null;
+      }
+
+      const next = {};
+
+      results.forEach((result, index) => {
+        const networkId = bitcoinNetworks[index].id;
+
+        if (result.status === "fulfilled") {
+          next[networkId] = result.value.body;
+        } else {
+          next[networkId] = {
+            substrate: name,
+            activation: String(activationValue),
+            network: networkId,
+            running: false,
+            error:
+              result.reason instanceof Error
+                ? result.reason.message
+                : "Unable to load observation status.",
+          };
+        }
+      });
+
+      setObservationStates(next);
+      return next;
+    },
+    [],
+  );
+
+  /**
+   * Start the stream, then confirm it.
+   * POST starts the miner child process (or returns already_running: true);
+   * GET on the same route reports the registered process.
+   */
+  const startObservationStream = useCallback(
+    async (network) => {
+      if (!substrate || !/^\d+$/.test(String(activation))) return;
+
+      const name = substrate;
+      const activationValue = activation;
+      const networkId = network.id;
+      const key = networkId;
+
+      setObservationBusy((current) => ({
+        ...current,
+        [key]: true,
+      }));
+
+      setError("");
+      setNotice("");
+
+      try {
+        const route = observationRoute(name, activationValue, networkId);
+
+        const startResult = await apiRequest(route, { method: "POST" });
+        const status = await apiRequest(route);
+
+        if (
+          selectedSubstrateRef.current !== name ||
+          selectedActivationRef.current !== String(activationValue)
+        ) {
+          return;
+        }
+
+        setObservationStates((current) => ({
+          ...current,
+          [networkId]: status,
+        }));
+
+        setNotice(
+          status.running
+            ? startResult.already_running
+              ? `Bitcoin observation stream is already running for ${name}, activation ${activationValue}.`
+              : `Bitcoin observation stream started for ${name}, activation ${activationValue}.`
+            : `The start request completed, but the API did not confirm a running process for ${name}, activation ${activationValue}.`,
+        );
+      } catch (err) {
+        setError(
+          `Unable to start or confirm the Bitcoin observation stream: ${
+            err instanceof Error ? err.message : "unknown API error"
+          }`,
+        );
+      } finally {
+        setObservationBusy((current) => ({
+          ...current,
+          [key]: false,
+        }));
+      }
+    },
+    [substrate, activation],
   );
 
   /**
@@ -1692,6 +1921,7 @@ export default function EventStorePage() {
       budgetRequestRef.current += 1;
       wireRequestRef.current += 1;
       boardRequestRef.current += 1;
+      observationRequestRef.current += 1;
     };
   }, [loadNetworks, loadSubstrates]);
 
@@ -1702,6 +1932,7 @@ export default function EventStorePage() {
       setNetworkBudgets([]);
       setWireStreams({});
       setPayloadBoards({});
+      setObservationStates({});
       return;
     }
 
@@ -1719,19 +1950,28 @@ export default function EventStorePage() {
     loadNetworkBudgets(substrate, activation);
   }, [substrate, activation, loadNetworkBudgets]);
 
-  // Keep wirepackets file status and payload boards aligned with selection.
-  // Wire path: <substrate>/activations/<activation>/event/<commitment>/wirepackets
-  // Network is request context only (API resolves the substrate commitment).
+  // Keep observation process status, wirepackets file status and payload
+  // boards aligned with the selection.
+  // Wire path: <substrate>/activations/<activation>/event/wirepackets
   useEffect(() => {
     if (!substrate || !networks.length || !/^\d+$/.test(String(activation))) {
       setWireStreams({});
       setPayloadBoards({});
+      setObservationStates({});
       return;
     }
 
     loadWirePackets(substrate, activation, networks);
     loadPayloadBoards(substrate, activation, networks);
-  }, [substrate, activation, networks, loadWirePackets, loadPayloadBoards]);
+    loadObservationStatuses(substrate, activation, networks);
+  }, [
+    substrate,
+    activation,
+    networks,
+    loadWirePackets,
+    loadPayloadBoards,
+    loadObservationStatuses,
+  ]);
 
   // Stable poll interval: depend only on selection identity, not loading flags.
   // In-flight work is guarded by request-id refs; silent mode avoids flicker.
@@ -1743,6 +1983,7 @@ export default function EventStorePage() {
       if (networks.length && /^\d+$/.test(String(activation))) {
         loadWirePackets(substrate, activation, networks, { silent: true });
         loadPayloadBoards(substrate, activation, networks, { silent: true });
+        loadObservationStatuses(substrate, activation, networks);
       }
     }, REFRESH_INTERVAL_MS);
 
@@ -1754,6 +1995,7 @@ export default function EventStorePage() {
     loadEvents,
     loadWirePackets,
     loadPayloadBoards,
+    loadObservationStatuses,
   ]);
 
   function chooseSubstrate(name) {
@@ -1765,6 +2007,7 @@ export default function EventStorePage() {
     budgetRequestRef.current += 1;
     wireRequestRef.current += 1;
     boardRequestRef.current += 1;
+    observationRequestRef.current += 1;
 
     setSubstrate(name);
     setActivation("0");
@@ -1776,6 +2019,7 @@ export default function EventStorePage() {
     setExpandedNetworks({});
     setWireStreams({});
     setPayloadBoards({});
+    setObservationStates({});
     setError("");
     setNotice("");
     setBudgetErrors({});
@@ -1789,11 +2033,13 @@ export default function EventStorePage() {
     budgetRequestRef.current += 1;
     wireRequestRef.current += 1;
     boardRequestRef.current += 1;
+    observationRequestRef.current += 1;
 
     setActivation(String(value));
     setNetworkBudgets([]);
     setWireStreams({});
     setPayloadBoards({});
+    setObservationStates({});
     setError("");
     setNotice("");
     setBudgetErrors({});
@@ -1959,8 +2205,9 @@ export default function EventStorePage() {
 
       await loadWirePackets(substrate, act, networkList);
       await loadPayloadBoards(substrate, act, networkList);
+      await loadObservationStatuses(substrate, act, networkList);
       setNotice(
-        "Event snapshot, payload render, budgets, wirepackets file status, and payload boards refreshed.",
+        "Event snapshot, payload render, budgets, observation status, wirepackets file status, and payload boards refreshed.",
       );
     }
   }
@@ -2354,12 +2601,23 @@ export default function EventStorePage() {
                         activation={activation}
                       />
 
-                      <WirePacketStreamPanel
-                        network={network}
-                        stream={wireStreams[network.id]}
-                        loading={loadingWire}
-                        activation={activation}
-                      />
+                      {isBitcoinObservationNetwork(network) && (
+                        <>
+                          <ObservationStreamPanel
+                            network={network}
+                            status={observationStates[network.id]}
+                            busy={observationBusy[network.id] === true}
+                            onStart={startObservationStream}
+                          />
+
+                          <WirePacketStreamPanel
+                            network={network}
+                            stream={wireStreams[network.id]}
+                            loading={loadingWire}
+                            activation={activation}
+                          />
+                        </>
+                      )}
 
                       <DirectionSection
                         title="transit_inputs"
