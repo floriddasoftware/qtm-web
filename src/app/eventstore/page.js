@@ -467,44 +467,76 @@ function PayloadBoard({ board, kind, loading }) {
 }
 
 function StreamBody({ status, busy, results, network, onAction, onRefresh }) {
+  const running = status?.running === true;
+
   return (
     <div className="space-y-3">
-      {status?.pid ? <p className="text-xs text-zinc-500">PID {status.pid}</p> : null}
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <Pill tone={running ? "ok" : "warn"}>
+          {running ? "Running" : status?.running === false ? "Stopped" : "Unknown"}
+        </Pill>
+
+        {status?.pid && (
+          <span className="text-xs text-zinc-500">
+            PID {status.pid}
+          </span>
+        )}
+      </div>
+
+      <div className="grid grid-cols-3 gap-2">
         <button
           type="button"
-          className={BUTTON}
-          disabled={busy || status?.running === true}
+          className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`}
+          disabled={busy || running}
           onClick={() => onAction("start", network)}
         >
-          {busy ? "Starting…" : "Start bit-miner"}
+          {busy ? "Working…" : "Start"}
         </button>
+
         <button
           type="button"
-          className={BUTTON}
-          disabled={busy || status?.running !== true}
+          className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`}
+          disabled={busy}
+          onClick={() => onRefresh(network)}
+        >
+          Refresh
+        </button>
+
+        <button
+          type="button"
+          className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`}
+          disabled={busy || !running}
           onClick={() => onAction("stop", network)}
         >
           Stop
         </button>
-        <button type="button" className={BUTTON} disabled={busy} onClick={() => onRefresh(network)}>
-          Refresh
-        </button>
       </div>
+
       {status?.error && <Notice>{status.error}</Notice>}
+
       {status?.path && (
-        <p className="break-all font-mono text-[10px] text-zinc-500">Event path: {status.path}</p>
+        <p className="break-all font-mono text-[10px] text-zinc-500">
+          Event path: {status.path}
+        </p>
       )}
+
       {status?.log_path && (
-        <p className="break-all font-mono text-[10px] text-zinc-500">Process log: {status.log_path}</p>
+        <p className="break-all font-mono text-[10px] text-zinc-500">
+          Process log: {status.log_path}
+        </p>
       )}
+
       <div>
         <div className="flex items-center justify-between">
           <h5 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-            API responses
+            BitMiner responses
           </h5>
-          <span className="text-[10px] tabular-nums text-zinc-500">{results.length}</span>
+
+          <span className="text-[10px] tabular-nums text-zinc-500">
+            {results.length}
+          </span>
         </div>
+
         <div
           aria-live="polite"
           aria-label="Bitcoin bit-miner API responses"
@@ -516,18 +548,23 @@ function StreamBody({ status, busy, results, network, onAction, onRefresh }) {
               className="border-b border-zinc-200 pb-2 last:border-0 last:pb-0 dark:border-zinc-800"
             >
               <div className="mb-1 flex items-center justify-between gap-2 text-[10px] text-zinc-500">
-                <span className="min-w-0 break-words font-semibold">{entry.label}</span>
+                <span className="min-w-0 break-words font-semibold">
+                  {entry.label}
+                </span>
+
                 <time className="shrink-0">{entry.time}</time>
               </div>
+
               <pre className="overflow-x-auto whitespace-pre-wrap break-all text-[10px] leading-4 text-zinc-700 dark:text-zinc-300">
                 {JSON.stringify(entry.body, null, 2)}
               </pre>
             </div>
           ))}
+
           {results.length === 0 && (
             <p className="py-2 text-xs text-zinc-500">
-              Press Start bit-miner to launch it once. Status is not polled; press Refresh to
-              request it again.
+              Start bit-miner to launch its window loop. Refresh checks
+              process status without adding another response entry.
             </p>
           )}
         </div>
@@ -1166,12 +1203,18 @@ export default function EventStorePage() {
   }
 
   const refreshAll = async () => {
-    if (!substrate) return;
-    const selected = String(activation);
-    await loadEvents(substrate, selected);
-    await loadAll(substrate, selected, networks);
-    setNotice("Event Store refreshed from the QTM API.");
-  };
+  if (!substrate || !/^\d+$/.test(String(activation))) return;
+
+  const selected = String(activation);
+
+  await Promise.all([
+    loadEvents(substrate, selected),
+    loadBudgets(substrate, selected),
+    loadNetworkData(substrate, selected, networks),
+  ]);
+
+  setNotice("Event Store refreshed.");
+};
 
   const saveBudget = async (network, draft) => {
     const key = networkKey(network);
@@ -1219,21 +1262,35 @@ export default function EventStorePage() {
   };
 
   // One explicit status request. Never called on a timer.
-  const refreshStream = async (network) => {
-    const route = `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(network.id)}/observation`;
-    setBusyObservation((current) => ({ ...current, [network.id]: true }));
-    try {
-      const status = await apiRequest(route);
-      setObservations((current) => ({ ...current, [network.id]: status }));
-      appendStreamResult(network.id, "GET observation status", status);
-    } catch (err) {
-      appendStreamResult(network.id, "GET observation error", {
-        error: err instanceof Error ? err.message : "Unable to refresh stream status.",
-      });
-    } finally {
-      setBusyObservation((current) => ({ ...current, [network.id]: false }));
-    }
-  };
+ const refreshStream = async (network) => {
+  const id = network.id;
+  const route = `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/observation`;
+
+  setBusyObservation((current) => ({
+    ...current,
+    [id]: true,
+  }));
+
+  try {
+    const status = await apiRequest(route);
+
+    setObservations((current) => ({
+      ...current,
+      [id]: status,
+    }));
+  } catch (err) {
+    setError(
+      err instanceof Error
+        ? err.message
+        : "Unable to retrieve bit-miner process status.",
+    );
+  } finally {
+    setBusyObservation((current) => ({
+      ...current,
+      [id]: false,
+    }));
+  }
+};
 
   // Start: one POST, one initial status GET, one payload-board + wirepackets fetch.
   // Stop: one DELETE. No polling.
