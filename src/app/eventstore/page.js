@@ -7,7 +7,6 @@ const API_BASE = (
   "https://qtm-api-hxcs.onrender.com"
 ).replace(/\/+$/, "");
 
-const REFRESH_INTERVAL_MS = 8000;
 const U128_MAX = 340282366920938463463374607431768211455n;
 
 // Mirrors QTM/src/pathsregistry.rs (CoinType + PathsRegistry::get_path).
@@ -471,14 +470,14 @@ function StreamBody({ status, busy, results, network, onAction, onRefresh }) {
   return (
     <div className="space-y-3">
       {status?.pid ? <p className="text-xs text-zinc-500">PID {status.pid}</p> : null}
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
         <button
           type="button"
           className={BUTTON}
           disabled={busy || status?.running === true}
           onClick={() => onAction("start", network)}
         >
-          {busy ? "Working…" : "Stream"}
+          {busy ? "Starting…" : "Start bit-miner"}
         </button>
         <button
           type="button"
@@ -508,7 +507,7 @@ function StreamBody({ status, busy, results, network, onAction, onRefresh }) {
         </div>
         <div
           aria-live="polite"
-          aria-label="Bitcoin stream API responses"
+          aria-label="Bitcoin bit-miner API responses"
           className="mt-2 max-h-56 space-y-2 overflow-y-auto overscroll-contain rounded-xl bg-white p-2 dark:bg-zinc-900"
         >
           {results.map((entry) => (
@@ -527,8 +526,8 @@ function StreamBody({ status, busy, results, network, onAction, onRefresh }) {
           ))}
           {results.length === 0 && (
             <p className="py-2 text-xs text-zinc-500">
-              Press Stream to start the API-managed pipeline. Start/status responses appear here;
-              the API does not expose per-outcome results or a live log route yet.
+              Press Start bit-miner to launch it once. Status is not polled; press Refresh to
+              request it again.
             </p>
           )}
         </div>
@@ -726,7 +725,7 @@ function NetworkCard({
 
         <Card
           inner
-          title="Pipeline stream"
+          title="Bit-miner"
           badge={
             <Pill tone={observation?.running === true ? "ok" : "neutral"}>
               {observation?.running === true ? "Running" : "Idle"}
@@ -1219,6 +1218,7 @@ export default function EventStorePage() {
     }));
   };
 
+  // One explicit status request. Never called on a timer.
   const refreshStream = async (network) => {
     const route = `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(network.id)}/observation`;
     setBusyObservation((current) => ({ ...current, [network.id]: true }));
@@ -1235,21 +1235,27 @@ export default function EventStorePage() {
     }
   };
 
+  // Start: one POST, one initial status GET, one payload-board + wirepackets fetch.
+  // Stop: one DELETE. No polling.
   const streamAction = async (action, network) => {
     const id = network.id;
     const route = `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/observation`;
+
     setBusyObservation((current) => ({ ...current, [id]: true }));
+
     try {
       const result = await apiRequest(route, {
         method: action === "start" ? "POST" : "DELETE",
       });
+
       appendStreamResult(id, `${action.toUpperCase()} observation response`, result);
       setObservations((current) => ({ ...current, [id]: result }));
-      const status = await apiRequest(route);
-      appendStreamResult(id, "GET observation status", status);
-      setObservations((current) => ({ ...current, [id]: status }));
-      setNotice(result?.message || `Bitcoin stream ${action} request completed.`);
+
       if (action === "start") {
+        const status = await apiRequest(route);
+        appendStreamResult(id, "Initial process status", status);
+        setObservations((current) => ({ ...current, [id]: status }));
+
         const [board, wire] = await Promise.all([
           apiRequest(
             `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/payload-board`,
@@ -1258,12 +1264,15 @@ export default function EventStorePage() {
             `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/wirepackets`,
           ),
         ]);
+
         setBoards((current) => ({ ...current, [id]: board }));
         setWirePackets((current) => ({ ...current, [id]: wire }));
       }
+
+      setNotice(result?.message || `Bitcoin bit-miner ${action} request completed.`);
     } catch (err) {
       const failure = {
-        error: err instanceof Error ? err.message : "Bitcoin stream request failed.",
+        error: err instanceof Error ? err.message : "Bitcoin bit-miner request failed.",
       };
       appendStreamResult(id, `${action.toUpperCase()} request error`, failure);
       setError(failure.error);
@@ -1271,32 +1280,6 @@ export default function EventStorePage() {
       setBusyObservation((current) => ({ ...current, [id]: false }));
     }
   };
-
-  // Poll running Bitcoin observations.
-  useEffect(() => {
-    const activeNetworks = networks.filter(
-      (network) => bitcoinNetwork(network) && observations[network.id]?.running === true,
-    );
-    if (!substrate || !/^\d+$/.test(String(activation)) || activeNetworks.length === 0) return;
-
-    const timer = setInterval(async () => {
-      const snapshots = await Promise.allSettled(
-        activeNetworks.map((network) =>
-          apiRequest(
-            `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(network.id)}/observation`,
-          ),
-        ),
-      );
-      snapshots.forEach((result, index) => {
-        if (result.status !== "fulfilled") return;
-        const networkId = activeNetworks[index].id;
-        setObservations((current) => ({ ...current, [networkId]: result.value }));
-        appendStreamResult(networkId, "Polled observation status", result.value);
-      });
-    }, REFRESH_INTERVAL_MS);
-
-    return () => clearInterval(timer);
-  }, [networks, observations, substrate, activation]);
 
   const eventsEmptyText = loadingEvents
     ? "Loading persisted events…"
