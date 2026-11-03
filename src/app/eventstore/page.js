@@ -10,19 +10,35 @@ const API_BASE = (
 const REFRESH_INTERVAL_MS = 8000;
 const U128_MAX = 340282366920938463463374607431768211455n;
 
+// Mirrors QTM/src/pathsregistry.rs (CoinType + PathsRegistry::get_path).
+const COIN_TYPES = [
+  { key: "bitcoin", name: "Bitcoin", symbol: "BTC", type: 0, path: "m/44'/0'/0'/0/0" },
+  { key: "ethereum", name: "Ethereum", symbol: "ETH", type: 60, path: "m/44'/60'/0'/0/0" },
+  { key: "solana", name: "Solana", symbol: "SOL", type: 501, path: "m/44'/501'/0'/0'" },
+  { key: "tron", name: "Tron", symbol: "TRX", type: 195, path: "m/44'/195'/0'/0/0" },
+];
+
+const BITCOIN_KINDS = {
+  legacy: { label: "Legacy · P2PKH", note: "BIP44 · m/44'/0'/0'/0/0" },
+  segwit: { label: "SegWit · P2WPKH", note: "BIP84 · m/84'/0'/0'/0/0" },
+  other: { label: "Bitcoin", note: "" },
+};
+
 const INPUT =
-  "h-10 w-full min-w-0 text-center transition rounded-lg border border-zinc-200 bg-white px-3 text-sm outline-none focus:border-zinc-500 focus:ring-4 focus:ring-zinc-500/10 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950";
+  "h-10 w-full min-w-0 rounded-xl border border-zinc-200 bg-white px-3 text-sm outline-none transition focus:border-zinc-500 focus:ring-4 focus:ring-zinc-500/10 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950";
 const BUTTON =
-  "inline-flex min-h-10 items-center justify-center text-center active:scale-[0.98] rounded-lg border border-zinc-200 bg-white px-4 py-2 text-sm font-medium transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800";
-const PANEL =
-  "qtm-pop min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white p-4 shadow-sm sm:p-5 dark:border-zinc-800 dark:bg-zinc-900";
+  "inline-flex min-h-10 items-center justify-center rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium transition hover:bg-zinc-50 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800";
+const OUTER =
+  "qtm-pop min-w-0 self-start rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900";
+const INNER =
+  "qtm-pop min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/70 dark:border-zinc-800 dark:bg-zinc-950/60";
 
 const QTM_STYLES = `
 @keyframes qtm-pop {
-  from { opacity: 0; transform: translateY(10px) scale(0.96); }
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
   to { opacity: 1; transform: none; }
 }
-.qtm-pop { animation: qtm-pop 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.qtm-pop { animation: qtm-pop 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 @media (prefers-reduced-motion: reduce) { .qtm-pop { animation: none; } }
 `;
 
@@ -123,14 +139,53 @@ function normalizePayload(entry, fallbackRecord) {
   };
 }
 
+function payloadRowKey(payload) {
+  return JSON.stringify([
+    payload.record,
+    payload.network.id,
+    payload.path,
+    payload.depth_identifier,
+  ]);
+}
+
 function networkKey(network) {
   return network?.id || "";
 }
 
+// Maps an API network to a registry coin key (bitcoin / ethereum / solana / tron / other).
+function coinKey(network) {
+  if (!network) return "other";
+  const coin = String(network.coin ?? "").toLowerCase();
+  const id = String(network.id ?? "").toLowerCase();
+  for (const c of COIN_TYPES) {
+    if (
+      coin === c.key ||
+      coin === String(c.type) ||
+      coin === c.symbol.toLowerCase() ||
+      id === c.symbol.toLowerCase() ||
+      id.includes(c.key)
+    ) {
+      return c.key;
+    }
+  }
+  const match = String(network.path ?? "").match(/^m\/\d+'?\/(\d+)'?/);
+  if (match) {
+    const found = COIN_TYPES.find((c) => String(c.type) === match[1]);
+    if (found) return found.key;
+  }
+  return "other";
+}
+
 function bitcoinNetwork(network) {
-  const coin = String(network?.coin || "").toLowerCase();
-  const id = String(network?.id || "").toLowerCase();
-  return coin === "bitcoin" || id === "bitcoin" || id === "btc" || id.includes("bitcoin");
+  return coinKey(network) === "bitcoin";
+}
+
+function bitcoinKind(network) {
+  const text = `${network.id} ${network.name} ${network.path || ""}`.toLowerCase();
+  const purpose = String(network.purpose ?? "");
+  if (purpose === "84" || /segwit|bech32|p2wpkh|84'/.test(text)) return "segwit";
+  if (purpose === "44" || /legacy|p2pkh|44'/.test(text)) return "legacy";
+  return "other";
 }
 
 function money(value) {
@@ -146,15 +201,33 @@ function parseU128(value, label) {
   return parsed.toString();
 }
 
+/* ───────────────────────── UI primitives ───────────────────────── */
+
+function Pill({ children, tone = "neutral" }) {
+  const tones = {
+    neutral:
+      "border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
+    ok: "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300",
+    warn: "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200",
+  };
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${tones[tone]}`}
+    >
+      {children}
+    </span>
+  );
+}
+
 function Notice({ children, type = "error" }) {
-  const color =
+  const styles =
     type === "success"
-      ? "text-emerald-700 dark:text-emerald-300"
-      : "text-pink-700 dark:text-pink-300";
+      ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200"
+      : "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200";
   return (
     <p
       role={type === "error" ? "alert" : "status"}
-      className={`qtm-pop break-words text-center text-xs leading-5 ${color}`}
+      className={`qtm-pop break-words rounded-xl border px-3 py-2 text-xs leading-5 ${styles}`}
     >
       {children}
     </p>
@@ -163,240 +236,37 @@ function Notice({ children, type = "error" }) {
 
 function Field({ label, children }) {
   return (
-    <div className="min-w-0 text-center"> <dt className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+    <div className="min-w-0">
+      <dt className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
         {label}
       </dt>
-      <dd className="mt-1 break-words text-sm font-medium leading-5">
-        {children ?? "—"}
-      </dd>
+      <dd className="mt-0.5 break-words text-sm font-medium leading-5">{children ?? "—"}</dd>
     </div>
   );
 }
 
-function Panel({ title, description, action, children, className = "" }) {
+function Fields({ children, min = "8rem" }) {
   return (
-    <section className={`${PANEL} ${className}`}>
-      <div className="flex flex-col gap-3">
-        <div className="min-w-0 text-center">
-          <h2 className="text-sm font-semibold tracking-tight sm:text-base">{title}</h2>
-          {description && (
-            <p className="mx-auto mt-1.5 max-w-3xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-              {description}
-            </p>
-          )}
-        </div>
-        {action && (
-          <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 text-right">
-            {action}
-          </div>
-        )}
-      </div>
+    <dl
+      className="grid gap-x-4 gap-y-3"
+      style={{ gridTemplateColumns: `repeat(auto-fit, minmax(${min}, 1fr))` }}
+    >
       {children}
-    </section>
-  );
-}
-
-function BudgetSummary({ budget }) {
-  return (
-    <dl className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-3">
-      <Field label="Minimum events">{money(budget?.min_events)}</Field>
-      <Field label="Maximum events">{money(budget?.max_events)}</Field>
-      <Field label="Maximum retained mass">{money(budget?.max_retained_mass)}</Field>
     </dl>
   );
 }
 
-function BudgetEditor({ budget, disabled, onSave }) {
-  const [draft, setDraft] = useState({
-    min_events: String(budget?.min_events ?? 0),
-    max_events: String(budget?.max_events ?? 1024),
-    max_retained_mass: String(budget?.max_retained_mass ?? 1048576),
-  });
-
-  useEffect(() => {
-    setDraft({
-      min_events: String(budget?.min_events ?? 0),
-      max_events: String(budget?.max_events ?? 1024),
-      max_retained_mass: String(budget?.max_retained_mass ?? 1048576),
-    });
-  }, [budget?.min_events, budget?.max_events, budget?.max_retained_mass]);
-
+function Stat({ label, value, wide = false }) {
   return (
-    <form
-      className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(11rem,1fr))] gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-800"
-      onSubmit={(event) => {
-        event.preventDefault();
-        onSave(draft);
-      }}
+    <div
+      className={`min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/60 ${
+        wide ? "col-span-2" : ""
+      }`}
     >
-      {[
-        ["min_events", "Minimum events"],
-        ["max_events", "Maximum events"],
-        ["max_retained_mass", "Maximum retained mass (u128)"],
-      ].map(([key, label]) => (
-        <label key={key} className="block min-w-0">
-          <span className="mb-1.5 block text-center text-xs font-medium text-zinc-600 dark:text-zinc-300">
-            {label}
-          </span>
-          <input
-            className={INPUT}
-            inputMode="numeric"
-            value={draft[key]}
-            disabled={disabled}
-            onChange={(event) =>
-              setDraft((current) => ({ ...current, [key]: event.target.value }))
-            }
-          />
-        </label>
-      ))}
-      <div className="col-span-full flex justify-end">
-        <button className={BUTTON} type="submit" disabled={disabled}>
-          Save network budget
-        </button>
-      </div>
-    </form>
-  );
-}
-
-function PayloadBoard({ board, loading }) {
-  if (loading && !board) {
-    return <p className="mt-3 text-center text-xs text-zinc-500">Loading network payload board…</p>;
-  }
-  if (!board) {
-    return <p className="mt-3 text-center text-xs text-zinc-500">No payload-board response yet.</p>;
-  }
-  return (
-    <div className="mt-3 space-y-3">
-      {board.error && <Notice>{board.error}</Notice>}
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(8rem,1fr))] gap-3"> <Field label="Board activation">{money(board.activation)}</Field>
-        <Field label="Commitment">{money(board.commitment)}</Field>
-        <Field label="Network">{money(board.network)}</Field>
-        <Field label="Payload kinds">{board.kinds?.length ?? 0}</Field>
-      </div>
-      {board.message && <p className="text-center text-xs text-zinc-500">{board.message}</p>}
-      {board.observation && (
-        <dl className="grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-3 rounded-lg bg-zinc-50 p-3 dark:bg-zinc-950">
-          <Field label="Miner process">{board.observation.process_running == null ? "Not reported" : board.observation.process_running ? "Running" : "Stopped"}</Field>
-          <Field label="Miner PID">{money(board.observation.pid)}</Field>
-          <Field label="Miner feature">{board.observation.bit_minner_feature == null ? "Not reported" : String(board.observation.bit_minner_feature)}</Field>
-          <Field label="Settlement payload carried">{board.observation.settlement_payload_carried == null ? "Not reported" : String(board.observation.settlement_payload_carried)}</Field>
-        </dl>
-      )}
-      <div className="space-y-2">
-        {(board.kinds || []).map((kind, index) => (
-          <div key={`${kind.kind}-${index}`} className="qtm-pop min-w-0 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-            <div className="flex flex-col gap-1">
-              <span className="text-right text-xs text-zinc-500">
-                {kind.available ? "Available" : "Unavailable"} · {kind.in_scope ? "In scope" : "Out of scope"}
-              </span>
-              <span className="break-words text-center text-sm font-semibold">{kind.kind}</span>
-            </div>
-            <dl className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-3">
-              <Field label="Depth path">{money(kind.depth_path)}</Field>
-              <Field label="Depth record">{money(kind.depth_record)}</Field>
-              <Field label="Depth objects">{kind.depth_objects?.length ?? 0}</Field>
-              <Field label="Authorized payload">{kind.authorized_payload?.carried == null ? "Not reported" : String(kind.authorized_payload.carried)}</Field>
-              <Field label="Authorization state">{money(kind.authorized_payload?.authorization_state)}</Field>
-              <Field label="Settlement state">{money(kind.authorized_payload?.settlement_state)}</Field>
-            </dl>
-          </div>
-        ))}
-        {(board.kinds || []).length === 0 && (
-          <p className="text-center text-xs text-zinc-500">No payload kinds were returned for this network.</p>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function StreamCard({ substrate, activation, network, status, busy, results, onAction, onRefresh }) {
-  return (
-    <section className="qtm-pop min-w-0 rounded-lg border border-zinc-200 p-3 sm:p-4 dark:border-zinc-800">
-      <div className="flex flex-col gap-3">
-        <div className="min-w-0 text-center">
-          <h4 className="text-sm font-semibold">Bitcoin pipeline stream</h4>
-          <p className="mt-1 text-xs text-zinc-500">
-            {status?.running === true ? "Stream process running" : status?.running === false ? "Stream process stopped" : "Stream status not loaded"}
-            {status?.pid ? ` · PID ${status.pid}` : ""}
-          </p>
-          <p className="mt-1 break-all text-right font-mono text-[10px] text-zinc-500"> {substrate} · activation {activation} · {network.id}
-          </p>
-        </div>
-        <div className="grid grid-cols-[repeat(auto-fit,minmax(6.5rem,1fr))] gap-2 sm:flex sm:flex-wrap sm:justify-end"> <button type="button" className={BUTTON} disabled={busy || status?.running === true} onClick={() => onAction("start", network)}>
-            {busy ? "Working…" : "Stream"}
-          </button>
-          <button type="button" className={BUTTON} disabled={busy || status?.running !== true} onClick={() => onAction("stop", network)}>
-            Stop
-          </button>
-          <button type="button" className={BUTTON} disabled={busy} onClick={() => onRefresh(network)}>
-            Refresh
-          </button>
-        </div>
-      </div>
-      {status?.error && <p className="mt-2 break-words text-center text-xs text-pink-700 dark:text-pink-300">{status.error}</p>}
-      {status?.path && <p className="mt-2 break-all text-right font-mono text-[10px] text-zinc-500">Event path: {status.path}</p>}
-      {status?.log_path && <p className="mt-1 break-all text-right font-mono text-[10px] text-zinc-500">Process log: {status.log_path}</p>}
-      <div className="mt-3 border-t border-zinc-200 pt-3 dark:border-zinc-800">
-        <div className="flex flex-col gap-1">
-          <span className="text-right text-[10px] tabular-nums text-zinc-500">{results?.length ?? 0} responses</span>
-          <h5 className="text-center text-[10px] font-semibold uppercase tracking-wider text-zinc-500">API stream responses</h5>
-        </div>
-        <div
-          aria-live="polite"
-          aria-label="Bitcoin stream API responses"
-          className="mt-2 max-h-64 space-y-2 overflow-y-auto overscroll-contain rounded-lg bg-zinc-50 p-2 dark:bg-zinc-950"
-        >
-          {(results || []).map((entry) => (
-            <div key={entry.id} className="qtm-pop border-b border-zinc-200 pb-2 last:border-0 last:pb-0 dark:border-zinc-800">
-              <div className="mb-1 flex flex-col gap-0.5 text-[10px] text-zinc-500">
-                <time className="block text-right">{entry.time}</time>
-                <span className="block break-words text-center font-semibold">{entry.label}</span>
-              </div>
-              <pre className="overflow-x-auto whitespace-pre-wrap break-all text-left text-[10px] leading-4 text-zinc-700 dark:text-zinc-300">{JSON.stringify(entry.body, null, 2)}</pre>
-            </div>
-          ))}
-          {(!results || results.length === 0) && (
-            <p className="py-3 text-center text-xs text-zinc-500">Press Stream to start the API-managed Bitcoin pipeline and display its returned API responses here.</p>
-          )}
-        </div>
-        <p className="mt-2 text-center text-[10px] leading-4 text-zinc-500"> The current API returns process start/status responses here. Its Rust stream() helper does not expose individual PipelineOutcome values or a live log HTTP route yet.
-        </p>
-      </div>
-    </section>
-  );
-}
-
-function WirePackets({ metadata, loading }) {
-  const route = metadata?.file_route;
-  const href = route ? `${API_BASE}${route.startsWith("/") ? route : `/${route}`}` : null;
-  return (
-    <div className="qtm-pop min-w-0 rounded-lg border border-zinc-200 p-3 sm:p-4 dark:border-zinc-800">
-      <div className="flex flex-col gap-1">
-        <span className="text-right text-xs text-zinc-500">
-          {loading ? "Loading…" : metadata?.exists ? "File present" : metadata ? "No file" : "Not loaded"}
-        </span>
-        <h4 className="text-center text-xs font-semibold uppercase tracking-wider">Persisted wirepackets file</h4>
-      </div>
-      {metadata && (
-        <dl className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(8rem,1fr))] gap-3"> <Field label="Scope">{money(metadata.scope)}</Field>
-          <Field label="Bytes">{metadata.bytes == null ? "Not reported" : Number(metadata.bytes).toLocaleString()}</Field>
-          <Field label="Activation">{money(metadata.activation)}</Field>
-          <Field label="Network">{money(metadata.network)}</Field>
-        </dl>
-      )}
-      {metadata?.path && <p className="mt-2 break-all text-right font-mono text-[11px] text-zinc-500">{metadata.path}</p>}
-      {href ? (
-        <a
-          className="mt-3 flex min-h-10 w-full items-center justify-center rounded-lg border border-zinc-200 px-4 py-2 text-center text-sm font-medium text-zinc-800 transition hover:bg-zinc-50 active:scale-[0.98] dark:border-zinc-700 dark:text-zinc-100 dark:hover:bg-zinc-800"
-          href={href}
-          target="_blank"
-          rel="noreferrer"
-        >
-          Open persisted wirepackets file
-        </a>
-      ) : (
-        <p className="mt-3 text-center text-xs text-zinc-500">The API has not returned a file route.</p>
-      )}
+      <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+        {label}
+      </p>
+      <p className="mt-1 break-all text-sm font-semibold tabular-nums">{value}</p>
     </div>
   );
 }
@@ -413,35 +283,518 @@ function Collapsible({ open, children }) {
   );
 }
 
+// Every card folds and drops down. Body height is capped when `scroll` is set
+// so tall content never stretches a card into a vertical strip.
+function Card({
+  title,
+  subtitle,
+  badge,
+  defaultOpen = false,
+  inner = false,
+  scroll = false,
+  className = "",
+  style,
+  children,
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section style={style} className={`${inner ? INNER : OUTER} ${className}`}>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className={`flex w-full items-center gap-3 text-left ${inner ? "px-3 py-2.5" : "px-4 py-3.5"}`}
+      >
+        <span className="min-w-0 flex-1">
+          <span
+            className={`block truncate font-semibold ${
+              inner
+                ? "text-[11px] uppercase tracking-wider text-zinc-600 dark:text-zinc-300"
+                : "text-sm"
+            }`}
+          >
+            {title}
+          </span>
+          {subtitle && (
+            <span className="mt-0.5 block truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+              {subtitle}
+            </span>
+          )}
+        </span>
+        {badge}
+        <span
+          aria-hidden="true"
+          className={`shrink-0 text-zinc-400 transition-transform duration-300 ${open ? "rotate-180" : ""}`}
+        >
+          ▾
+        </span>
+      </button>
+      <Collapsible open={open}>
+        <div
+          className={`border-t border-zinc-200/80 dark:border-zinc-800 ${inner ? "p-3" : "p-4"} ${
+            scroll ? "max-h-80 overflow-y-auto overscroll-contain" : ""
+          }`}
+        >
+          {children}
+        </div>
+      </Collapsible>
+    </section>
+  );
+}
+
+function SectionHeading({ title, meta, children }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 px-1 pt-2">
+      <h2 className="text-base font-semibold tracking-tight">{title}</h2>
+      {meta && <Pill>{meta}</Pill>}
+      {children && <p className="basis-full text-xs text-zinc-500 dark:text-zinc-400">{children}</p>}
+    </div>
+  );
+}
+
+/* ───────────────────────── Network pieces ───────────────────────── */
+
+function BudgetSummary({ budget }) {
+  return (
+    <Fields min="7rem">
+      <Field label="Min events">{money(budget?.min_events)}</Field>
+      <Field label="Max events">{money(budget?.max_events)}</Field>
+      <Field label="Max retained mass">{money(budget?.max_retained_mass)}</Field>
+    </Fields>
+  );
+}
+
+function BudgetEditor({ budget, disabled, onSave }) {
+  const toDraft = () => ({
+    min_events: String(budget?.min_events ?? 0),
+    max_events: String(budget?.max_events ?? 1024),
+    max_retained_mass: String(budget?.max_retained_mass ?? 1048576),
+  });
+  const [draft, setDraft] = useState(toDraft);
+
+  useEffect(() => {
+    setDraft(toDraft());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [budget?.min_events, budget?.max_events, budget?.max_retained_mass]);
+
+  return (
+    <form
+      className="mt-4 grid gap-3 border-t border-zinc-200 pt-4 sm:grid-cols-2 dark:border-zinc-800"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSave(draft);
+      }}
+    >
+      {[
+        ["min_events", "Min events"],
+        ["max_events", "Max events"],
+        ["max_retained_mass", "Max retained mass (u128)"],
+      ].map(([key, label]) => (
+        <label
+          key={key}
+          className={`block min-w-0 ${key === "max_retained_mass" ? "sm:col-span-2" : ""}`}
+        >
+          <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
+            {label}
+          </span>
+          <input
+            className={INPUT}
+            inputMode="numeric"
+            value={draft[key]}
+            disabled={disabled}
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, [key]: event.target.value }))
+            }
+          />
+        </label>
+      ))}
+      <div className="sm:col-span-2">
+        <button className={`${BUTTON} w-full sm:w-auto`} type="submit" disabled={disabled}>
+          Save network budget
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function PayloadBoard({ board, loading }) {
+  if (loading && !board) return <p className="text-xs text-zinc-500">Loading payload board…</p>;
+  if (!board) return <p className="text-xs text-zinc-500">No payload-board response yet.</p>;
+  const obs = board.observation;
+  return (
+    <div className="space-y-3">
+      {board.error && <Notice>{board.error}</Notice>}
+      <Fields min="7rem">
+        <Field label="Activation">{money(board.activation)}</Field>
+        <Field label="Network">{money(board.network)}</Field>
+        <Field label="Payload kinds">{board.kinds?.length ?? 0}</Field>
+        <Field label="Commitment">
+          <span className="break-all font-mono text-xs">{money(board.commitment)}</span>
+        </Field>
+      </Fields>
+      {board.message && <p className="text-xs text-zinc-500">{board.message}</p>}
+      {obs && (
+        <div className="rounded-xl bg-white p-3 dark:bg-zinc-900">
+          <Fields min="8rem">
+            <Field label="Miner process">
+              {obs.process_running == null ? "Not reported" : obs.process_running ? "Running" : "Stopped"}
+            </Field>
+            <Field label="Miner PID">{money(obs.pid)}</Field>
+            <Field label="Miner feature">
+              {obs.bit_minner_feature == null ? "Not reported" : String(obs.bit_minner_feature)}
+            </Field>
+            <Field label="Settlement carried">
+              {obs.settlement_payload_carried == null ? "Not reported" : String(obs.settlement_payload_carried)}
+            </Field>
+          </Fields>
+        </div>
+      )}
+      <div className="space-y-2">
+        {(board.kinds || []).map((kind, index) => (
+          <div
+            key={`${kind.kind}-${index}`}
+            className="min-w-0 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="break-words text-sm font-semibold">{kind.kind}</span>
+              <span className="flex gap-1.5">
+                <Pill tone={kind.available ? "ok" : "neutral"}>
+                  {kind.available ? "Available" : "Unavailable"}
+                </Pill>
+                <Pill>{kind.in_scope ? "In scope" : "Out of scope"}</Pill>
+              </span>
+            </div>
+            <div className="mt-3">
+              <Fields min="8rem">
+                <Field label="Depth path">{money(kind.depth_path)}</Field>
+                <Field label="Depth record">{money(kind.depth_record)}</Field>
+                <Field label="Depth objects">{kind.depth_objects?.length ?? 0}</Field>
+                <Field label="Authorized payload">
+                  {kind.authorized_payload?.carried == null
+                    ? "Not reported"
+                    : String(kind.authorized_payload.carried)}
+                </Field>
+                <Field label="Authorization">{money(kind.authorized_payload?.authorization_state)}</Field>
+                <Field label="Settlement">{money(kind.authorized_payload?.settlement_state)}</Field>
+              </Fields>
+            </div>
+          </div>
+        ))}
+        {(board.kinds || []).length === 0 && (
+          <p className="text-xs text-zinc-500">No payload kinds were returned for this network.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StreamBody({ status, busy, results, network, onAction, onRefresh }) {
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Pill tone={status?.running === true ? "ok" : "neutral"}>
+          {status?.running === true
+            ? "Running"
+            : status?.running === false
+              ? "Stopped"
+              : "Status not loaded"}
+        </Pill>
+        {status?.pid ? <span className="text-xs text-zinc-500">PID {status.pid}</span> : null}
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <button
+          type="button"
+          className={BUTTON}
+          disabled={busy || status?.running === true}
+          onClick={() => onAction("start", network)}
+        >
+          {busy ? "Working…" : "Stream"}
+        </button>
+        <button
+          type="button"
+          className={BUTTON}
+          disabled={busy || status?.running !== true}
+          onClick={() => onAction("stop", network)}
+        >
+          Stop
+        </button>
+        <button type="button" className={BUTTON} disabled={busy} onClick={() => onRefresh(network)}>
+          Refresh
+        </button>
+      </div>
+      {status?.error && <Notice>{status.error}</Notice>}
+      {status?.path && (
+        <p className="break-all font-mono text-[10px] text-zinc-500">Event path: {status.path}</p>
+      )}
+      {status?.log_path && (
+        <p className="break-all font-mono text-[10px] text-zinc-500">Process log: {status.log_path}</p>
+      )}
+      <div>
+        <div className="flex items-center justify-between">
+          <h5 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+            API stream responses
+          </h5>
+          <span className="text-[10px] tabular-nums text-zinc-500">{results.length}</span>
+        </div>
+        <div
+          aria-live="polite"
+          aria-label="Bitcoin stream API responses"
+          className="mt-2 max-h-56 space-y-2 overflow-y-auto overscroll-contain rounded-xl bg-white p-2 dark:bg-zinc-900"
+        >
+          {results.map((entry) => (
+            <div
+              key={entry.id}
+              className="border-b border-zinc-200 pb-2 last:border-0 last:pb-0 dark:border-zinc-800"
+            >
+              <div className="mb-1 flex items-center justify-between gap-2 text-[10px] text-zinc-500">
+                <span className="min-w-0 break-words font-semibold">{entry.label}</span>
+                <time className="shrink-0">{entry.time}</time>
+              </div>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-all text-[10px] leading-4 text-zinc-700 dark:text-zinc-300">
+                {JSON.stringify(entry.body, null, 2)}
+              </pre>
+            </div>
+          ))}
+          {results.length === 0 && (
+            <p className="py-2 text-xs text-zinc-500">
+              Press Stream to start the API-managed Bitcoin pipeline. Returned API responses appear here.
+            </p>
+          )}
+        </div>
+        <p className="mt-2 text-[10px] leading-4 text-zinc-500">
+          The API returns process start/status responses. It does not expose individual
+          PipelineOutcome values or a live log route yet.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function WirePacketsBody({ metadata, loading }) {
+  const route = metadata?.file_route;
+  const href = route ? `${API_BASE}${route.startsWith("/") ? route : `/${route}`}` : null;
+  return (
+    <div className="space-y-3">
+      <Pill tone={metadata?.exists ? "ok" : "neutral"}>
+        {loading ? "Loading…" : metadata?.exists ? "File present" : metadata ? "No file" : "Not loaded"}
+      </Pill>
+      {metadata && (
+        <Fields min="7rem">
+          <Field label="Scope">{money(metadata.scope)}</Field>
+          <Field label="Bytes">
+            {metadata.bytes == null ? "Not reported" : Number(metadata.bytes).toLocaleString()}
+          </Field>
+          <Field label="Activation">{money(metadata.activation)}</Field>
+          <Field label="Network">{money(metadata.network)}</Field>
+        </Fields>
+      )}
+      {metadata?.path && (
+        <p className="break-all font-mono text-[11px] text-zinc-500">{metadata.path}</p>
+      )}
+      {href ? (
+        <a
+          className={`${BUTTON} w-full`}
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+        >
+          Open persisted wirepackets file
+        </a>
+      ) : (
+        <p className="text-xs text-zinc-500">The API has not returned a file route.</p>
+      )}
+    </div>
+  );
+}
+
 function PayloadItem({ payload }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="qtm-pop min-w-0 rounded-lg bg-zinc-50 p-3 dark:bg-zinc-950">
-      <div className="flex flex-col gap-1">
-        <span className="text-right text-[11px] text-zinc-500">{payload.objects.length} objects</span>
-        <span className="break-all text-center text-xs font-semibold">{payload.record}</span>
+    <div className="min-w-0 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="flex items-start justify-between gap-2">
+        <span className="min-w-0 break-all text-xs font-semibold">{payload.record}</span>
+        <Pill>{payload.objects.length} obj</Pill>
       </div>
-      <p className="mt-1 break-all text-center font-mono text-[11px] text-zinc-500">{payload.depth_identifier}</p>
-      <p className="mt-1 break-all text-right font-mono text-[10px] text-zinc-400">{payload.path}</p>
+      <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">{payload.depth_identifier}</p>
+      <p className="mt-0.5 break-all font-mono text-[10px] text-zinc-400">{payload.path}</p>
       {payload.objects.length > 0 && (
         <>
           <button
             type="button"
             aria-expanded={open}
             onClick={() => setOpen((value) => !value)}
-            className="relative mt-2 flex w-full items-center justify-center rounded-lg px-8 py-1.5 text-center text-xs text-zinc-600 transition hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            className="mt-2 flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-xs text-zinc-600 transition hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
           >
             Depth objects
-            <span aria-hidden="true" className={`absolute right-2 transition-transform duration-300 ${open ? "rotate-180" : ""}`}>▾</span>
+            <span
+              aria-hidden="true"
+              className={`transition-transform duration-300 ${open ? "rotate-180" : ""}`}
+            >
+              ▾
+            </span>
           </button>
           <Collapsible open={open}>
-            <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-all text-left text-[10px] text-zinc-500">{JSON.stringify(payload.objects, null, 2)}</pre>
+            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all text-[10px] text-zinc-500">
+              {JSON.stringify(payload.objects, null, 2)}
+            </pre>
           </Collapsible>
         </>
       )}
     </div>
   );
 }
+
+function PayloadRecordsBody({ group }) {
+  const sections = [
+    ["Transit inputs", group.transit_inputs],
+    ["Exile outputs", group.exile_outputs],
+    ["Unclassified", group.unclassified],
+  ].filter(([, rows]) => rows.length > 0);
+  if (sections.length === 0) {
+    return <p className="text-xs text-zinc-500">No payload records for this network.</p>;
+  }
+  return (
+    <div className="space-y-4">
+      {sections.map(([title, rows]) => (
+        <div key={title}>
+          <h5 className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+            {title} <Pill>{rows.length}</Pill>
+          </h5>
+          <div className="grid gap-2">
+            {rows.map((payload) => (
+              <PayloadItem key={payloadRowKey(payload)} payload={payload} />
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function NetworkCard({
+  kind,
+  network,
+  defaultOpen,
+  index,
+  substrate,
+  activation,
+  budgetRow,
+  group,
+  board,
+  wire,
+  observation,
+  busy,
+  results,
+  loadingBoards,
+  loadingBudgets,
+  loadingWire,
+  budgetError,
+  budgetNotice,
+  onSaveBudget,
+  onStreamAction,
+  onRefreshStream,
+}) {
+  const meta = BITCOIN_KINDS[kind];
+  const style = { animationDelay: `${Math.min(index, 6) * 60}ms` };
+
+  if (!network) {
+    return (
+      <Card
+        title={meta.label}
+        subtitle={meta.note}
+        badge={<Pill tone="warn">Not registered</Pill>}
+        style={style}
+      >
+        <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+          The API has not returned a {meta.label} network for this activation yet. It will appear
+          here as soon as it is registered.
+        </p>
+      </Card>
+    );
+  }
+
+  const budget = budgetRow?.budget || null;
+  const configured = Boolean(budgetRow?.configured && budget);
+  const payloadTotal =
+    group.transit_inputs.length + group.exile_outputs.length + group.unclassified.length;
+
+  return (
+    <Card
+      title={kind === "other" ? network.name : meta.label}
+      subtitle={network.id}
+      badge={<Pill tone={configured ? "ok" : "neutral"}>{configured ? "Budget set" : "No budget"}</Pill>}
+      defaultOpen={defaultOpen}
+      style={style}
+    >
+      <div className="space-y-3">
+        <Fields min="7rem">
+          <Field label="Coin">{money(network.coin)}</Field>
+          <Field label="Purpose">{money(network.purpose)}</Field>
+          <Field label="Derivation path">
+            <span className="break-all font-mono text-xs">{money(network.path)}</span>
+          </Field>
+        </Fields>
+
+        <Card
+          inner
+          defaultOpen
+          title={`Network budget · activation ${activation}`}
+          badge={loadingBudgets ? <Pill>Loading</Pill> : null}
+        >
+          <BudgetSummary budget={budget} />
+          <BudgetEditor budget={budget} disabled={loadingBudgets} onSave={(draft) => onSaveBudget(network, draft)} />
+          {budgetError && (
+            <div className="mt-3">
+              <Notice>{budgetError}</Notice>
+            </div>
+          )}
+          {budgetNotice && (
+            <div className="mt-3">
+              <Notice type="success">{budgetNotice}</Notice>
+            </div>
+          )}
+        </Card>
+
+        <Card inner scroll title="Payload board" badge={<Pill>{board?.kinds?.length ?? 0} kinds</Pill>}>
+          <PayloadBoard board={board} loading={loadingBoards} />
+        </Card>
+
+        <Card
+          inner
+          title="Pipeline stream"
+          badge={
+            <Pill tone={observation?.running === true ? "ok" : "neutral"}>
+              {observation?.running === true ? "Running" : "Idle"}
+            </Pill>
+          }
+        >
+          <StreamBody
+            status={observation}
+            busy={busy}
+            results={results}
+            network={network}
+            onAction={onStreamAction}
+            onRefresh={onRefreshStream}
+          />
+        </Card>
+
+        <Card
+          inner
+          title="Wirepackets file"
+          badge={<Pill tone={wire?.exists ? "ok" : "neutral"}>{wire?.exists ? "Present" : "None"}</Pill>}
+        >
+          <WirePacketsBody metadata={wire} loading={loadingWire} />
+        </Card>
+
+        <Card inner scroll title="Payload records" badge={<Pill>{payloadTotal}</Pill>}>
+          <PayloadRecordsBody group={group} />
+        </Card>
+      </div>
+    </Card>
+  );
+}
+
+/* ───────────────────────── Page ───────────────────────── */
 
 export default function EventStorePage() {
   const [substrates, setSubstrates] = useState([]);
@@ -456,7 +809,6 @@ export default function EventStorePage() {
   const [observations, setObservations] = useState({});
   const [busyObservation, setBusyObservation] = useState({});
   const [streamResults, setStreamResults] = useState({});
-  const [expanded, setExpanded] = useState({});
   const [loadingList, setLoadingList] = useState(false);
   const [loadingEvents, setLoadingEvents] = useState(false);
   const [loadingPayloads, setLoadingPayloads] = useState(false);
@@ -473,18 +825,28 @@ export default function EventStorePage() {
   const selectedActivationRef = useRef("");
   const payloadRequestRef = useRef(0);
   const scopeRequestRef = useRef(0);
-  const eventsRef = useRef([]);
 
   const selectedEvents = useMemo(
     () => events.filter((event) => activationFromEvent(event) === String(activation)),
     [events, activation],
   );
 
+  const retainedMass = useMemo(
+    () =>
+      selectedEvents.reduce((sum, event) => {
+        const value = event?.retained_mass ?? event?.heritage?.state?.retained_mass ?? "0";
+        return /^\d+$/.test(String(value)) ? sum + BigInt(value) : sum;
+      }, 0n),
+    [selectedEvents],
+  );
+
   const payloadGroups = useMemo(() => {
     const groups = new Map();
     for (const payload of payloads) {
       const id = payload.network.id;
-      if (!groups.has(id)) groups.set(id, { transit_inputs: [], exile_outputs: [], unclassified: [] });
+      if (!groups.has(id)) {
+        groups.set(id, { transit_inputs: [], exile_outputs: [], unclassified: [] });
+      }
       groups.get(id)[payload.direction].push(payload);
     }
     return groups;
@@ -505,6 +867,34 @@ export default function EventStorePage() {
     if (!values.size) values.add("0");
     return [...values].sort((a, b) => Number(b) - Number(a));
   }, [events, activation]);
+
+  // One entry per network id (API networks first, then payload-only networks).
+  const renderedNetworks = useMemo(() => {
+    const byId = new Map(networks.map((network) => [network.id, network]));
+    for (const payload of payloads) {
+      if (!byId.has(payload.network.id)) byId.set(payload.network.id, payload.network);
+    }
+    return [...byId.values()];
+  }, [networks, payloads]);
+
+  // Bitcoin slots: Legacy, then SegWit, then any other Bitcoin network. Missing ones are placeholders.
+  const bitcoinSlots = useMemo(() => {
+    const buckets = { legacy: [], segwit: [], other: [] };
+    for (const network of renderedNetworks) {
+      if (bitcoinNetwork(network)) buckets[bitcoinKind(network)].push(network);
+    }
+    const slots = [];
+    for (const kind of ["legacy", "segwit"]) {
+      if (buckets[kind].length === 0) slots.push({ kind, network: null });
+      else buckets[kind].forEach((network) => slots.push({ kind, network }));
+    }
+    buckets.other.forEach((network) => slots.push({ kind: "other", network }));
+    return slots;
+  }, [renderedNetworks]);
+
+  const configuredCount = budgets.filter((row) => row.configured && row.budget).length;
+  const anyLoading =
+    loadingEvents || loadingBudgets || loadingPayloads || loadingBoards || loadingWire;
 
   const loadPayloadsForEvents = useCallback(async (name, eventRows, activationValue) => {
     const selectedActivation = String(activationValue);
@@ -541,17 +931,23 @@ export default function EventStorePage() {
         requestId !== payloadRequestRef.current ||
         selectedSubstrateRef.current !== name ||
         selectedActivationRef.current !== selectedActivation
-      ) return null;
+      ) {
+        return null;
+      }
 
-      const collected = [];
+      // De-duplicate by record + network + path + depth identifier.
+      const unique = new Map();
       results.forEach((result, index) => {
         if (result.status !== "fulfilled") return;
         const rows = Array.isArray(result.value?.payloads) ? result.value.payloads : [];
         rows.forEach((entry) => {
           const normalized = normalizePayload(entry, records[index]);
-          if (normalized) collected.push(normalized);
+          if (!normalized) return;
+          const key = payloadRowKey(normalized);
+          if (!unique.has(key)) unique.set(key, normalized);
         });
       });
+      const collected = [...unique.values()];
       setPayloads(collected);
       return collected;
     } catch (err) {
@@ -561,7 +957,9 @@ export default function EventStorePage() {
         selectedActivationRef.current === selectedActivation
       ) {
         setPayloads([]);
-        setError(`Unable to load payload render data: ${err instanceof Error ? err.message : "unknown API error"}`);
+        setError(
+          `Unable to load payload render data: ${err instanceof Error ? err.message : "unknown API error"}`,
+        );
       }
       return null;
     } finally {
@@ -569,49 +967,54 @@ export default function EventStorePage() {
     }
   }, []);
 
-  const loadEvents = useCallback(async (name, activationValue) => {
-    if (!name) return;
-    const selected = String(activationValue);
-    const requestId = ++scopeRequestRef.current;
-    setLoadingEvents(true);
-    setError("");
-    try {
-      const eventBody = await apiRequest(`/wallets/${enc(name)}/events`);
-      if (requestId !== scopeRequestRef.current || selectedSubstrateRef.current !== name) return;
-      const nextEvents = Array.isArray(eventBody?.events) ? eventBody.events : [];
-      setEvents(nextEvents);
-      eventsRef.current = nextEvents;
-      setStore(eventBody);
-      await loadPayloadsForEvents(name, nextEvents, selected);
-    } catch (err) {
-      if (requestId === scopeRequestRef.current) {
-        setEvents([]);
-        eventsRef.current = [];
-        setPayloads([]);
-        setError(err instanceof Error ? err.message : "Unable to load events.");
+  const loadEvents = useCallback(
+    async (name, activationValue) => {
+      if (!name) return;
+      const selected = String(activationValue);
+      const requestId = ++scopeRequestRef.current;
+      setLoadingEvents(true);
+      setError("");
+      try {
+        const eventBody = await apiRequest(`/wallets/${enc(name)}/events`);
+        if (requestId !== scopeRequestRef.current || selectedSubstrateRef.current !== name) return;
+        const nextEvents = Array.isArray(eventBody?.events) ? eventBody.events : [];
+        setEvents(nextEvents);
+        setStore(eventBody);
+        await loadPayloadsForEvents(name, nextEvents, selected);
+      } catch (err) {
+        if (requestId === scopeRequestRef.current) {
+          setEvents([]);
+          setPayloads([]);
+          setError(err instanceof Error ? err.message : "Unable to load events.");
+        }
+      } finally {
+        if (requestId === scopeRequestRef.current) setLoadingEvents(false);
       }
-    } finally {
-      if (requestId === scopeRequestRef.current) setLoadingEvents(false);
-    }
-  }, [loadPayloadsForEvents]);
+    },
+    [loadPayloadsForEvents],
+  );
 
   const loadBudgets = useCallback(async (name, activationValue) => {
     if (!name || !/^\d+$/.test(String(activationValue))) return;
     const selected = String(activationValue);
     try {
-      const body = await apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/budgets`);
+      const body = await apiRequest(
+        `/wallets/${enc(name)}/activations/${enc(selected)}/budgets`,
+      );
       if (selectedSubstrateRef.current !== name || selectedActivationRef.current !== selected) return;
       const rows = Array.isArray(body?.budgets) ? body.budgets : [];
-      setBudgets(
-        rows.filter((row) => row?.activation == null || String(row.activation) === selected),
-      );
+      setBudgets(rows.filter((row) => row?.activation == null || String(row.activation) === selected));
     } catch (err) {
       if (selectedSubstrateRef.current === name && selectedActivationRef.current === selected) {
         setBudgets([]);
-        setError(`Unable to load network budgets: ${err instanceof Error ? err.message : "API error"}`);
+        setError(
+          `Unable to load network budgets: ${err instanceof Error ? err.message : "API error"}`,
+        );
       }
     } finally {
-      if (selectedSubstrateRef.current === name && selectedActivationRef.current === selected) setLoadingBudgets(false);
+      if (selectedSubstrateRef.current === name && selectedActivationRef.current === selected) {
+        setLoadingBudgets(false);
+      }
     }
   }, []);
 
@@ -625,14 +1028,18 @@ export default function EventStorePage() {
 
     const boardResults = await Promise.allSettled(
       activeNetworks.map((network) =>
-        apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/payload-board`),
+        apiRequest(
+          `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/payload-board`,
+        ),
       ),
     );
     if (
       requestId !== scopeRequestRef.current ||
       selectedSubstrateRef.current !== name ||
       selectedActivationRef.current !== selected
-    ) return;
+    ) {
+      return;
+    }
 
     const nextBoards = {};
     boardResults.forEach((result, index) => {
@@ -647,14 +1054,18 @@ export default function EventStorePage() {
     const btcNetworks = activeNetworks.filter(bitcoinNetwork);
     const wireResults = await Promise.allSettled(
       btcNetworks.map((network) =>
-        apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/wirepackets`),
+        apiRequest(
+          `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/wirepackets`,
+        ),
       ),
     );
     if (
       requestId !== scopeRequestRef.current ||
       selectedSubstrateRef.current !== name ||
       selectedActivationRef.current !== selected
-    ) return;
+    ) {
+      return;
+    }
 
     const nextWire = {};
     wireResults.forEach((result, index) => {
@@ -673,7 +1084,9 @@ export default function EventStorePage() {
     const btcNetworks = (networkRows || []).map(normalizeNetwork).filter(bitcoinNetwork);
     const results = await Promise.allSettled(
       btcNetworks.map((network) =>
-        apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/observation`),
+        apiRequest(
+          `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/observation`,
+        ),
       ),
     );
     if (selectedSubstrateRef.current !== name || selectedActivationRef.current !== selected) return;
@@ -684,19 +1097,22 @@ export default function EventStorePage() {
     setObservations(next);
   }, []);
 
-  const loadAll = useCallback(async (name, activationValue, networkRows = []) => {
-    if (!name || !/^\d+$/.test(String(activationValue))) return;
-    const selected = String(activationValue);
-    selectedSubstrateRef.current = name;
-    selectedActivationRef.current = selected;
-    setLoadingBudgets(true);
-    setError("");
-    await Promise.all([
-      loadBudgets(name, selected),
-      loadNetworkData(name, selected, networkRows),
-      loadObservationStatuses(name, selected, networkRows),
-    ]);
-  }, [loadBudgets, loadNetworkData, loadObservationStatuses]);
+  const loadAll = useCallback(
+    async (name, activationValue, networkRows = []) => {
+      if (!name || !/^\d+$/.test(String(activationValue))) return;
+      const selected = String(activationValue);
+      selectedSubstrateRef.current = name;
+      selectedActivationRef.current = selected;
+      setLoadingBudgets(true);
+      setError("");
+      await Promise.all([
+        loadBudgets(name, selected),
+        loadNetworkData(name, selected, networkRows),
+        loadObservationStatuses(name, selected, networkRows),
+      ]);
+    },
+    [loadBudgets, loadNetworkData, loadObservationStatuses],
+  );
 
   const loadInitial = useCallback(async () => {
     setLoadingList(true);
@@ -803,8 +1219,12 @@ export default function EventStorePage() {
         max_events: Number(draft.max_events),
         max_retained_mass: parseU128(draft.max_retained_mass, "Maximum retained mass"),
       };
-      if (!Number.isSafeInteger(body.min_events) || body.min_events < 0) throw new Error("Minimum events must be a non-negative safe integer.");
-      if (!Number.isSafeInteger(body.max_events) || body.max_events < 0) throw new Error("Maximum events must be a non-negative safe integer.");
+      if (!Number.isSafeInteger(body.min_events) || body.min_events < 0) {
+        throw new Error("Minimum events must be a non-negative safe integer.");
+      }
+      if (!Number.isSafeInteger(body.max_events) || body.max_events < 0) {
+        throw new Error("Maximum events must be a non-negative safe integer.");
+      }
       await apiRequest(
         `/wallets/${enc(substrate)}/activations/${enc(activation)}/budgets/${enc(network.id)}`,
         { method: "PUT", body: JSON.stringify(body) },
@@ -816,31 +1236,6 @@ export default function EventStorePage() {
         ...current,
         [key]: err instanceof Error ? err.message : "Unable to save network budget.",
       }));
-    }
-  };
-
-  const observationAction = async (action, network) => {
-    const id = network.id;
-    setBusyObservation((current) => ({ ...current, [id]: true }));
-    setError("");
-    try {
-      const route = `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/observation`;
-      const body = await apiRequest(route, { method: action === "start" ? "POST" : "DELETE" });
-      setObservations((current) => ({ ...current, [id]: body }));
-      setNotice(body?.message || `Bitcoin observation ${action} request completed.`);
-      const status = await apiRequest(route);
-      setObservations((current) => ({ ...current, [id]: status }));
-      // Refresh only the network board and API-owned wire-packet metadata.
-      const [board, wire] = await Promise.all([
-        apiRequest(`/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/payload-board`),
-        apiRequest(`/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/wirepackets`),
-      ]);
-      setBoards((current) => ({ ...current, [id]: board }));
-      setWirePackets((current) => ({ ...current, [id]: wire }));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Bitcoin observation request failed.");
-    } finally {
-      setBusyObservation((current) => ({ ...current, [id]: false }));
     }
   };
 
@@ -891,14 +1286,20 @@ export default function EventStorePage() {
       setNotice(result?.message || `Bitcoin stream ${action} request completed.`);
       if (action === "start") {
         const [board, wire] = await Promise.all([
-          apiRequest(`/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/payload-board`),
-          apiRequest(`/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/wirepackets`),
+          apiRequest(
+            `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/payload-board`,
+          ),
+          apiRequest(
+            `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/wirepackets`,
+          ),
         ]);
         setBoards((current) => ({ ...current, [id]: board }));
         setWirePackets((current) => ({ ...current, [id]: wire }));
       }
     } catch (err) {
-      const failure = { error: err instanceof Error ? err.message : "Bitcoin stream request failed." };
+      const failure = {
+        error: err instanceof Error ? err.message : "Bitcoin stream request failed.",
+      };
       appendStreamResult(id, `${action.toUpperCase()} request error`, failure);
       setError(failure.error);
     } finally {
@@ -906,16 +1307,19 @@ export default function EventStorePage() {
     }
   };
 
+  // Poll running Bitcoin observations.
   useEffect(() => {
     const activeNetworks = networks.filter(
       (network) => bitcoinNetwork(network) && observations[network.id]?.running === true,
     );
-    if (!substrate || !/^\\d+$/.test(String(activation)) || activeNetworks.length === 0) return;
+    if (!substrate || !/^\d+$/.test(String(activation)) || activeNetworks.length === 0) return;
 
     const timer = setInterval(async () => {
       const snapshots = await Promise.allSettled(
         activeNetworks.map((network) =>
-          apiRequest(`/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(network.id)}/observation`),
+          apiRequest(
+            `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(network.id)}/observation`,
+          ),
         ),
       );
       snapshots.forEach((result, index) => {
@@ -929,239 +1333,271 @@ export default function EventStorePage() {
     return () => clearInterval(timer);
   }, [networks, observations, substrate, activation]);
 
-  const activationEvents = selectedEvents;
-  const retainedMass = activationEvents.reduce((sum, event) => {
-    const value = event?.retained_mass ?? event?.heritage?.state?.retained_mass ?? "0";
-    if (!/^\d+$/.test(String(value))) return sum;
-    return sum + BigInt(value);
-  }, 0n);
-
-  const renderedNetworks = useMemo(() => {
-    const byId = new Map(networks.map((network) => [network.id, network]));
-    for (const payload of payloads) {
-      if (!byId.has(payload.network.id)) byId.set(payload.network.id, payload.network);
-    }
-    return [...byId.values()];
-  }, [networks, payloads]);
-
-  const configuredCount = budgets.filter((row) => row.configured && row.budget).length;
-
   const eventsEmptyText = loadingEvents
     ? "Loading persisted events…"
     : substrate
       ? "No persisted event records were returned."
       : "Select a substrate to inspect persisted records.";
 
+  const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
+
   return (
-    <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-5 sm:py-6 dark:bg-zinc-950 dark:text-zinc-50">
+    <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
       <style>{QTM_STYLES}</style>
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-3 sm:gap-4">
-        <Panel
-          title="QTM Event Store"
-          description="Inspect persisted substrate events, activation-scoped payloads, network budgets, payload boards, Bitcoin observation and the API-owned wirepackets file."
-          action={
-            <div className="flex flex-wrap gap-2">
-              <a href="/network" className={BUTTON}>Network</a>
-              <a href="/" className={BUTTON}>≤ QTM</a>
-              <button type="button" className={BUTTON} disabled={!substrate || loadingEvents || loadingBudgets || loadingPayloads || loadingBoards || loadingWire} onClick={refreshAll}>
-                {loadingEvents || loadingBudgets || loadingPayloads || loadingBoards || loadingWire ? "Refreshing…" : "Refresh"}
-              </button>
-            </div>
-          }
-        >
-          <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(14rem,1fr))] gap-3">
-            <label className="block min-w-0">
-              <span className="mb-1.5 block text-center text-sm font-medium">Persistent substrate</span>
-              <select className={INPUT} value={substrate} disabled={loadingList} onChange={(event) => chooseSubstrate(event.target.value)}>
-                <option value="">{loadingList ? "Loading substrates…" : "Select substrate"}</option>
-                {substrates.map((entry) => <option key={entry.name} value={entry.name}>{entry.name}</option>)}
-              </select>
-            </label>
-            <label className="block min-w-0">
-              <span className="mb-1.5 block text-center text-sm font-medium">Activation</span>
-              <select className={INPUT} value={activation} disabled={!substrate} onChange={(event) => chooseActivation(event.target.value)}>
-                {activationOptions.map((value) => <option key={value} value={value}>Activation {value}</option>)}
-              </select>
-            </label>
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
+        <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div className="min-w-0">
+            <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">QTM Event Store</h1>
+            <p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 sm:text-sm dark:text-zinc-400">
+              Persisted substrate events, activation-scoped payloads, network budgets, payload
+              boards, Bitcoin observation and API-owned wirepackets.
+            </p>
           </div>
-          <dl className="mt-5 grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-4 border-t border-zinc-200 pt-4 dark:border-zinc-800">
-            <Field label="Substrate">{substrate || "—"}</Field>
-            <Field label="Selected activation">{activation || "—"}</Field>
-            <Field label="Events in activation">{activationEvents.length}</Field>
-            <Field label="Rendered payloads">{payloads.length}</Field>
-            <Field label="Configured budgets">{configuredCount} / {networks.length}</Field>
-            <Field label="Registered networks">{networks.length}</Field>
-            <Field label="Retained mass in activation">{retainedMass.toString()}</Field>
-            <Field label="API base">{API_BASE}</Field>
-          </dl>
-          {store?.directory && <p className="mt-4 break-all border-t border-zinc-200 pt-3 text-right font-mono text-xs text-zinc-500 dark:border-zinc-800">Substrate directory: {store.directory}</p>}
-        </Panel>
+          <div className="grid grid-cols-3 gap-2 sm:flex">
+            <a href="/network" className={BUTTON}>
+              Network
+            </a>
+            <a href="/" className={BUTTON}>
+              QTM
+            </a>
+            <button
+              type="button"
+              className={BUTTON}
+              disabled={!substrate || anyLoading}
+              onClick={refreshAll}
+            >
+              {anyLoading ? "Syncing…" : "Refresh"}
+            </button>
+          </div>
+        </header>
 
         {error && <Notice>{error}</Notice>}
         {notice && <Notice type="success">{notice}</Notice>}
 
-        <Panel
-          title={`Network hierarchy · activation ${activation || "—"}`}
-          description="Budgets and payload boards are available for every registered network. Bitcoin observation and wirepackets are shown only for Bitcoin networks."
-          action={<span className="text-xs text-zinc-500">{renderedNetworks.length} networks</span>}
+        <Card
+          defaultOpen
+          title="Overview"
+          subtitle={substrate ? `${substrate} · activation ${activation || "—"}` : "No substrate selected"}
+          badge={anyLoading ? <Pill>Syncing</Pill> : <Pill tone="ok">Ready</Pill>}
+          className="w-full"
         >
-          {loadingPayloads && <p className="mt-3 text-center text-xs text-zinc-500">Rendering payload records for the selected activation…</p>}
-          <div className="mt-4 flex flex-col gap-3"> {renderedNetworks.map((network, netIndex) => {
-              const id = network.id;
-              const budgetRow = networkBudgetById.get(id);
-              const budget = budgetRow?.budget || null;
-              const group = payloadGroups.get(id) || { transit_inputs: [], exile_outputs: [], unclassified: [] };
-              const isExpanded = !!expanded[id];
-              return (
-                <section key={id} style={{ animationDelay: `${Math.min(netIndex, 8) * 60}ms` }} className="qtm-pop min-w-0 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-                  <div className="p-4 sm:p-5">
-                    <div className="flex flex-col-reverse gap-3">
-                      <div className="min-w-0 text-center">
-                        <h3 className="text-base font-semibold">{network.name}</h3>
-                        <p className="mt-1 break-all font-mono text-xs text-zinc-500">{id}</p>
-                      </div>
-                      <span className="self-end rounded-full border border-zinc-200 px-2.5 py-1 text-[10px] font-semibold text-zinc-600 dark:border-zinc-700 dark:text-zinc-300">
-                        {budgetRow?.configured && budget ? "Budget configured" : "Budget unconfigured"}
-                      </span>
-                    </div>
-                    <dl className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(8rem,1fr))] gap-3"> <Field label="Coin">{money(network.coin)}</Field>
-                      <Field label="Purpose">{money(network.purpose)}</Field>
-                      <Field label="Derivation path">{money(network.path)}</Field>
-                      <Field label="Payload records">{group.transit_inputs.length + group.exile_outputs.length + group.unclassified.length}</Field>
-                    </dl>
-                    <div className="mt-4 rounded-lg border border-zinc-100 bg-zinc-50/80 p-3 dark:border-zinc-800 dark:bg-zinc-950/70">
-                      <div className="flex flex-col gap-2">
-                        <h4 className="text-center text-xs font-semibold uppercase tracking-wider text-zinc-600 dark:text-zinc-300">Network budget · activation {activation}</h4>
-                        <button type="button" aria-expanded={isExpanded} className={`${BUTTON} self-end`} onClick={() => setExpanded((current) => ({ ...current, [id]: !current[id] }))}>
-                          {isExpanded ? "Close editor" : "Edit budget"}
-                        </button>
-                      </div>
-                      <BudgetSummary budget={budget} />
-                      <Collapsible open={isExpanded}>
-                        <BudgetEditor budget={budget} disabled={loadingBudgets} onSave={(draft) => saveBudget(network, draft)} />
-                      </Collapsible>
-                      {budgetErrors[id] && <div className="mt-3"><Notice>{budgetErrors[id]}</Notice></div>}
-                      {budgetNotices[id] && <div className="mt-3"><Notice type="success">{budgetNotices[id]}</Notice></div>}
-                    </div>
-                  </div>
-
-                  <div className="space-y-3 border-t border-zinc-200 p-3 sm:p-4 dark:border-zinc-800">
-                    <div className="qtm-pop min-w-0 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-                      <h4 className="text-center text-xs font-semibold uppercase tracking-wider">Network payload board</h4>
-                      <p className="mt-1 break-all text-right font-mono text-[11px] text-zinc-500">
-                        GET /wallets/{substrate}/activations/{activation}/networks/{id}/payload-board
-                      </p>
-                      <PayloadBoard board={boards[id]} loading={loadingBoards} />
-                    </div>
-
-                    {bitcoinNetwork(network) && (
-                      <>
-                        <StreamCard
-                          substrate={substrate}
-                          activation={activation}
-                          network={network}
-                          status={observations[id]}
-                          busy={busyObservation[id] === true}
-                          results={streamResults[id] || []}
-                          onAction={streamAction}
-                          onRefresh={refreshStream}
-                        />
-                        <WirePackets metadata={wirePackets[id]} loading={loadingWire} />
-                      </>
-                    )}
-
-                    {[
-                      ["transit_inputs", "Payloads rendered from transit event records.", group.transit_inputs],
-                      ["exile_outputs", "Payloads rendered from exile event records.", group.exile_outputs],
-                      ["Unclassified", "Persisted payloads without a recognized direction.", group.unclassified],
-                    ].map(([title, description, rows]) => (
-                      <div key={title} className="qtm-pop min-w-0 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-                        <h4 className="text-center text-xs font-semibold uppercase tracking-wider">{title}</h4>
-                        <p className="mt-1 text-center text-xs text-zinc-500">{description}</p>
-                        <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(16rem,1fr))] gap-2">
-                          {rows.map((payload, index) => (
-                            <PayloadItem key={`${payload.record}-${payload.path}-${payload.depth_identifier}-${index}`} payload={payload} />
-                          ))}
-                          {rows.length === 0 && <p className="col-span-full text-center text-xs text-zinc-500">No payload records for this direction.</p>}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              );
-            })}
-            {renderedNetworks.length === 0 && (
-              <p className="rounded-lg border border-zinc-200 p-4 text-center text-sm text-zinc-500 dark:border-zinc-800">
-                {loadingBudgets ? "Loading registered networks…" : "No registered networks or payload networks were returned."}
-              </p>
-            )}
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block min-w-0">
+              <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                Persistent substrate
+              </span>
+              <select
+                className={INPUT}
+                value={substrate}
+                disabled={loadingList}
+                onChange={(event) => chooseSubstrate(event.target.value)}
+              >
+                <option value="">{loadingList ? "Loading substrates…" : "Select substrate"}</option>
+                {substrates.map((entry) => (
+                  <option key={entry.name} value={entry.name}>
+                    {entry.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block min-w-0">
+              <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                Activation
+              </span>
+              <select
+                className={INPUT}
+                value={activation}
+                disabled={!substrate}
+                onChange={(event) => chooseActivation(event.target.value)}
+              >
+                {activationOptions.map((value) => (
+                  <option key={value} value={value}>
+                    Activation {value}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
-        </Panel>
-
-        <Panel title="Activation utilization" description="Aggregate measurements from event records belonging to the selected activation.">
-          <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(10rem,1fr))] gap-3">
-            <div className="qtm-pop rounded-lg bg-zinc-50 p-3 dark:bg-zinc-950"><Field label="Selected activation events">{activationEvents.length}</Field></div>
-            <div className="qtm-pop rounded-lg bg-zinc-50 p-3 dark:bg-zinc-950"><Field label="Retained mass">{retainedMass.toString()}</Field></div>
-            <div className="qtm-pop rounded-lg bg-zinc-50 p-3 dark:bg-zinc-950"><Field label="All substrate events">{events.length}</Field></div>
+          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+            <Stat label="Events" value={selectedEvents.length} />
+            <Stat label="All events" value={events.length} />
+            <Stat label="Payloads" value={payloads.length} />
+            <Stat label="Budgets set" value={`${configuredCount} / ${networks.length}`} />
+            <Stat label="Networks" value={networks.length} />
+            <Stat label="Retained mass" value={retainedMass.toString()} />
+            <Stat label="API base" value={API_BASE} wide />
+            {store?.directory && <Stat label="Substrate directory" value={store.directory} wide />}
           </div>
-        </Panel>
+        </Card>
 
-        <Panel
-          title="Persisted event diagnostics"
-          description="Event records returned by GET /wallets/:name/events. Payload rendering is restricted to the selected activation."
-          action={<span className="text-xs text-zinc-500">{events.length} records</span>}
+        <SectionHeading
+          title="Bitcoin"
+          meta={`coin type ${COIN_TYPES[0].type}`}
         >
-          <div className="mt-4 hidden overflow-x-auto rounded-lg border border-zinc-200 lg:block dark:border-zinc-800">
+          Legacy and SegWit networks for activation {activation || "—"}.
+        </SectionHeading>
+        {loadingPayloads && <p className="px-1 text-xs text-zinc-500">Rendering payload records…</p>}
+        <div className="grid grid-cols-1 items-start gap-3 xl:grid-cols-2">
+          {bitcoinSlots.map((slot, index) => {
+            const id = slot.network?.id;
+            return (
+              <NetworkCard
+                key={id || `placeholder-${slot.kind}`}
+                kind={slot.kind}
+                network={slot.network}
+                defaultOpen={index === 0}
+                index={index}
+                substrate={substrate}
+                activation={activation}
+                budgetRow={id ? networkBudgetById.get(id) : undefined}
+                group={(id && payloadGroups.get(id)) || emptyGroup}
+                board={id ? boards[id] : undefined}
+                wire={id ? wirePackets[id] : undefined}
+                observation={id ? observations[id] : undefined}
+                busy={id ? busyObservation[id] === true : false}
+                results={(id && streamResults[id]) || []}
+                loadingBoards={loadingBoards}
+                loadingBudgets={loadingBudgets}
+                loadingWire={loadingWire}
+                budgetError={id ? budgetErrors[id] : ""}
+                budgetNotice={id ? budgetNotices[id] : ""}
+                onSaveBudget={saveBudget}
+                onStreamAction={streamAction}
+                onRefreshStream={refreshStream}
+              />
+            );
+          })}
+        </div>
+
+        <SectionHeading title="Other chains" meta="not yet implemented">
+          Coin types from the paths registry. These are placeholders until each chain is wired up.
+        </SectionHeading>
+        <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {COIN_TYPES.filter((coin) => coin.key !== "bitcoin").map((coin, index) => {
+            const registered = networks.filter((network) => coinKey(network) === coin.key).length;
+            return (
+              <Card
+                key={coin.key}
+                title={coin.name}
+                subtitle={`coin type ${coin.type}`}
+                badge={<Pill tone="warn">Planned</Pill>}
+                style={{ animationDelay: `${index * 60}ms` }}
+              >
+                <Fields min="7rem">
+                  <Field label="Status">Not yet implemented</Field>
+                  <Field label="Registry path">
+                    <span className="break-all font-mono text-xs">{coin.path}</span>
+                  </Field>
+                  <Field label="API networks">{registered}</Field>
+                </Fields>
+              </Card>
+            );
+          })}
+        </div>
+
+        <SectionHeading title="Diagnostics" />
+        <Card
+          scroll
+          title="Persisted event records"
+          subtitle="GET /wallets/:name/events"
+          badge={<Pill>{events.length}</Pill>}
+          className="w-full"
+        >
+          <div className="hidden overflow-x-auto rounded-xl border border-zinc-200 lg:block dark:border-zinc-800">
             <table className="w-full min-w-[850px] border-collapse text-left text-sm">
               <thead className="bg-zinc-100 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                <tr>{["Activation", "Event type", "Record reference", "Dimension", "Structural value (Σ)", "Depth objects", "Retained mass"].map((heading, headingIndex) => <th key={heading} className={`px-4 py-3 font-semibold ${headingIndex === 6 ? "text-right" : "text-center"}`}>{heading}</th>)}</tr>
+                <tr>
+                  {[
+                    "Activation",
+                    "Event type",
+                    "Record reference",
+                    "Dimension",
+                    "Structural value (Σ)",
+                    "Depth objects",
+                    "Retained mass",
+                  ].map((heading) => (
+                    <th key={heading} className="px-4 py-3 font-semibold">
+                      {heading}
+                    </th>
+                  ))}
+                </tr>
               </thead>
               <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
                 {events.map((event, index) => {
                   const state = event?.heritage?.state;
                   return (
-                    <tr key={`${event.record}-${index}`} className="align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
-                      <td className="text-center whitespace-nowrap px-4 py-3 font-mono">{activationFromEvent(event) ?? money(event.activation)}</td>
-                      <td className="text-center px-4 py-3">{money(event.kind)}</td>
-                      <td className="text-center max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">{money(event.record)}</td>
-                      <td className="text-center break-all px-4 py-3 font-mono">{money(event.dimension ?? state?.dimension)}</td>
-                      <td className="text-center break-all px-4 py-3 font-mono">{money(event.structural_value ?? state?.structural_value)}</td>
-                      <td className="text-center px-4 py-3">{money(event.depth_objects)}</td>
-                      <td className="break-all px-4 py-3 text-right font-mono">{money(event.retained_mass ?? state?.retained_mass)}</td>
+                    <tr
+                      key={`${event.record}-${index}`}
+                      className="align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                    >
+                      <td className="whitespace-nowrap px-4 py-3 font-mono">
+                        {activationFromEvent(event) ?? money(event.activation)}
+                      </td>
+                      <td className="px-4 py-3">{money(event.kind)}</td>
+                      <td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">
+                        {money(event.record)}
+                      </td>
+                      <td className="break-all px-4 py-3 font-mono">
+                        {money(event.dimension ?? state?.dimension)}
+                      </td>
+                      <td className="break-all px-4 py-3 font-mono">
+                        {money(event.structural_value ?? state?.structural_value)}
+                      </td>
+                      <td className="px-4 py-3">{money(event.depth_objects)}</td>
+                      <td className="break-all px-4 py-3 font-mono">
+                        {money(event.retained_mass ?? state?.retained_mass)}
+                      </td>
                     </tr>
                   );
                 })}
                 {events.length === 0 && (
-                  <tr><td colSpan={7} className="px-4 py-10 text-center text-sm text-zinc-500">{loadingEvents ? "Loading persisted events…" : substrate ? "No persisted event records were returned." : "Select a substrate to inspect persisted records."}</td></tr>
+                  <tr>
+                    <td colSpan={7} className="px-4 py-10 text-center text-sm text-zinc-500">
+                      {eventsEmptyText}
+                    </td>
+                  </tr>
                 )}
               </tbody>
             </table>
           </div>
-          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:hidden">
+
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:hidden">
             {events.map((event, index) => {
               const state = event?.heritage?.state;
               return (
-                <article key={`${event.record}-card-${index}`} className="qtm-pop min-w-0 rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-                  <p className="text-right font-mono text-[11px] text-zinc-500">Activation {activationFromEvent(event) ?? money(event.activation)}</p>
-                  <h4 className="mt-1 break-all text-center text-sm font-semibold">{money(event.kind)}</h4>
-                  <p className="mt-1 break-all text-center font-mono text-[11px] text-zinc-500">{money(event.record)}</p>
-                  <dl className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(8rem,1fr))] gap-3">
-                    <Field label="Dimension">{money(event.dimension ?? state?.dimension)}</Field>
-                    <Field label="Structural value (Σ)">{money(event.structural_value ?? state?.structural_value)}</Field>
-                    <Field label="Depth objects">{money(event.depth_objects)}</Field>
-                    <Field label="Retained mass">{money(event.retained_mass ?? state?.retained_mass)}</Field>
-                  </dl>
+                <article key={`${event.record}-card-${index}`} className={`${INNER} p-3`}>
+                  <div className="flex items-start justify-between gap-2">
+                    <h4 className="min-w-0 break-all text-sm font-semibold">{money(event.kind)}</h4>
+                    <Pill>Act. {activationFromEvent(event) ?? money(event.activation)}</Pill>
+                  </div>
+                  <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">
+                    {money(event.record)}
+                  </p>
+                  <div className="mt-3">
+                    <Fields min="7rem">
+                      <Field label="Dimension">{money(event.dimension ?? state?.dimension)}</Field>
+                      <Field label="Structural value (Σ)">
+                        {money(event.structural_value ?? state?.structural_value)}
+                      </Field>
+                      <Field label="Depth objects">{money(event.depth_objects)}</Field>
+                      <Field label="Retained mass">
+                        {money(event.retained_mass ?? state?.retained_mass)}
+                      </Field>
+                    </Fields>
+                  </div>
                 </article>
               );
             })}
             {events.length === 0 && (
-              <p className="col-span-full rounded-lg border border-zinc-200 p-4 text-center text-sm text-zinc-500 dark:border-zinc-800">{eventsEmptyText}</p>
+              <p className="col-span-full rounded-xl border border-zinc-200 p-4 text-sm text-zinc-500 dark:border-zinc-800 lg:hidden">
+                {eventsEmptyText}
+              </p>
             )}
           </div>
-        </Panel>
+        </Card>
 
-        <footer className="border-t border-zinc-200 pt-4 text-right text-xs leading-5 text-zinc-500 dark:border-zinc-800">
-          QTM Event Store · Substrate host · Activation-scoped events and payloads · Network budgets · Network payload boards · Bitcoin observation · API-persisted wirepackets · {API_BASE}
+        <footer className="border-t border-zinc-200 pt-4 text-xs text-zinc-500 dark:border-zinc-800">
+          QTM Event Store · {API_BASE}
         </footer>
       </div>
     </main>
