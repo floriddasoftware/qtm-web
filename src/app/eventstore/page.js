@@ -11,6 +11,7 @@ const REFRESH_INTERVAL_MS = 8000;
 const U128_MAX = 340282366920938463463374607431768211455n;
 
 // Mirrors QTM/src/pathsregistry.rs (CoinType + PathsRegistry::get_path).
+// Each coin maps to exactly one PayloadKind in qtm-api/src/payload.rs.
 const COIN_TYPES = [
   { key: "bitcoin", name: "Bitcoin", symbol: "BTC", type: 0, path: "m/44'/0'/0'/0/0" },
   { key: "ethereum", name: "Ethereum", symbol: "ETH", type: 60, path: "m/44'/60'/0'/0/0" },
@@ -18,6 +19,7 @@ const COIN_TYPES = [
   { key: "tron", name: "Tron", symbol: "TRX", type: 195, path: "m/44'/195'/0'/0/0" },
 ];
 
+// Bitcoin is the only PayloadKind with two address types.
 const BITCOIN_KINDS = {
   legacy: { label: "Legacy · P2PKH", note: "BIP44 · m/44'/0'/0'/0/0" },
   segwit: { label: "SegWit · P2WPKH", note: "BIP84 · m/84'/0'/0'/0/0" },
@@ -188,9 +190,23 @@ function bitcoinKind(network) {
   return "other";
 }
 
+// payload-board returns one entry per PayloadKind (Bitcoin, Ethereum, Solana, Tron).
+// A network only ever shows the single kind that belongs to its own chain.
+function ownPayloadKind(board, network) {
+  const own = coinKey(network);
+  const matches = (Array.isArray(board?.kinds) ? board.kinds : []).filter(
+    (entry) => coinKey({ coin: entry?.kind, id: String(entry?.kind ?? "") }) === own,
+  );
+  return matches.sort((a, b) => Number(Boolean(b.in_scope)) - Number(Boolean(a.in_scope)))[0] || null;
+}
+
 function money(value) {
   if (value === undefined || value === null || value === "") return "—";
   return String(value);
+}
+
+function flag(value) {
+  return value == null ? "Not reported" : value ? "Yes" : "No";
 }
 
 function parseU128(value, label) {
@@ -417,73 +433,36 @@ function BudgetEditor({ budget, disabled, onSave }) {
   );
 }
 
-function PayloadBoard({ board, loading }) {
+// Shows only the network's own PayloadKind (one per chain; Bitcoin covers Legacy and SegWit).
+function PayloadBoard({ board, kind, loading }) {
   if (loading && !board) return <p className="text-xs text-zinc-500">Loading payload board…</p>;
   if (!board) return <p className="text-xs text-zinc-500">No payload-board response yet.</p>;
   const obs = board.observation;
+  const ap = kind?.authorized_payload;
   return (
     <div className="space-y-3">
       {board.error && <Notice>{board.error}</Notice>}
-      <Fields min="7rem">
-        <Field label="Activation">{money(board.activation)}</Field>
-        <Field label="Network">{money(board.network)}</Field>
-        <Field label="Payload kinds">{board.kinds?.length ?? 0}</Field>
-        <Field label="Commitment">
-          <span className="break-all font-mono text-xs">{money(board.commitment)}</span>
-        </Field>
-      </Fields>
       {board.message && <p className="text-xs text-zinc-500">{board.message}</p>}
-      {obs && (
-        <div className="rounded-xl bg-white p-3 dark:bg-zinc-900">
-          <Fields min="8rem">
-            <Field label="Miner process">
-              {obs.process_running == null ? "Not reported" : obs.process_running ? "Running" : "Stopped"}
-            </Field>
-            <Field label="Miner PID">{money(obs.pid)}</Field>
-            <Field label="Miner feature">
-              {obs.bit_minner_feature == null ? "Not reported" : String(obs.bit_minner_feature)}
-            </Field>
-            <Field label="Settlement carried">
-              {obs.settlement_payload_carried == null ? "Not reported" : String(obs.settlement_payload_carried)}
-            </Field>
-          </Fields>
-        </div>
+      {kind ? (
+        <Fields min="8rem">
+          <Field label="Payload kind">{money(kind.kind)}</Field>
+          <Field label="Commitment">
+            <span className="break-all font-mono text-xs">{money(board.commitment)}</span>
+          </Field>
+          <Field label="Depth path">{money(kind.depth_path)}</Field>
+          <Field label="Depth record">{money(kind.depth_record)}</Field>
+          <Field label="Depth objects">{kind.depth_objects?.length ?? 0}</Field>
+          <Field label="Authorized payload">{flag(ap?.carried)}</Field>
+          <Field label="Authorization">{money(ap?.authorization_state)}</Field>
+          <Field label="Settlement">{money(ap?.settlement_state)}</Field>
+          {obs && <Field label="Miner feature">{flag(obs.bit_minner_feature)}</Field>}
+          {obs && <Field label="Settlement carried">{flag(obs.settlement_payload_carried)}</Field>}
+        </Fields>
+      ) : (
+        <p className="text-xs text-zinc-500">
+          The API returned no payload kind for this network&apos;s chain.
+        </p>
       )}
-      <div className="space-y-2">
-        {(board.kinds || []).map((kind, index) => (
-          <div
-            key={`${kind.kind}-${index}`}
-            className="min-w-0 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="break-words text-sm font-semibold">{kind.kind}</span>
-              <span className="flex gap-1.5">
-                <Pill tone={kind.available ? "ok" : "neutral"}>
-                  {kind.available ? "Available" : "Unavailable"}
-                </Pill>
-                <Pill>{kind.in_scope ? "In scope" : "Out of scope"}</Pill>
-              </span>
-            </div>
-            <div className="mt-3">
-              <Fields min="8rem">
-                <Field label="Depth path">{money(kind.depth_path)}</Field>
-                <Field label="Depth record">{money(kind.depth_record)}</Field>
-                <Field label="Depth objects">{kind.depth_objects?.length ?? 0}</Field>
-                <Field label="Authorized payload">
-                  {kind.authorized_payload?.carried == null
-                    ? "Not reported"
-                    : String(kind.authorized_payload.carried)}
-                </Field>
-                <Field label="Authorization">{money(kind.authorized_payload?.authorization_state)}</Field>
-                <Field label="Settlement">{money(kind.authorized_payload?.settlement_state)}</Field>
-              </Fields>
-            </div>
-          </div>
-        ))}
-        {(board.kinds || []).length === 0 && (
-          <p className="text-xs text-zinc-500">No payload kinds were returned for this network.</p>
-        )}
-      </div>
     </div>
   );
 }
@@ -491,16 +470,7 @@ function PayloadBoard({ board, loading }) {
 function StreamBody({ status, busy, results, network, onAction, onRefresh }) {
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <Pill tone={status?.running === true ? "ok" : "neutral"}>
-          {status?.running === true
-            ? "Running"
-            : status?.running === false
-              ? "Stopped"
-              : "Status not loaded"}
-        </Pill>
-        {status?.pid ? <span className="text-xs text-zinc-500">PID {status.pid}</span> : null}
-      </div>
+      {status?.pid ? <p className="text-xs text-zinc-500">PID {status.pid}</p> : null}
       <div className="grid grid-cols-3 gap-2">
         <button
           type="button"
@@ -532,7 +502,7 @@ function StreamBody({ status, busy, results, network, onAction, onRefresh }) {
       <div>
         <div className="flex items-center justify-between">
           <h5 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-            API stream responses
+            API responses
           </h5>
           <span className="text-[10px] tabular-nums text-zinc-500">{results.length}</span>
         </div>
@@ -557,14 +527,11 @@ function StreamBody({ status, busy, results, network, onAction, onRefresh }) {
           ))}
           {results.length === 0 && (
             <p className="py-2 text-xs text-zinc-500">
-              Press Stream to start the API-managed Bitcoin pipeline. Returned API responses appear here.
+              Press Stream to start the API-managed pipeline. Start/status responses appear here;
+              the API does not expose per-outcome results or a live log route yet.
             </p>
           )}
         </div>
-        <p className="mt-2 text-[10px] leading-4 text-zinc-500">
-          The API returns process start/status responses. It does not expose individual
-          PipelineOutcome values or a live log route yet.
-        </p>
       </div>
     </div>
   );
@@ -573,31 +540,21 @@ function StreamBody({ status, busy, results, network, onAction, onRefresh }) {
 function WirePacketsBody({ metadata, loading }) {
   const route = metadata?.file_route;
   const href = route ? `${API_BASE}${route.startsWith("/") ? route : `/${route}`}` : null;
+  if (loading && !metadata) return <p className="text-xs text-zinc-500">Loading…</p>;
+  if (!metadata) return <p className="text-xs text-zinc-500">No wirepackets response yet.</p>;
   return (
     <div className="space-y-3">
-      <Pill tone={metadata?.exists ? "ok" : "neutral"}>
-        {loading ? "Loading…" : metadata?.exists ? "File present" : metadata ? "No file" : "Not loaded"}
-      </Pill>
-      {metadata && (
-        <Fields min="7rem">
-          <Field label="Scope">{money(metadata.scope)}</Field>
-          <Field label="Bytes">
-            {metadata.bytes == null ? "Not reported" : Number(metadata.bytes).toLocaleString()}
-          </Field>
-          <Field label="Activation">{money(metadata.activation)}</Field>
-          <Field label="Network">{money(metadata.network)}</Field>
-        </Fields>
-      )}
-      {metadata?.path && (
+      <Fields min="7rem">
+        <Field label="Scope">{money(metadata.scope)}</Field>
+        <Field label="Bytes">
+          {metadata.bytes == null ? "Not reported" : Number(metadata.bytes).toLocaleString()}
+        </Field>
+      </Fields>
+      {metadata.path && (
         <p className="break-all font-mono text-[11px] text-zinc-500">{metadata.path}</p>
       )}
       {href ? (
-        <a
-          className={`${BUTTON} w-full`}
-          href={href}
-          target="_blank"
-          rel="noreferrer"
-        >
+        <a className={`${BUTTON} w-full`} href={href} target="_blank" rel="noreferrer">
           Open persisted wirepackets file
         </a>
       ) : (
@@ -676,7 +633,6 @@ function NetworkCard({
   network,
   defaultOpen,
   index,
-  substrate,
   activation,
   budgetRow,
   group,
@@ -715,6 +671,7 @@ function NetworkCard({
 
   const budget = budgetRow?.budget || null;
   const configured = Boolean(budgetRow?.configured && budget);
+  const payloadKind = ownPayloadKind(board, network);
   const payloadTotal =
     group.transit_inputs.length + group.exile_outputs.length + group.unclassified.length;
 
@@ -728,7 +685,6 @@ function NetworkCard({
     >
       <div className="space-y-3">
         <Fields min="7rem">
-          <Field label="Coin">{money(network.coin)}</Field>
           <Field label="Purpose">{money(network.purpose)}</Field>
           <Field label="Derivation path">
             <span className="break-all font-mono text-xs">{money(network.path)}</span>
@@ -755,8 +711,17 @@ function NetworkCard({
           )}
         </Card>
 
-        <Card inner scroll title="Payload board" badge={<Pill>{board?.kinds?.length ?? 0} kinds</Pill>}>
-          <PayloadBoard board={board} loading={loadingBoards} />
+        <Card
+          inner
+          scroll
+          title="Payload board"
+          badge={
+            <Pill tone={payloadKind?.available ? "ok" : "neutral"}>
+              {payloadKind ? (payloadKind.available ? "Available" : "Unavailable") : "None"}
+            </Pill>
+          }
+        >
+          <PayloadBoard board={board} kind={payloadKind} loading={loadingBoards} />
         </Card>
 
         <Card
@@ -1418,23 +1383,19 @@ export default function EventStorePage() {
               </select>
             </label>
           </div>
-          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
             <Stat label="Events" value={selectedEvents.length} />
             <Stat label="All events" value={events.length} />
             <Stat label="Payloads" value={payloads.length} />
             <Stat label="Budgets set" value={`${configuredCount} / ${networks.length}`} />
-            <Stat label="Networks" value={networks.length} />
             <Stat label="Retained mass" value={retainedMass.toString()} />
             <Stat label="API base" value={API_BASE} wide />
             {store?.directory && <Stat label="Substrate directory" value={store.directory} wide />}
           </div>
         </Card>
 
-        <SectionHeading
-          title="Bitcoin"
-          meta={`coin type ${COIN_TYPES[0].type}`}
-        >
-          Legacy and SegWit networks for activation {activation || "—"}.
+        <SectionHeading title="Bitcoin" meta={`coin type ${COIN_TYPES[0].type}`}>
+          Legacy and SegWit share the single Bitcoin payload kind.
         </SectionHeading>
         {loadingPayloads && <p className="px-1 text-xs text-zinc-500">Rendering payload records…</p>}
         <div className="grid grid-cols-1 items-start gap-3 xl:grid-cols-2">
@@ -1447,7 +1408,6 @@ export default function EventStorePage() {
                 network={slot.network}
                 defaultOpen={index === 0}
                 index={index}
-                substrate={substrate}
                 activation={activation}
                 budgetRow={id ? networkBudgetById.get(id) : undefined}
                 group={(id && payloadGroups.get(id)) || emptyGroup}
@@ -1470,7 +1430,7 @@ export default function EventStorePage() {
         </div>
 
         <SectionHeading title="Other chains" meta="not yet implemented">
-          Coin types from the paths registry. These are placeholders until each chain is wired up.
+          One payload kind each, from the paths registry. Placeholders until wired up.
         </SectionHeading>
         <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {COIN_TYPES.filter((coin) => coin.key !== "bitcoin").map((coin, index) => {
@@ -1484,7 +1444,6 @@ export default function EventStorePage() {
                 style={{ animationDelay: `${index * 60}ms` }}
               >
                 <Fields min="7rem">
-                  <Field label="Status">Not yet implemented</Field>
                   <Field label="Registry path">
                     <span className="break-all font-mono text-xs">{coin.path}</span>
                   </Field>
