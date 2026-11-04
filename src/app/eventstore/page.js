@@ -40,7 +40,19 @@ const QTM_STYLES = `
   to { opacity: 1; transform: none; }
 }
 .qtm-pop { animation: qtm-pop 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
-@media (prefers-reduced-motion: reduce) { .qtm-pop { animation: none; } }
+@keyframes qtm-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes qtm-dialog-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+.qtm-backdrop { animation: qtm-backdrop-in 0.2s ease-out both; }
+.qtm-dialog { animation: qtm-dialog-in 0.25s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@media (prefers-reduced-motion: reduce) {
+  .qtm-pop, .qtm-backdrop, .qtm-dialog { animation: none; }
+}
 `;
 
 async function apiRequest(path, options = {}) {
@@ -466,7 +478,309 @@ function PayloadBoard({ board, kind, loading }) {
   );
 }
 
-function StreamBody({ status, busy, results, network, onAction, onRefresh }) {
+/* ───────────────────────── Bit-Miner log popup ───────────────────────── */
+
+const LOG_POLL_RUNNING_MS = 2500;
+const LOG_POLL_STOPPED_MS = 6000;
+const LOG_DISPLAY_MAX_CHARS = 250_000;
+const LOG_STICK_THRESHOLD_PX = 24;
+
+const LOG_BUTTON =
+  "inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-[11px] font-medium transition hover:bg-zinc-50 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800";
+
+// The log endpoint returns plain text, so this deliberately bypasses apiRequest().
+async function fetchBitMinerLog({ substrate, activation, network, signal }) {
+  const path = `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(network)}/observation/log`;
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      cache: "no-store",
+      headers: { Accept: "text/plain" },
+      signal,
+    });
+  } catch (cause) {
+    if (cause?.name === "AbortError") throw cause;
+    const reason = cause instanceof Error && cause.message ? cause.message : "network error";
+    throw new Error(`Could not reach the QTM runtime at ${API_BASE} (${reason}).`);
+  }
+
+  const text = await response.text();
+  if (!response.ok) {
+    let detail = text.trim();
+    try {
+      const parsed = JSON.parse(text);
+      detail = parsed?.error || parsed?.message || parsed?.detail || detail;
+    } catch {
+      // Error body was not JSON; keep the raw text.
+    }
+    throw new Error(
+      detail ? String(detail).slice(0, 400) : `Log request failed with HTTP ${response.status}.`,
+    );
+  }
+  return text.length > LOG_DISPLAY_MAX_CHARS ? text.slice(-LOG_DISPLAY_MAX_CHARS) : text;
+}
+
+function BitMinerLogPopup({ substrate, activation, network, running, onClose, onRefreshStatus }) {
+  const [log, setLog] = useState(null); // null = nothing loaded yet; "" = loaded but empty
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [pinned, setPinned] = useState(true);
+
+  const dialogRef = useRef(null);
+  const scrollRef = useRef(null);
+  const pinnedRef = useRef(true);
+  const requestRef = useRef(0);
+  const inflightRef = useRef(null);
+  const closeRef = useRef(onClose);
+
+  useEffect(() => {
+    closeRef.current = onClose;
+  }, [onClose]);
+
+  // Fetch once; the polling loop schedules the next fetch only after this resolves.
+  const load = useCallback(async () => {
+    inflightRef.current?.abort();
+    const controller = new AbortController();
+    inflightRef.current = controller;
+    const requestId = ++requestRef.current;
+    setRefreshing(true);
+    try {
+      const text = await fetchBitMinerLog({
+        substrate,
+        activation,
+        network,
+        signal: controller.signal,
+      });
+      if (requestId !== requestRef.current) return;
+      setLog((previous) => (previous === text ? previous : text));
+      setUpdatedAt(new Date());
+      setError("");
+    } catch (err) {
+      if (err?.name === "AbortError" || requestId !== requestRef.current) return;
+      // Keep whatever output was already loaded visible.
+      setError(err instanceof Error ? err.message : "Unable to load the bit-miner log.");
+    } finally {
+      if (requestId === requestRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    }
+  }, [substrate, activation, network]);
+
+  // Short polling loop, one request at a time. Cleans up on close / unmount / scope change.
+  useEffect(() => {
+    let cancelled = false;
+    let timer = null;
+    const interval = running ? LOG_POLL_RUNNING_MS : LOG_POLL_STOPPED_MS;
+
+    const tick = async () => {
+      if (!document.hidden) await load();
+      if (!cancelled) timer = setTimeout(tick, interval);
+    };
+    tick();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      requestRef.current += 1;
+      inflightRef.current?.abort();
+    };
+  }, [load, running]);
+
+  // Keep the newest output visible unless the reader scrolled up.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
+  }, [log]);
+
+  function handleScroll() {
+    const el = scrollRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= LOG_STICK_THRESHOLD_PX;
+    pinnedRef.current = atBottom;
+    setPinned(atBottom);
+  }
+
+  function jumpToLatest() {
+    const el = scrollRef.current;
+    if (!el) return;
+    pinnedRef.current = true;
+    setPinned(true);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function handleRefresh() {
+    pinnedRef.current = true;
+    setPinned(true);
+    onRefreshStatus?.();
+    load();
+  }
+
+  // Escape closes; Tab stays inside the dialog; page scroll is locked while open.
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    dialogRef.current?.focus();
+
+    function onKeyDown(event) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeRef.current?.();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = dialogRef.current.querySelectorAll(
+        'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+      if (previousFocus instanceof HTMLElement) previousFocus.focus();
+    };
+  }, []);
+
+  const hasLog = typeof log === "string" && log.length > 0;
+
+  return (
+    <div
+      className="qtm-backdrop fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/50 p-3 backdrop-blur-sm sm:p-6"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="bitminer-log-title"
+        tabIndex={-1}
+        className="qtm-dialog flex max-h-[78vh] w-full max-w-[800px] flex-col overflow-hidden rounded-3xl border border-zinc-200 bg-white text-zinc-950 shadow-2xl outline-none sm:min-w-[min(720px,100%)] dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-zinc-200 px-4 py-3 sm:px-5 sm:py-4 dark:border-zinc-800">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 id="bitminer-log-title" className="text-sm font-semibold tracking-tight sm:text-base">
+                Bit-Miner logs
+              </h2>
+              <span
+                role="status"
+                className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
+                  running
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300"
+                    : "border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                }`}
+              >
+                <span
+                  aria-hidden="true"
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    running ? "bg-emerald-500 motion-safe:animate-pulse" : "bg-zinc-400"
+                  }`}
+                />
+                {running ? "Running" : "Stopped"}
+              </span>
+            </div>
+            <p className="mt-1 break-all font-mono text-[10px] leading-4 text-zinc-500 dark:text-zinc-400">
+              {substrate} · activation {activation} · {network}
+            </p>
+          </div>
+
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              className={LOG_BUTTON}
+              disabled={refreshing}
+              onClick={handleRefresh}
+            >
+              {refreshing ? "Refreshing…" : "Refresh"}
+            </button>
+            <button
+              type="button"
+              aria-label="Close log viewer"
+              className={`${LOG_BUTTON} w-8 px-0 text-base leading-none`}
+              onClick={onClose}
+            >
+              ×
+            </button>
+          </div>
+        </div>
+
+        <div className="relative flex min-h-0 flex-1 flex-col bg-zinc-950">
+          {error && (
+            <div
+              role="alert"
+              className="shrink-0 break-words border-b border-red-900/60 bg-red-950 px-4 py-2 text-xs leading-5 text-red-200"
+            >
+              {error}
+              {hasLog ? " Showing the last output received." : ""}
+            </div>
+          )}
+
+          <div
+            ref={scrollRef}
+            onScroll={handleScroll}
+            tabIndex={0}
+            aria-label="Bit-miner process log output"
+            className="min-h-[16rem] flex-1 overflow-auto overscroll-contain px-4 py-3 sm:px-5"
+          >
+            {loading && log === null ? (
+              <p className="text-xs text-zinc-400">Loading log…</p>
+            ) : hasLog ? (
+              <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-zinc-100 sm:text-xs">
+                {log}
+              </pre>
+            ) : error && log === null ? (
+              <p className="text-xs text-zinc-400">The log could not be loaded.</p>
+            ) : (
+              <p className="text-xs text-zinc-400">
+                No log output yet. Output appears here once the bit-miner process writes to its log.
+              </p>
+            )}
+          </div>
+
+          {!pinned && hasLog && (
+            <button
+              type="button"
+              onClick={jumpToLatest}
+              className="absolute bottom-3 right-4 rounded-full border border-zinc-600 bg-zinc-800/95 px-3 py-1.5 text-[11px] font-medium text-zinc-100 shadow-lg transition hover:bg-zinc-700"
+            >
+              Jump to latest ↓
+            </button>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 px-4 py-2.5 text-[10px] text-zinc-500 sm:px-5 dark:border-zinc-800 dark:text-zinc-400">
+          <span>
+            {updatedAt ? `Updated ${updatedAt.toLocaleTimeString()}` : "Waiting for first response…"}
+          </span>
+          <span>
+            Auto-refresh every {(running ? LOG_POLL_RUNNING_MS : LOG_POLL_STOPPED_MS) / 1000}s · Esc to close
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StreamBody({ status, busy, results, network, onAction, onRefresh, onViewLogs }) {
   const running = status?.running === true;
 
   return (
@@ -532,9 +846,20 @@ function StreamBody({ status, busy, results, network, onAction, onRefresh }) {
             BitMiner responses
           </h5>
 
-          <span className="text-[10px] tabular-nums text-zinc-500">
-            {results.length}
-          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className={LOG_BUTTON}
+              disabled={!onViewLogs}
+              onClick={() => onViewLogs?.(network)}
+            >
+              View process logs
+            </button>
+
+            <span className="text-[10px] tabular-nums text-zinc-500">
+              {results.length}
+            </span>
+          </div>
         </div>
 
         <div
@@ -685,6 +1010,7 @@ function NetworkCard({
   onSaveBudget,
   onStreamAction,
   onRefreshStream,
+  onViewLogs,
 }) {
   const meta = BITCOIN_KINDS[kind];
   const style = { animationDelay: `${Math.min(index, 6) * 60}ms` };
@@ -776,6 +1102,7 @@ function NetworkCard({
             network={network}
             onAction={onStreamAction}
             onRefresh={onRefreshStream}
+            onViewLogs={onViewLogs}
           />
         </Card>
 
@@ -821,6 +1148,8 @@ export default function EventStorePage() {
   const [budgetErrors, setBudgetErrors] = useState({});
   const [budgetNotices, setBudgetNotices] = useState({});
   const [store, setStore] = useState(null);
+  // One popup at a time; scope is recorded explicitly so logs can never leak across selections.
+  const [logViewer, setLogViewer] = useState(null);
 
   const selectedSubstrateRef = useRef("");
   const selectedActivationRef = useRef("");
@@ -1164,6 +1493,7 @@ export default function EventStorePage() {
     setWirePackets({});
     setObservations({});
     setStreamResults({});
+    setLogViewer(null);
     setStore(null);
     setError("");
     setNotice("");
@@ -1193,6 +1523,7 @@ export default function EventStorePage() {
     setBoards({});
     setObservations({});
     setStreamResults({});
+    setLogViewer(null);
     setPayloads([]);
     setError("");
     setNotice("");
@@ -1338,6 +1669,26 @@ export default function EventStorePage() {
     }
   };
 
+  // Only render the popup while its recorded scope still matches the current selection.
+  const activeLogViewer =
+    logViewer &&
+    logViewer.substrate === substrate &&
+    logViewer.activation === String(activation) &&
+    bitcoinSlots.some((slot) => slot.network?.id === logViewer.network)
+      ? logViewer
+      : null;
+
+  const openBitMinerLogs = (network) => {
+    if (!substrate || !network?.id || !/^\d+$/.test(String(activation))) return;
+    setLogViewer({
+      substrate,
+      activation: String(activation),
+      network: network.id,
+    });
+  };
+
+  const closeBitMinerLogs = useCallback(() => setLogViewer(null), []);
+
   const eventsEmptyText = loadingEvents
     ? "Loading persisted events…"
     : substrate
@@ -1349,7 +1700,11 @@ export default function EventStorePage() {
   return (
     <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
       <style>{QTM_STYLES}</style>
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
+      <div
+        className="mx-auto flex w-full max-w-7xl flex-col gap-4"
+        inert={activeLogViewer ? true : undefined}
+        aria-hidden={activeLogViewer ? true : undefined}
+      >
         <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div className="min-w-0">
             <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">QTM Event Store</h1>
@@ -1464,6 +1819,7 @@ export default function EventStorePage() {
                 onSaveBudget={saveBudget}
                 onStreamAction={streamAction}
                 onRefreshStream={refreshStream}
+                onViewLogs={openBitMinerLogs}
               />
             );
           })}
@@ -1599,6 +1955,18 @@ export default function EventStorePage() {
           QTM Event Store · {API_BASE}
         </footer>
       </div>
+
+      {activeLogViewer && (
+        <BitMinerLogPopup
+          key={`${activeLogViewer.substrate}|${activeLogViewer.activation}|${activeLogViewer.network}`}
+          substrate={activeLogViewer.substrate}
+          activation={activeLogViewer.activation}
+          network={activeLogViewer.network}
+          running={observations[activeLogViewer.network]?.running === true}
+          onClose={closeBitMinerLogs}
+          onRefreshStatus={() => refreshStream({ id: activeLogViewer.network })}
+        />
+      )}
     </main>
   );
 }
