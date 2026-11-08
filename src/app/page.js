@@ -13,7 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 // substrate_root() is resolved by Rust, never by the browser.
 const BRIDGE_BASE = (
   process.env.NEXT_PUBLIC_QTM_API_BASE ||
-  "https://qtm-api-anwp.onrender.com"
+  "https://qtm-api.onrender.com"
 ).replace(/\/+$/, "");
 
 const TABS = [
