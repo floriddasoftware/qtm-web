@@ -668,22 +668,86 @@ function StreamBody({ status, busy, results, network, onAction, onRefresh, onVie
   );
 }
 
+
 function WirePacketsBody({ metadata, loading }) {
   const route = metadata?.file_route;
-  const href = route ? `${API_BASE}${route.startsWith("/") ? route : `/${route}`}` : null;
-  if (loading && !metadata) return <p className="text-xs text-zinc-500">Loading…</p>;
-  if (!metadata) return <p className="text-xs text-zinc-500">No wirepackets response yet.</p>;
+  const href = route
+    ? `${API_BASE}${route.startsWith("/") ? route : `/${route}`}`
+    : null;
+
+  const packets = Array.isArray(metadata?.packets)
+    ? metadata.packets
+    : [];
+
+  if (loading && !metadata) {
+    return <p className="text-xs text-zinc-500">Loading WirePackets…</p>;
+  }
+
+  if (!metadata) {
+    return <p className="text-xs text-zinc-500">No WirePackets metadata response.</p>;
+  }
+
   return (
     <div className="space-y-3">
       <Fields min="7rem">
         <Field label="Scope">{money(metadata.scope)}</Field>
-        <Field label="Bytes">{metadata.bytes == null ? "Not reported" : Number(metadata.bytes).toLocaleString()}</Field>
+        <Field label="Total bytes">
+          {metadata.bytes == null
+            ? "Not reported"
+            : Number(metadata.bytes).toLocaleString()}
+        </Field>
+        <Field label="Persisted submissions">{packets.length}</Field>
+        <Field label="Files present">{flag(metadata.exists)}</Field>
       </Fields>
-      {metadata.path && <p className="break-all font-mono text-[11px] text-zinc-500">{metadata.path}</p>}
-      {href ? <a className={`${BUTTON} w-full`} href={href} target="_blank" rel="noreferrer">Open persisted wirepackets file</a> : <p className="text-xs text-zinc-500">The API has not returned a file route.</p>}
+
+      {metadata.path && (
+        <p className="break-all font-mono text-[11px] text-zinc-500">
+          {metadata.path}
+        </p>
+      )}
+
+      {packets.length > 0 ? (
+        <div className="space-y-2">
+          {packets.map((packet) => (
+            <div
+              key={packet.submission}
+              className={`${INNER} flex min-w-0 items-center justify-between gap-3 p-3`}
+            >
+              <div className="min-w-0">
+                <p className="text-xs font-semibold">
+                  Submission {packet.submission}
+                </p>
+                <p className="mt-1 break-all font-mono text-[10px] text-zinc-500">
+                  {packet.path}
+                </p>
+                <p className="mt-1 text-[10px] text-zinc-500">
+                  {Number(packet.bytes || 0).toLocaleString()} bytes
+                </p>
+              </div>
+              <Pill tone="ok">Persisted</Pill>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-zinc-500">
+          The API returned no persisted submission files for this activation.
+        </p>
+      )}
+
+      {href && (
+        <a
+          className={`${BUTTON} w-full`}
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+        >
+          Open combined WirePackets file
+        </a>
+      )}
     </div>
   );
 }
+
 
 function PayloadItem({ payload }) {
   const [open, setOpen] = useState(false);
