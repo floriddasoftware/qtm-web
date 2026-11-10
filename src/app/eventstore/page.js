@@ -7,8 +7,6 @@ const API_BASE = (
   "https://qtm-api.onrender.com"
 ).replace(/\/+$/, "");
 
-const U128_MAX = 340282366920938463463374607431768211455n;
-
 const COIN_TYPES = [
   { key: "bitcoin", name: "Bitcoin", symbol: "BTC", type: 0, path: "m/44'/0'/0'/0/0" },
   { key: "ethereum", name: "Ethereum", symbol: "ETH", type: 60, path: "m/44'/60'/0'/0/0" },
@@ -216,14 +214,6 @@ function flag(value) {
   return value == null ? "Not reported" : value ? "Yes" : "No";
 }
 
-function parseU128(value, label) {
-  const raw = String(value).trim();
-  if (!/^\d+$/.test(raw)) throw new Error(`${label} must be a non-negative whole number.`);
-  const parsed = BigInt(raw);
-  if (parsed > U128_MAX) throw new Error(`${label} exceeds u128.`);
-  return parsed.toString();
-}
-
 /* ───────────────────────── UI primitives ───────────────────────── */
 
 function Pill({ children, tone = "neutral" }) {
@@ -343,7 +333,6 @@ function BudgetSummary({ budget }) {
     <Fields min="7rem">
       <Field label="Min events">{money(budget?.min_events)}</Field>
       <Field label="Max events">{money(budget?.max_events)}</Field>
-      <Field label="Max retained mass">{money(budget?.max_retained_mass)}</Field>
     </Fields>
   );
 }
@@ -352,35 +341,54 @@ function BudgetEditor({ budget, disabled, onSave }) {
   const toDraft = () => ({
     min_events: String(budget?.min_events ?? 0),
     max_events: String(budget?.max_events ?? 1024),
-    max_retained_mass: String(budget?.max_retained_mass ?? 1048576),
   });
+
   const [draft, setDraft] = useState(toDraft);
 
   useEffect(() => {
     setDraft(toDraft());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [budget?.min_events, budget?.max_events, budget?.max_retained_mass]);
+  }, [budget?.min_events, budget?.max_events]);
 
   return (
-    <form className="mt-4 grid gap-3 border-t border-zinc-200 pt-4 sm:grid-cols-2 dark:border-zinc-800" onSubmit={(event) => { event.preventDefault(); onSave(draft); }}>
+    <form
+      className="mt-4 grid gap-3 border-t border-zinc-200 pt-4 sm:grid-cols-2 dark:border-zinc-800"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSave(draft);
+      }}
+    >
       {[
         ["min_events", "Min events"],
         ["max_events", "Max events"],
-        ["max_retained_mass", "Max retained mass (u128)"],
       ].map(([key, label]) => (
-        <label key={key} className={`block min-w-0 ${key === "max_retained_mass" ? "sm:col-span-2" : ""}`}>
-          <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">{label}</span>
+        <label key={key} className="block min-w-0">
+          <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
+            {label}
+          </span>
           <input
             className={INPUT}
             inputMode="numeric"
             value={draft[key]}
             disabled={disabled}
-            onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))}
+            onChange={(event) =>
+              setDraft((current) => ({
+                ...current,
+                [key]: event.target.value,
+              }))
+            }
           />
         </label>
       ))}
+
       <div className="sm:col-span-2">
-        <button className={`${BUTTON} w-full sm:w-auto`} type="submit" disabled={disabled}>Save network budget</button>
+        <button
+          className={`${BUTTON} w-full sm:w-auto`}
+          type="submit"
+          disabled={disabled}
+        >
+          Save network budget
+        </button>
       </div>
     </form>
   );
@@ -668,7 +676,6 @@ function StreamBody({ status, busy, results, network, onAction, onRefresh, onVie
   );
 }
 
-
 function WirePacketsBody({ metadata, loading }) {
   const route = metadata?.file_route;
   const href = route
@@ -747,7 +754,6 @@ function WirePacketsBody({ metadata, loading }) {
     </div>
   );
 }
-
 
 function PayloadItem({ payload }) {
   const [open, setOpen] = useState(false);
@@ -1248,21 +1254,56 @@ export default function EventStorePage() {
 
   const saveBudget = async (network, draft) => {
     const key = networkKey(network);
+
     setBudgetErrors((current) => ({ ...current, [key]: "" }));
     setBudgetNotices((current) => ({ ...current, [key]: "" }));
+
     try {
       const body = {
         min_events: Number(draft.min_events),
         max_events: Number(draft.max_events),
-        max_retained_mass: parseU128(draft.max_retained_mass, "Maximum retained mass"),
       };
-      if (!Number.isSafeInteger(body.min_events) || body.min_events < 0) throw new Error("Minimum events must be a non-negative safe integer.");
-      if (!Number.isSafeInteger(body.max_events) || body.max_events < 0) throw new Error("Maximum events must be a non-negative safe integer.");
-      await apiRequest(`/wallets/${enc(substrate)}/activations/${enc(activation)}/budgets/${enc(network.id)}`, { method: "PUT", body: JSON.stringify(body) });
-      setBudgetNotices((current) => ({ ...current, [key]: "Network budget saved." }));
+
+      if (!Number.isSafeInteger(body.min_events) || body.min_events < 0) {
+        throw new Error(
+          "Minimum events must be a non-negative safe integer."
+        );
+      }
+
+      if (!Number.isSafeInteger(body.max_events) || body.max_events < 1) {
+        throw new Error(
+          "Maximum events must be a positive safe integer."
+        );
+      }
+
+      if (body.min_events > body.max_events) {
+        throw new Error(
+          "Minimum events cannot exceed maximum events."
+        );
+      }
+
+      await apiRequest(
+        `/wallets/${enc(substrate)}/activations/${enc(activation)}/budgets/${enc(network.id)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify(body),
+        }
+      );
+
+      setBudgetNotices((current) => ({
+        ...current,
+        [key]: "Network budget saved.",
+      }));
+
       await loadBudgets(substrate, activation);
     } catch (err) {
-      setBudgetErrors((current) => ({ ...current, [key]: err instanceof Error ? err.message : "Unable to save network budget." }));
+      setBudgetErrors((current) => ({
+        ...current,
+        [key]:
+          err instanceof Error
+            ? err.message
+            : "Unable to save network budget.",
+      }));
     }
   };
 
