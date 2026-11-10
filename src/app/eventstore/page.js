@@ -9,8 +9,6 @@ const API_BASE = (
 
 const U128_MAX = 340282366920938463463374607431768211455n;
 
-// Mirrors QTM/src/pathsregistry.rs (CoinType + PathsRegistry::get_path).
-// Each coin maps to exactly one PayloadKind in qtm-api/src/payload.rs.
 const COIN_TYPES = [
   { key: "bitcoin", name: "Bitcoin", symbol: "BTC", type: 0, path: "m/44'/0'/0'/0/0" },
   { key: "ethereum", name: "Ethereum", symbol: "ETH", type: 60, path: "m/44'/60'/0'/0/0" },
@@ -18,7 +16,6 @@ const COIN_TYPES = [
   { key: "tron", name: "Tron", symbol: "TRX", type: 195, path: "m/44'/195'/0'/0/0" },
 ];
 
-// Bitcoin is the only PayloadKind with two address types.
 const BITCOIN_KINDS = {
   legacy: { label: "Legacy · P2PKH", note: "BIP44 · m/44'/0'/0'/0/0" },
   segwit: { label: "SegWit · P2WPKH", note: "BIP84 · m/84'/0'/0'/0/0" },
@@ -54,6 +51,8 @@ const QTM_STYLES = `
   .qtm-pop, .qtm-backdrop, .qtm-dialog { animation: none; }
 }
 `;
+
+const WIREPACKETS_POLL_MS = 2000;
 
 async function apiRequest(path, options = {}) {
   let response;
@@ -165,7 +164,6 @@ function networkKey(network) {
   return network?.id || "";
 }
 
-// Maps an API network to a registry coin key (bitcoin / ethereum / solana / tron / other).
 function coinKey(network) {
   if (!network) return "other";
   const coin = String(network.coin ?? "").toLowerCase();
@@ -201,8 +199,6 @@ function bitcoinKind(network) {
   return "other";
 }
 
-// payload-board returns one entry per PayloadKind (Bitcoin, Ethereum, Solana, Tron).
-// A network only ever shows the single kind that belongs to its own chain.
 function ownPayloadKind(board, network) {
   const own = coinKey(network);
   const matches = (Array.isArray(board?.kinds) ? board.kinds : []).filter(
@@ -238,9 +234,7 @@ function Pill({ children, tone = "neutral" }) {
     warn: "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200",
   };
   return (
-    <span
-      className={`inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${tones[tone]}`}
-    >
+    <span className={`inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${tones[tone]}`}>
       {children}
     </span>
   );
@@ -252,10 +246,7 @@ function Notice({ children, type = "error" }) {
       ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200"
       : "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200";
   return (
-    <p
-      role={type === "error" ? "alert" : "status"}
-      className={`qtm-pop break-words rounded-xl border px-3 py-2 text-xs leading-5 ${styles}`}
-    >
+    <p role={type === "error" ? "alert" : "status"} className={`qtm-pop break-words rounded-xl border px-3 py-2 text-xs leading-5 ${styles}`}>
       {children}
     </p>
   );
@@ -274,10 +265,7 @@ function Field({ label, children }) {
 
 function Fields({ children, min = "8rem" }) {
   return (
-    <dl
-      className="grid gap-x-4 gap-y-3"
-      style={{ gridTemplateColumns: `repeat(auto-fit, minmax(${min}, 1fr))` }}
-    >
+    <dl className="grid gap-x-4 gap-y-3" style={{ gridTemplateColumns: `repeat(auto-fit, minmax(${min}, 1fr))` }}>
       {children}
     </dl>
   );
@@ -285,14 +273,8 @@ function Fields({ children, min = "8rem" }) {
 
 function Stat({ label, value, wide = false }) {
   return (
-    <div
-      className={`min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/60 ${
-        wide ? "col-span-2" : ""
-      }`}
-    >
-      <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-        {label}
-      </p>
+    <div className={`min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/60 ${wide ? "col-span-2" : ""}`}>
+      <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">{label}</p>
       <p className="mt-1 break-all text-sm font-semibold tabular-nums">{value}</p>
     </div>
   );
@@ -300,18 +282,12 @@ function Stat({ label, value, wide = false }) {
 
 function Collapsible({ open, children }) {
   return (
-    <div
-      className={`grid transition-[grid-template-rows,opacity,visibility] duration-300 ease-out motion-reduce:transition-none ${
-        open ? "visible grid-rows-[1fr] opacity-100" : "invisible grid-rows-[0fr] opacity-0"
-      }`}
-    >
+    <div className={`grid transition-[grid-template-rows,opacity,visibility] duration-300 ease-out motion-reduce:transition-none ${open ? "visible grid-rows-[1fr] opacity-100" : "invisible grid-rows-[0fr] opacity-0"}`}>
       <div className="min-h-0 min-w-0 overflow-hidden">{children}</div>
     </div>
   );
 }
 
-// Every card folds and drops down. Body height is capped when `scroll` is set
-// so tall content never stretches a card into a vertical strip.
 function Card({
   title,
   subtitle,
@@ -333,35 +309,16 @@ function Card({
         className={`flex w-full items-center gap-3 text-left ${inner ? "px-3 py-2.5" : "px-4 py-3.5"}`}
       >
         <span className="min-w-0 flex-1">
-          <span
-            className={`block truncate font-semibold ${
-              inner
-                ? "text-[11px] uppercase tracking-wider text-zinc-600 dark:text-zinc-300"
-                : "text-sm"
-            }`}
-          >
+          <span className={`block truncate font-semibold ${inner ? "text-[11px] uppercase tracking-wider text-zinc-600 dark:text-zinc-300" : "text-sm"}`}>
             {title}
           </span>
-          {subtitle && (
-            <span className="mt-0.5 block truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
-              {subtitle}
-            </span>
-          )}
+          {subtitle && <span className="mt-0.5 block truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400">{subtitle}</span>}
         </span>
         {badge}
-        <span
-          aria-hidden="true"
-          className={`shrink-0 text-zinc-400 transition-transform duration-300 ${open ? "rotate-180" : ""}`}
-        >
-          ▾
-        </span>
+        <span aria-hidden="true" className={`shrink-0 text-zinc-400 transition-transform duration-300 ${open ? "rotate-180" : ""}`}>▾</span>
       </button>
       <Collapsible open={open}>
-        <div
-          className={`border-t border-zinc-200/80 dark:border-zinc-800 ${inner ? "p-3" : "p-4"} ${
-            scroll ? "max-h-80 overflow-y-auto overscroll-contain" : ""
-          }`}
-        >
+        <div className={`border-t border-zinc-200/80 dark:border-zinc-800 ${inner ? "p-3" : "p-4"} ${scroll ? "max-h-80 overflow-y-auto overscroll-contain" : ""}`}>
           {children}
         </div>
       </Collapsible>
@@ -405,46 +362,30 @@ function BudgetEditor({ budget, disabled, onSave }) {
   }, [budget?.min_events, budget?.max_events, budget?.max_retained_mass]);
 
   return (
-    <form
-      className="mt-4 grid gap-3 border-t border-zinc-200 pt-4 sm:grid-cols-2 dark:border-zinc-800"
-      onSubmit={(event) => {
-        event.preventDefault();
-        onSave(draft);
-      }}
-    >
+    <form className="mt-4 grid gap-3 border-t border-zinc-200 pt-4 sm:grid-cols-2 dark:border-zinc-800" onSubmit={(event) => { event.preventDefault(); onSave(draft); }}>
       {[
         ["min_events", "Min events"],
         ["max_events", "Max events"],
         ["max_retained_mass", "Max retained mass (u128)"],
       ].map(([key, label]) => (
-        <label
-          key={key}
-          className={`block min-w-0 ${key === "max_retained_mass" ? "sm:col-span-2" : ""}`}
-        >
-          <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
-            {label}
-          </span>
+        <label key={key} className={`block min-w-0 ${key === "max_retained_mass" ? "sm:col-span-2" : ""}`}>
+          <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">{label}</span>
           <input
             className={INPUT}
             inputMode="numeric"
             value={draft[key]}
             disabled={disabled}
-            onChange={(event) =>
-              setDraft((current) => ({ ...current, [key]: event.target.value }))
-            }
+            onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))}
           />
         </label>
       ))}
       <div className="sm:col-span-2">
-        <button className={`${BUTTON} w-full sm:w-auto`} type="submit" disabled={disabled}>
-          Save network budget
-        </button>
+        <button className={`${BUTTON} w-full sm:w-auto`} type="submit" disabled={disabled}>Save network budget</button>
       </div>
     </form>
   );
 }
 
-// Shows only the network's own PayloadKind (one per chain; Bitcoin covers Legacy and SegWit).
 function PayloadBoard({ board, kind, loading }) {
   if (loading && !board) return <p className="text-xs text-zinc-500">Loading payload board…</p>;
   if (!board) return <p className="text-xs text-zinc-500">No payload-board response yet.</p>;
@@ -457,9 +398,7 @@ function PayloadBoard({ board, kind, loading }) {
       {kind ? (
         <Fields min="8rem">
           <Field label="Payload kind">{money(kind.kind)}</Field>
-          <Field label="Commitment">
-            <span className="break-all font-mono text-xs">{money(board.commitment)}</span>
-          </Field>
+          <Field label="Commitment"><span className="break-all font-mono text-xs">{money(board.commitment)}</span></Field>
           <Field label="Depth path">{money(kind.depth_path)}</Field>
           <Field label="Depth record">{money(kind.depth_record)}</Field>
           <Field label="Depth objects">{kind.depth_objects?.length ?? 0}</Field>
@@ -470,9 +409,7 @@ function PayloadBoard({ board, kind, loading }) {
           {obs && <Field label="Settlement carried">{flag(obs.settlement_payload_carried)}</Field>}
         </Fields>
       ) : (
-        <p className="text-xs text-zinc-500">
-          The API returned no payload kind for this network&apos;s chain.
-        </p>
+        <p className="text-xs text-zinc-500">The API returned no payload kind for this network&apos;s chain.</p>
       )}
     </div>
   );
@@ -488,16 +425,11 @@ const LOG_STICK_THRESHOLD_PX = 24;
 const LOG_BUTTON =
   "inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-[11px] font-medium transition hover:bg-zinc-50 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800";
 
-// The log endpoint returns plain text, so this deliberately bypasses apiRequest().
 async function fetchBitMinerLog({ substrate, activation, network, signal }) {
   const path = `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(network)}/observation/log`;
   let response;
   try {
-    response = await fetch(`${API_BASE}${path}`, {
-      cache: "no-store",
-      headers: { Accept: "text/plain" },
-      signal,
-    });
+    response = await fetch(`${API_BASE}${path}`, { cache: "no-store", headers: { Accept: "text/plain" }, signal });
   } catch (cause) {
     if (cause?.name === "AbortError") throw cause;
     const reason = cause instanceof Error && cause.message ? cause.message : "network error";
@@ -511,17 +443,15 @@ async function fetchBitMinerLog({ substrate, activation, network, signal }) {
       const parsed = JSON.parse(text);
       detail = parsed?.error || parsed?.message || parsed?.detail || detail;
     } catch {
-      // Error body was not JSON; keep the raw text.
+      // Keep the raw error body.
     }
-    throw new Error(
-      detail ? String(detail).slice(0, 400) : `Log request failed with HTTP ${response.status}.`,
-    );
+    throw new Error(detail ? String(detail).slice(0, 400) : `Log request failed with HTTP ${response.status}.`);
   }
   return text.length > LOG_DISPLAY_MAX_CHARS ? text.slice(-LOG_DISPLAY_MAX_CHARS) : text;
 }
 
 function BitMinerLogPopup({ substrate, activation, network, running, onClose, onRefreshStatus }) {
-  const [log, setLog] = useState(null); // null = nothing loaded yet; "" = loaded but empty
+  const [log, setLog] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
@@ -535,11 +465,8 @@ function BitMinerLogPopup({ substrate, activation, network, running, onClose, on
   const inflightRef = useRef(null);
   const closeRef = useRef(onClose);
 
-  useEffect(() => {
-    closeRef.current = onClose;
-  }, [onClose]);
+  useEffect(() => { closeRef.current = onClose; }, [onClose]);
 
-  // Fetch once; the polling loop schedules the next fetch only after this resolves.
   const load = useCallback(async () => {
     inflightRef.current?.abort();
     const controller = new AbortController();
@@ -547,19 +474,13 @@ function BitMinerLogPopup({ substrate, activation, network, running, onClose, on
     const requestId = ++requestRef.current;
     setRefreshing(true);
     try {
-      const text = await fetchBitMinerLog({
-        substrate,
-        activation,
-        network,
-        signal: controller.signal,
-      });
+      const text = await fetchBitMinerLog({ substrate, activation, network, signal: controller.signal });
       if (requestId !== requestRef.current) return;
       setLog((previous) => (previous === text ? previous : text));
       setUpdatedAt(new Date());
       setError("");
     } catch (err) {
       if (err?.name === "AbortError" || requestId !== requestRef.current) return;
-      // Keep whatever output was already loaded visible.
       setError(err instanceof Error ? err.message : "Unable to load the bit-miner log.");
     } finally {
       if (requestId === requestRef.current) {
@@ -569,18 +490,15 @@ function BitMinerLogPopup({ substrate, activation, network, running, onClose, on
     }
   }, [substrate, activation, network]);
 
-  // Short polling loop, one request at a time. Cleans up on close / unmount / scope change.
   useEffect(() => {
     let cancelled = false;
     let timer = null;
     const interval = running ? LOG_POLL_RUNNING_MS : LOG_POLL_STOPPED_MS;
-
     const tick = async () => {
       if (!document.hidden) await load();
       if (!cancelled) timer = setTimeout(tick, interval);
     };
     tick();
-
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
@@ -589,7 +507,6 @@ function BitMinerLogPopup({ substrate, activation, network, running, onClose, on
     };
   }, [load, running]);
 
-  // Keep the newest output visible unless the reader scrolled up.
   useEffect(() => {
     const el = scrollRef.current;
     if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
@@ -618,7 +535,6 @@ function BitMinerLogPopup({ substrate, activation, network, running, onClose, on
     load();
   }
 
-  // Escape closes; Tab stays inside the dialog; page scroll is locked while open.
   useEffect(() => {
     const previousFocus = document.activeElement;
     const previousOverflow = document.body.style.overflow;
@@ -632,9 +548,7 @@ function BitMinerLogPopup({ substrate, activation, network, running, onClose, on
         return;
       }
       if (event.key !== "Tab" || !dialogRef.current) return;
-      const focusable = dialogRef.current.querySelectorAll(
-        'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
-      );
+      const focusable = dialogRef.current.querySelectorAll('button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])');
       if (focusable.length === 0) {
         event.preventDefault();
         return;
@@ -661,12 +575,7 @@ function BitMinerLogPopup({ substrate, activation, network, running, onClose, on
   const hasLog = typeof log === "string" && log.length > 0;
 
   return (
-    <div
-      className="qtm-backdrop fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/50 p-3 backdrop-blur-sm sm:p-6"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
+    <div className="qtm-backdrop fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/50 p-3 backdrop-blur-sm sm:p-6" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <div
         ref={dialogRef}
         role="dialog"
@@ -678,102 +587,39 @@ function BitMinerLogPopup({ substrate, activation, network, running, onClose, on
         <div className="flex items-start justify-between gap-3 border-b border-zinc-200 px-4 py-3 sm:px-5 sm:py-4 dark:border-zinc-800">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h2 id="bitminer-log-title" className="text-sm font-semibold tracking-tight sm:text-base">
-                Bit-Miner logs
-              </h2>
-              <span
-                role="status"
-                className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
-                  running
-                    ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300"
-                    : "border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-                }`}
-              >
-                <span
-                  aria-hidden="true"
-                  className={`h-1.5 w-1.5 rounded-full ${
-                    running ? "bg-emerald-500 motion-safe:animate-pulse" : "bg-zinc-400"
-                  }`}
-                />
+              <h2 id="bitminer-log-title" className="text-sm font-semibold tracking-tight sm:text-base">Bit-Miner logs</h2>
+              <span role="status" className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${running ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300" : "border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"}`}>
+                <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${running ? "bg-emerald-500 motion-safe:animate-pulse" : "bg-zinc-400"}`} />
                 {running ? "Running" : "Stopped"}
               </span>
             </div>
-            <p className="mt-1 break-all font-mono text-[10px] leading-4 text-zinc-500 dark:text-zinc-400">
-              {substrate} · activation {activation} · {network}
-            </p>
+            <p className="mt-1 break-all font-mono text-[10px] leading-4 text-zinc-500 dark:text-zinc-400">{substrate} · activation {activation} · {network}</p>
           </div>
-
           <div className="flex shrink-0 items-center gap-2">
-            <button
-              type="button"
-              className={LOG_BUTTON}
-              disabled={refreshing}
-              onClick={handleRefresh}
-            >
-              {refreshing ? "Refreshing…" : "Refresh"}
-            </button>
-            <button
-              type="button"
-              aria-label="Close log viewer"
-              className={`${LOG_BUTTON} w-8 px-0 text-base leading-none`}
-              onClick={onClose}
-            >
-              ×
-            </button>
+            <button type="button" className={LOG_BUTTON} disabled={refreshing} onClick={handleRefresh}>{refreshing ? "Refreshing…" : "Refresh"}</button>
+            <button type="button" aria-label="Close log viewer" className={`${LOG_BUTTON} w-8 px-0 text-base leading-none`} onClick={onClose}>×</button>
           </div>
         </div>
 
         <div className="relative flex min-h-0 flex-1 flex-col bg-zinc-950">
-          {error && (
-            <div
-              role="alert"
-              className="shrink-0 break-words border-b border-red-900/60 bg-red-950 px-4 py-2 text-xs leading-5 text-red-200"
-            >
-              {error}
-              {hasLog ? " Showing the last output received." : ""}
-            </div>
-          )}
-
-          <div
-            ref={scrollRef}
-            onScroll={handleScroll}
-            tabIndex={0}
-            aria-label="Bit-miner process log output"
-            className="min-h-[16rem] flex-1 overflow-auto overscroll-contain px-4 py-3 sm:px-5"
-          >
+          {error && <div role="alert" className="shrink-0 break-words border-b border-red-900/60 bg-red-950 px-4 py-2 text-xs leading-5 text-red-200">{error}{hasLog ? " Showing the last output received." : ""}</div>}
+          <div ref={scrollRef} onScroll={handleScroll} tabIndex={0} aria-label="Bit-miner process log output" className="min-h-[16rem] flex-1 overflow-auto overscroll-contain px-4 py-3 sm:px-5">
             {loading && log === null ? (
               <p className="text-xs text-zinc-400">Loading log…</p>
             ) : hasLog ? (
-              <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-zinc-100 sm:text-xs">
-                {log}
-              </pre>
+              <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-zinc-100 sm:text-xs">{log}</pre>
             ) : error && log === null ? (
               <p className="text-xs text-zinc-400">The log could not be loaded.</p>
             ) : (
-              <p className="text-xs text-zinc-400">
-                No log output yet. Output appears here once the bit-miner process writes to its log.
-              </p>
+              <p className="text-xs text-zinc-400">No log output yet. Output appears here once the bit-miner process writes to its log.</p>
             )}
           </div>
-
-          {!pinned && hasLog && (
-            <button
-              type="button"
-              onClick={jumpToLatest}
-              className="absolute bottom-3 right-4 rounded-full border border-zinc-600 bg-zinc-800/95 px-3 py-1.5 text-[11px] font-medium text-zinc-100 shadow-lg transition hover:bg-zinc-700"
-            >
-              Jump to latest ↓
-            </button>
-          )}
+          {!pinned && hasLog && <button type="button" onClick={jumpToLatest} className="absolute bottom-3 right-4 rounded-full border border-zinc-600 bg-zinc-800/95 px-3 py-1.5 text-[11px] font-medium text-zinc-100 shadow-lg transition hover:bg-zinc-700">Jump to latest ↓</button>}
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 px-4 py-2.5 text-[10px] text-zinc-500 sm:px-5 dark:border-zinc-800 dark:text-zinc-400">
-          <span>
-            {updatedAt ? `Updated ${updatedAt.toLocaleTimeString()}` : "Waiting for first response…"}
-          </span>
-          <span>
-            Auto-refresh every {(running ? LOG_POLL_RUNNING_MS : LOG_POLL_STOPPED_MS) / 1000}s · Esc to close
-          </span>
+          <span>{updatedAt ? `Updated ${updatedAt.toLocaleTimeString()}` : "Waiting for first response…"}</span>
+          <span>Auto-refresh every {(running ? LOG_POLL_RUNNING_MS : LOG_POLL_STOPPED_MS) / 1000}s · Esc to close</span>
         </div>
       </div>
     </div>
@@ -782,116 +628,40 @@ function BitMinerLogPopup({ substrate, activation, network, running, onClose, on
 
 function StreamBody({ status, busy, results, network, onAction, onRefresh, onViewLogs }) {
   const running = status?.running === true;
-
   return (
     <div className="space-y-3">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <Pill tone={running ? "ok" : "warn"}>
-          {running ? "Running" : status?.running === false ? "Stopped" : "Unknown"}
-        </Pill>
-
-        {status?.pid && (
-          <span className="text-xs text-zinc-500">
-            PID {status.pid}
-          </span>
-        )}
+        <Pill tone={running ? "ok" : "warn"}>{running ? "Running" : status?.running === false ? "Stopped" : "Unknown"}</Pill>
+        {status?.pid && <span className="text-xs text-zinc-500">PID {status.pid}</span>}
+        {status?.submissions != null && <span className="text-xs text-zinc-500">Submissions {status.submissions}</span>}
       </div>
-
       <div className="grid grid-cols-3 gap-2">
-        <button
-          type="button"
-          className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`}
-          disabled={busy || running}
-          onClick={() => onAction("start", network)}
-        >
-          {busy ? "Working…" : "Start"}
-        </button>
-
-        <button
-          type="button"
-          className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`}
-          disabled={busy}
-          onClick={() => onRefresh(network)}
-        >
-          Refresh
-        </button>
-
-        <button
-          type="button"
-          className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`}
-          disabled={busy || !running}
-          onClick={() => onAction("stop", network)}
-        >
-          Stop
-        </button>
+        <button type="button" className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`} disabled={busy || running} onClick={() => onAction("start", network)}>{busy ? "Working…" : "Start"}</button>
+        <button type="button" className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`} disabled={busy} onClick={() => onRefresh(network)}>Refresh</button>
+        <button type="button" className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`} disabled={busy || !running} onClick={() => onAction("stop", network)}>Stop</button>
       </div>
-
       {status?.error && <Notice>{status.error}</Notice>}
-
-      {status?.path && (
-        <p className="break-all font-mono text-[10px] text-zinc-500">
-          Event path: {status.path}
-        </p>
-      )}
-
-      {status?.log_path && (
-        <p className="break-all font-mono text-[10px] text-zinc-500">
-          Process log: {status.log_path}
-        </p>
-      )}
-
+      {status?.path && <p className="break-all font-mono text-[10px] text-zinc-500">Event path: {status.path}</p>}
+      {status?.log_path && <p className="break-all font-mono text-[10px] text-zinc-500">Process log: {status.log_path}</p>}
       <div>
         <div className="flex items-center justify-between">
-          <h5 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-            BitMiner responses
-          </h5>
-
+          <h5 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">BitMiner responses</h5>
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              className={LOG_BUTTON}
-              disabled={!onViewLogs}
-              onClick={() => onViewLogs?.(network)}
-            >
-              View process logs
-            </button>
-
-            <span className="text-[10px] tabular-nums text-zinc-500">
-              {results.length}
-            </span>
+            <button type="button" className={LOG_BUTTON} disabled={!onViewLogs} onClick={() => onViewLogs?.(network)}>View process logs</button>
+            <span className="text-[10px] tabular-nums text-zinc-500">{results.length}</span>
           </div>
         </div>
-
-        <div
-          aria-live="polite"
-          aria-label="Bitcoin bit-miner API responses"
-          className="mt-2 max-h-56 space-y-2 overflow-y-auto overscroll-contain rounded-xl bg-white p-2 dark:bg-zinc-900"
-        >
+        <div aria-live="polite" aria-label="Bitcoin bit-miner API responses" className="mt-2 max-h-56 space-y-2 overflow-y-auto overscroll-contain rounded-xl bg-white p-2 dark:bg-zinc-900">
           {results.map((entry) => (
-            <div
-              key={entry.id}
-              className="border-b border-zinc-200 pb-2 last:border-0 last:pb-0 dark:border-zinc-800"
-            >
+            <div key={entry.id} className="border-b border-zinc-200 pb-2 last:border-0 last:pb-0 dark:border-zinc-800">
               <div className="mb-1 flex items-center justify-between gap-2 text-[10px] text-zinc-500">
-                <span className="min-w-0 break-words font-semibold">
-                  {entry.label}
-                </span>
-
+                <span className="min-w-0 break-words font-semibold">{entry.label}</span>
                 <time className="shrink-0">{entry.time}</time>
               </div>
-
-              <pre className="overflow-x-auto whitespace-pre-wrap break-all text-[10px] leading-4 text-zinc-700 dark:text-zinc-300">
-                {JSON.stringify(entry.body, null, 2)}
-              </pre>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-all text-[10px] leading-4 text-zinc-700 dark:text-zinc-300">{JSON.stringify(entry.body, null, 2)}</pre>
             </div>
           ))}
-
-          {results.length === 0 && (
-            <p className="py-2 text-xs text-zinc-500">
-              Start bit-miner to launch its window loop. Refresh checks
-              process status without adding another response entry.
-            </p>
-          )}
+          {results.length === 0 && <p className="py-2 text-xs text-zinc-500">Start bit-miner to launch its window loop. Refresh checks process status without adding another response entry.</p>}
         </div>
       </div>
     </div>
@@ -907,20 +677,10 @@ function WirePacketsBody({ metadata, loading }) {
     <div className="space-y-3">
       <Fields min="7rem">
         <Field label="Scope">{money(metadata.scope)}</Field>
-        <Field label="Bytes">
-          {metadata.bytes == null ? "Not reported" : Number(metadata.bytes).toLocaleString()}
-        </Field>
+        <Field label="Bytes">{metadata.bytes == null ? "Not reported" : Number(metadata.bytes).toLocaleString()}</Field>
       </Fields>
-      {metadata.path && (
-        <p className="break-all font-mono text-[11px] text-zinc-500">{metadata.path}</p>
-      )}
-      {href ? (
-        <a className={`${BUTTON} w-full`} href={href} target="_blank" rel="noreferrer">
-          Open persisted wirepackets file
-        </a>
-      ) : (
-        <p className="text-xs text-zinc-500">The API has not returned a file route.</p>
-      )}
+      {metadata.path && <p className="break-all font-mono text-[11px] text-zinc-500">{metadata.path}</p>}
+      {href ? <a className={`${BUTTON} w-full`} href={href} target="_blank" rel="noreferrer">Open persisted wirepackets file</a> : <p className="text-xs text-zinc-500">The API has not returned a file route.</p>}
     </div>
   );
 }
@@ -937,24 +697,12 @@ function PayloadItem({ payload }) {
       <p className="mt-0.5 break-all font-mono text-[10px] text-zinc-400">{payload.path}</p>
       {payload.objects.length > 0 && (
         <>
-          <button
-            type="button"
-            aria-expanded={open}
-            onClick={() => setOpen((value) => !value)}
-            className="mt-2 flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-xs text-zinc-600 transition hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
-          >
+          <button type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)} className="mt-2 flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-xs text-zinc-600 transition hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800">
             Depth objects
-            <span
-              aria-hidden="true"
-              className={`transition-transform duration-300 ${open ? "rotate-180" : ""}`}
-            >
-              ▾
-            </span>
+            <span aria-hidden="true" className={`transition-transform duration-300 ${open ? "rotate-180" : ""}`}>▾</span>
           </button>
           <Collapsible open={open}>
-            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all text-[10px] text-zinc-500">
-              {JSON.stringify(payload.objects, null, 2)}
-            </pre>
+            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all text-[10px] text-zinc-500">{JSON.stringify(payload.objects, null, 2)}</pre>
           </Collapsible>
         </>
       )}
@@ -968,21 +716,13 @@ function PayloadRecordsBody({ group }) {
     ["Exile outputs", group.exile_outputs],
     ["Unclassified", group.unclassified],
   ].filter(([, rows]) => rows.length > 0);
-  if (sections.length === 0) {
-    return <p className="text-xs text-zinc-500">No payload records for this network.</p>;
-  }
+  if (sections.length === 0) return <p className="text-xs text-zinc-500">No payload records for this network.</p>;
   return (
     <div className="space-y-4">
       {sections.map(([title, rows]) => (
         <div key={title}>
-          <h5 className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-            {title} <Pill>{rows.length}</Pill>
-          </h5>
-          <div className="grid gap-2">
-            {rows.map((payload) => (
-              <PayloadItem key={payloadRowKey(payload)} payload={payload} />
-            ))}
-          </div>
+          <h5 className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{title} <Pill>{rows.length}</Pill></h5>
+          <div className="grid gap-2">{rows.map((payload) => <PayloadItem key={payloadRowKey(payload)} payload={payload} />)}</div>
         </div>
       ))}
     </div>
@@ -990,43 +730,17 @@ function PayloadRecordsBody({ group }) {
 }
 
 function NetworkCard({
-  kind,
-  network,
-  defaultOpen,
-  index,
-  activation,
-  budgetRow,
-  group,
-  board,
-  wire,
-  observation,
-  busy,
-  results,
-  loadingBoards,
-  loadingBudgets,
-  loadingWire,
-  budgetError,
-  budgetNotice,
-  onSaveBudget,
-  onStreamAction,
-  onRefreshStream,
-  onViewLogs,
+  kind, network, defaultOpen, index, activation, budgetRow, group, board, wire,
+  observation, busy, results, loadingBoards, loadingBudgets, loadingWire,
+  budgetError, budgetNotice, onSaveBudget, onStreamAction, onRefreshStream, onViewLogs,
 }) {
   const meta = BITCOIN_KINDS[kind];
   const style = { animationDelay: `${Math.min(index, 6) * 60}ms` };
 
   if (!network) {
     return (
-      <Card
-        title={meta.label}
-        subtitle={meta.note}
-        badge={<Pill tone="warn">Not registered</Pill>}
-        style={style}
-      >
-        <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-          The API has not returned a {meta.label} network for this activation yet. It will appear
-          here as soon as it is registered.
-        </p>
+      <Card title={meta.label} subtitle={meta.note} badge={<Pill tone="warn">Not registered</Pill>} style={style}>
+        <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">The API has not returned a {meta.label} network for this activation yet. It will appear here as soon as it is registered.</p>
       </Card>
     );
   }
@@ -1034,86 +748,30 @@ function NetworkCard({
   const budget = budgetRow?.budget || null;
   const configured = Boolean(budgetRow?.configured && budget);
   const payloadKind = ownPayloadKind(board, network);
-  const payloadTotal =
-    group.transit_inputs.length + group.exile_outputs.length + group.unclassified.length;
+  const payloadTotal = group.transit_inputs.length + group.exile_outputs.length + group.unclassified.length;
 
   return (
-    <Card
-      title={kind === "other" ? network.name : meta.label}
-      subtitle={network.id}
-      badge={<Pill tone={configured ? "ok" : "neutral"}>{configured ? "Budget set" : "No budget"}</Pill>}
-      defaultOpen={defaultOpen}
-      style={style}
-    >
+    <Card title={kind === "other" ? network.name : meta.label} subtitle={network.id} badge={<Pill tone={configured ? "ok" : "neutral"}>{configured ? "Budget set" : "No budget"}</Pill>} defaultOpen={defaultOpen} style={style}>
       <div className="space-y-3">
         <Fields min="7rem">
           <Field label="Purpose">{money(network.purpose)}</Field>
-          <Field label="Derivation path">
-            <span className="break-all font-mono text-xs">{money(network.path)}</span>
-          </Field>
+          <Field label="Derivation path"><span className="break-all font-mono text-xs">{money(network.path)}</span></Field>
         </Fields>
-
-        <Card
-          inner
-          defaultOpen
-          title={`Network budget · activation ${activation}`}
-          badge={loadingBudgets ? <Pill>Loading</Pill> : null}
-        >
+        <Card inner defaultOpen title={`Network budget · activation ${activation}`} badge={loadingBudgets ? <Pill>Loading</Pill> : null}>
           <BudgetSummary budget={budget} />
           <BudgetEditor budget={budget} disabled={loadingBudgets} onSave={(draft) => onSaveBudget(network, draft)} />
-          {budgetError && (
-            <div className="mt-3">
-              <Notice>{budgetError}</Notice>
-            </div>
-          )}
-          {budgetNotice && (
-            <div className="mt-3">
-              <Notice type="success">{budgetNotice}</Notice>
-            </div>
-          )}
+          {budgetError && <div className="mt-3"><Notice>{budgetError}</Notice></div>}
+          {budgetNotice && <div className="mt-3"><Notice type="success">{budgetNotice}</Notice></div>}
         </Card>
-
-        <Card
-          inner
-          scroll
-          title="Payload board"
-          badge={
-            <Pill tone={payloadKind?.available ? "ok" : "neutral"}>
-              {payloadKind ? (payloadKind.available ? "Available" : "Unavailable") : "None"}
-            </Pill>
-          }
-        >
+        <Card inner scroll title="Payload board" badge={<Pill tone={payloadKind?.available ? "ok" : "neutral"}>{payloadKind ? (payloadKind.available ? "Available" : "Unavailable") : "None"}</Pill>}>
           <PayloadBoard board={board} kind={payloadKind} loading={loadingBoards} />
         </Card>
-
-        <Card
-          inner
-          title="Bit-miner"
-          badge={
-            <Pill tone={observation?.running === true ? "ok" : "neutral"}>
-              {observation?.running === true ? "Running" : "Idle"}
-            </Pill>
-          }
-        >
-          <StreamBody
-            status={observation}
-            busy={busy}
-            results={results}
-            network={network}
-            onAction={onStreamAction}
-            onRefresh={onRefreshStream}
-            onViewLogs={onViewLogs}
-          />
+        <Card inner title="Bit-miner" badge={<Pill tone={observation?.running === true ? "ok" : "neutral"}>{observation?.running === true ? "Running" : "Idle"}</Pill>}>
+          <StreamBody status={observation} busy={busy} results={results} network={network} onAction={onStreamAction} onRefresh={onRefreshStream} onViewLogs={onViewLogs} />
         </Card>
-
-        <Card
-          inner
-          title="Wirepackets file"
-          badge={<Pill tone={wire?.exists ? "ok" : "neutral"}>{wire?.exists ? "Present" : "None"}</Pill>}
-        >
+        <Card inner title="Wirepackets file" badge={<Pill tone={wire?.exists ? "ok" : "neutral"}>{wire?.exists ? "Present" : "None"}</Pill>}>
           <WirePacketsBody metadata={wire} loading={loadingWire} />
         </Card>
-
         <Card inner scroll title="Payload records" badge={<Pill>{payloadTotal}</Pill>}>
           <PayloadRecordsBody group={group} />
         </Card>
@@ -1148,7 +806,6 @@ export default function EventStorePage() {
   const [budgetErrors, setBudgetErrors] = useState({});
   const [budgetNotices, setBudgetNotices] = useState({});
   const [store, setStore] = useState(null);
-  // One popup at a time; scope is recorded explicitly so logs can never leak across selections.
   const [logViewer, setLogViewer] = useState(null);
 
   const selectedSubstrateRef = useRef("");
@@ -1162,11 +819,10 @@ export default function EventStorePage() {
   );
 
   const retainedMass = useMemo(
-    () =>
-      selectedEvents.reduce((sum, event) => {
-        const value = event?.retained_mass ?? event?.heritage?.state?.retained_mass ?? "0";
-        return /^\d+$/.test(String(value)) ? sum + BigInt(value) : sum;
-      }, 0n),
+    () => selectedEvents.reduce((sum, event) => {
+      const value = event?.retained_mass ?? event?.heritage?.state?.retained_mass ?? "0";
+      return /^\d+$/.test(String(value)) ? sum + BigInt(value) : sum;
+    }, 0n),
     [selectedEvents],
   );
 
@@ -1174,9 +830,7 @@ export default function EventStorePage() {
     const groups = new Map();
     for (const payload of payloads) {
       const id = payload.network.id;
-      if (!groups.has(id)) {
-        groups.set(id, { transit_inputs: [], exile_outputs: [], unclassified: [] });
-      }
+      if (!groups.has(id)) groups.set(id, { transit_inputs: [], exile_outputs: [], unclassified: [] });
       groups.get(id)[payload.direction].push(payload);
     }
     return groups;
@@ -1198,7 +852,6 @@ export default function EventStorePage() {
     return [...values].sort((a, b) => Number(b) - Number(a));
   }, [events, activation]);
 
-  // One entry per network id (API networks first, then payload-only networks).
   const renderedNetworks = useMemo(() => {
     const byId = new Map(networks.map((network) => [network.id, network]));
     for (const payload of payloads) {
@@ -1207,7 +860,6 @@ export default function EventStorePage() {
     return [...byId.values()];
   }, [networks, payloads]);
 
-  // Bitcoin slots: Legacy, then SegWit, then any other Bitcoin network. Missing ones are placeholders.
   const bitcoinSlots = useMemo(() => {
     const buckets = { legacy: [], segwit: [], other: [] };
     for (const network of renderedNetworks) {
@@ -1223,8 +875,7 @@ export default function EventStorePage() {
   }, [renderedNetworks]);
 
   const configuredCount = budgets.filter((row) => row.configured && row.budget).length;
-  const anyLoading =
-    loadingEvents || loadingBudgets || loadingPayloads || loadingBoards || loadingWire;
+  const anyLoading = loadingEvents || loadingBudgets || loadingPayloads || loadingBoards || loadingWire;
 
   const loadPayloadsForEvents = useCallback(async (name, eventRows, activationValue) => {
     const selectedActivation = String(activationValue);
@@ -1241,31 +892,12 @@ export default function EventStorePage() {
 
     const requestId = ++payloadRequestRef.current;
     setLoadingPayloads(true);
-
     try {
-      const records = [
-        ...new Set(
-          scopedEvents
-            .map((event) => event?.record)
-            .filter((record) => typeof record === "string" && record.length > 0),
-        ),
-      ];
+      const records = [...new Set(scopedEvents.map((event) => event?.record).filter((record) => typeof record === "string" && record.length > 0))];
+      const results = await Promise.allSettled(records.map((record) => apiRequest(`/wallets/${enc(name)}/events/${enc(record)}/payloads`)));
 
-      const results = await Promise.allSettled(
-        records.map((record) =>
-          apiRequest(`/wallets/${enc(name)}/events/${enc(record)}/payloads`),
-        ),
-      );
+      if (requestId !== payloadRequestRef.current || selectedSubstrateRef.current !== name || selectedActivationRef.current !== selectedActivation) return null;
 
-      if (
-        requestId !== payloadRequestRef.current ||
-        selectedSubstrateRef.current !== name ||
-        selectedActivationRef.current !== selectedActivation
-      ) {
-        return null;
-      }
-
-      // De-duplicate by record + network + path + depth identifier.
       const unique = new Map();
       results.forEach((result, index) => {
         if (result.status !== "fulfilled") return;
@@ -1281,15 +913,9 @@ export default function EventStorePage() {
       setPayloads(collected);
       return collected;
     } catch (err) {
-      if (
-        requestId === payloadRequestRef.current &&
-        selectedSubstrateRef.current === name &&
-        selectedActivationRef.current === selectedActivation
-      ) {
+      if (requestId === payloadRequestRef.current && selectedSubstrateRef.current === name && selectedActivationRef.current === selectedActivation) {
         setPayloads([]);
-        setError(
-          `Unable to load payload render data: ${err instanceof Error ? err.message : "unknown API error"}`,
-        );
+        setError(`Unable to load payload render data: ${err instanceof Error ? err.message : "unknown API error"}`);
       }
       return null;
     } finally {
@@ -1297,54 +923,45 @@ export default function EventStorePage() {
     }
   }, []);
 
-  const loadEvents = useCallback(
-    async (name, activationValue) => {
-      if (!name) return;
-      const selected = String(activationValue);
-      const requestId = ++scopeRequestRef.current;
-      setLoadingEvents(true);
-      setError("");
-      try {
-        const eventBody = await apiRequest(`/wallets/${enc(name)}/events`);
-        if (requestId !== scopeRequestRef.current || selectedSubstrateRef.current !== name) return;
-        const nextEvents = Array.isArray(eventBody?.events) ? eventBody.events : [];
-        setEvents(nextEvents);
-        setStore(eventBody);
-        await loadPayloadsForEvents(name, nextEvents, selected);
-      } catch (err) {
-        if (requestId === scopeRequestRef.current) {
-          setEvents([]);
-          setPayloads([]);
-          setError(err instanceof Error ? err.message : "Unable to load events.");
-        }
-      } finally {
-        if (requestId === scopeRequestRef.current) setLoadingEvents(false);
+  const loadEvents = useCallback(async (name, activationValue) => {
+    if (!name) return;
+    const selected = String(activationValue);
+    const requestId = ++scopeRequestRef.current;
+    setLoadingEvents(true);
+    setError("");
+    try {
+      const eventBody = await apiRequest(`/wallets/${enc(name)}/events`);
+      if (requestId !== scopeRequestRef.current || selectedSubstrateRef.current !== name) return;
+      const nextEvents = Array.isArray(eventBody?.events) ? eventBody.events : [];
+      setEvents(nextEvents);
+      setStore(eventBody);
+      await loadPayloadsForEvents(name, nextEvents, selected);
+    } catch (err) {
+      if (requestId === scopeRequestRef.current) {
+        setEvents([]);
+        setPayloads([]);
+        setError(err instanceof Error ? err.message : "Unable to load events.");
       }
-    },
-    [loadPayloadsForEvents],
-  );
+    } finally {
+      if (requestId === scopeRequestRef.current) setLoadingEvents(false);
+    }
+  }, [loadPayloadsForEvents]);
 
   const loadBudgets = useCallback(async (name, activationValue) => {
     if (!name || !/^\d+$/.test(String(activationValue))) return;
     const selected = String(activationValue);
     try {
-      const body = await apiRequest(
-        `/wallets/${enc(name)}/activations/${enc(selected)}/budgets`,
-      );
+      const body = await apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/budgets`);
       if (selectedSubstrateRef.current !== name || selectedActivationRef.current !== selected) return;
       const rows = Array.isArray(body?.budgets) ? body.budgets : [];
       setBudgets(rows.filter((row) => row?.activation == null || String(row.activation) === selected));
     } catch (err) {
       if (selectedSubstrateRef.current === name && selectedActivationRef.current === selected) {
         setBudgets([]);
-        setError(
-          `Unable to load network budgets: ${err instanceof Error ? err.message : "API error"}`,
-        );
+        setError(`Unable to load network budgets: ${err instanceof Error ? err.message : "API error"}`);
       }
     } finally {
-      if (selectedSubstrateRef.current === name && selectedActivationRef.current === selected) {
-        setLoadingBudgets(false);
-      }
+      if (selectedSubstrateRef.current === name && selectedActivationRef.current === selected) setLoadingBudgets(false);
     }
   }, []);
 
@@ -1356,20 +973,10 @@ export default function EventStorePage() {
     setLoadingBoards(true);
     setLoadingWire(true);
 
-    const boardResults = await Promise.allSettled(
-      activeNetworks.map((network) =>
-        apiRequest(
-          `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/payload-board`,
-        ),
-      ),
-    );
-    if (
-      requestId !== scopeRequestRef.current ||
-      selectedSubstrateRef.current !== name ||
-      selectedActivationRef.current !== selected
-    ) {
-      return;
-    }
+    const boardResults = await Promise.allSettled(activeNetworks.map((network) =>
+      apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/payload-board`),
+    ));
+    if (requestId !== scopeRequestRef.current || selectedSubstrateRef.current !== name || selectedActivationRef.current !== selected) return;
 
     const nextBoards = {};
     boardResults.forEach((result, index) => {
@@ -1382,20 +989,10 @@ export default function EventStorePage() {
     setLoadingBoards(false);
 
     const btcNetworks = activeNetworks.filter(bitcoinNetwork);
-    const wireResults = await Promise.allSettled(
-      btcNetworks.map((network) =>
-        apiRequest(
-          `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/wirepackets`,
-        ),
-      ),
-    );
-    if (
-      requestId !== scopeRequestRef.current ||
-      selectedSubstrateRef.current !== name ||
-      selectedActivationRef.current !== selected
-    ) {
-      return;
-    }
+    const wireResults = await Promise.allSettled(btcNetworks.map((network) =>
+      apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/wirepackets`),
+    ));
+    if (requestId !== scopeRequestRef.current || selectedSubstrateRef.current !== name || selectedActivationRef.current !== selected) return;
 
     const nextWire = {};
     wireResults.forEach((result, index) => {
@@ -1412,13 +1009,9 @@ export default function EventStorePage() {
     if (!name || !/^\d+$/.test(String(activationValue))) return;
     const selected = String(activationValue);
     const btcNetworks = (networkRows || []).map(normalizeNetwork).filter(bitcoinNetwork);
-    const results = await Promise.allSettled(
-      btcNetworks.map((network) =>
-        apiRequest(
-          `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/observation`,
-        ),
-      ),
-    );
+    const results = await Promise.allSettled(btcNetworks.map((network) =>
+      apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/observation`),
+    ));
     if (selectedSubstrateRef.current !== name || selectedActivationRef.current !== selected) return;
     const next = {};
     results.forEach((result, index) => {
@@ -1427,34 +1020,26 @@ export default function EventStorePage() {
     setObservations(next);
   }, []);
 
-  const loadAll = useCallback(
-    async (name, activationValue, networkRows = []) => {
-      if (!name || !/^\d+$/.test(String(activationValue))) return;
-      const selected = String(activationValue);
-      selectedSubstrateRef.current = name;
-      selectedActivationRef.current = selected;
-      setLoadingBudgets(true);
-      setError("");
-      await Promise.all([
-        loadBudgets(name, selected),
-        loadNetworkData(name, selected, networkRows),
-        loadObservationStatuses(name, selected, networkRows),
-      ]);
-    },
-    [loadBudgets, loadNetworkData, loadObservationStatuses],
-  );
+  const loadAll = useCallback(async (name, activationValue, networkRows = []) => {
+    if (!name || !/^\d+$/.test(String(activationValue))) return;
+    const selected = String(activationValue);
+    selectedSubstrateRef.current = name;
+    selectedActivationRef.current = selected;
+    setLoadingBudgets(true);
+    setError("");
+    await Promise.all([
+      loadBudgets(name, selected),
+      loadNetworkData(name, selected, networkRows),
+      loadObservationStatuses(name, selected, networkRows),
+    ]);
+  }, [loadBudgets, loadNetworkData, loadObservationStatuses]);
 
   const loadInitial = useCallback(async () => {
     setLoadingList(true);
     try {
-      const [walletBody, networkBody] = await Promise.all([
-        apiRequest("/wallets"),
-        apiRequest("/networks"),
-      ]);
+      const [walletBody, networkBody] = await Promise.all([apiRequest("/wallets"), apiRequest("/networks")]);
       const walletRows = Array.isArray(walletBody?.substrates) ? walletBody.substrates : [];
-      const networkRows = (Array.isArray(networkBody?.networks) ? networkBody.networks : [])
-        .map(normalizeNetwork)
-        .filter(Boolean);
+      const networkRows = (Array.isArray(networkBody?.networks) ? networkBody.networks : []).map(normalizeNetwork).filter(Boolean);
       setSubstrates(walletRows);
       setNetworks(networkRows);
       const initialName = walletRows[0]?.name || "";
@@ -1475,9 +1060,63 @@ export default function EventStorePage() {
     }
   }, [loadAll, loadEvents]);
 
+  useEffect(() => { loadInitial(); }, [loadInitial]);
+
+  // Poll only the Bitcoin observation scopes that report running=true.
+  // Each cycle waits for all metadata requests before scheduling the next one.
+  const runningBitcoinNetworkIds = useMemo(
+    () => JSON.stringify(
+      networks
+        .filter(bitcoinNetwork)
+        .filter((network) => observations[network.id]?.running === true)
+        .map((network) => network.id),
+    ),
+    [networks, observations],
+  );
+
   useEffect(() => {
-    loadInitial();
-  }, [loadInitial]);
+    if (!substrate || !/^\d+$/.test(String(activation))) return;
+    const networkIds = JSON.parse(runningBitcoinNetworkIds);
+    if (!networkIds.length) return;
+
+    const selectedSubstrate = substrate;
+    const selectedActivation = String(activation);
+    let cancelled = false;
+    let timeoutId = null;
+
+    const pollWirePackets = async () => {
+      const results = await Promise.allSettled(networkIds.map((networkId) =>
+        apiRequest(`/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(networkId)}/wirepackets`),
+      ));
+
+      if (
+        cancelled ||
+        selectedSubstrateRef.current !== selectedSubstrate ||
+        selectedActivationRef.current !== selectedActivation
+      ) {
+        return;
+      }
+
+      setWirePackets((current) => {
+        const next = { ...current };
+        results.forEach((result, index) => {
+          if (result.status !== "fulfilled") return;
+          const metadata = result.value;
+          if (metadata?.activation != null && String(metadata.activation) !== selectedActivation) return;
+          next[networkIds[index]] = metadata;
+        });
+        return next;
+      });
+
+      if (!cancelled) timeoutId = window.setTimeout(pollWirePackets, WIREPACKETS_POLL_MS);
+    };
+
+    timeoutId = window.setTimeout(pollWirePackets, 0);
+    return () => {
+      cancelled = true;
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    };
+  }, [substrate, activation, runningBitcoinNetworkIds]);
 
   const chooseSubstrate = async (name) => {
     selectedSubstrateRef.current = name;
@@ -1534,18 +1173,14 @@ export default function EventStorePage() {
   }
 
   const refreshAll = async () => {
-  if (!substrate || !/^\d+$/.test(String(activation))) return;
-
-  const selected = String(activation);
-
-  await Promise.all([
-    loadEvents(substrate, selected),
-    loadBudgets(substrate, selected),
-    loadNetworkData(substrate, selected, networks),
-  ]);
-
-  setNotice("Event Store refreshed.");
-};
+    if (!substrate || !/^\d+$/.test(String(activation))) return;
+    const selected = String(activation);
+    // loadEvents and loadNetworkData share the scope request guard, so run
+    // them sequentially rather than invalidating one another in Promise.all.
+    await loadAll(substrate, selected, networks);
+    await loadEvents(substrate, selected);
+    setNotice("Event Store refreshed.");
+  };
 
   const saveBudget = async (network, draft) => {
     const key = networkKey(network);
@@ -1557,111 +1192,74 @@ export default function EventStorePage() {
         max_events: Number(draft.max_events),
         max_retained_mass: parseU128(draft.max_retained_mass, "Maximum retained mass"),
       };
-      if (!Number.isSafeInteger(body.min_events) || body.min_events < 0) {
-        throw new Error("Minimum events must be a non-negative safe integer.");
-      }
-      if (!Number.isSafeInteger(body.max_events) || body.max_events < 0) {
-        throw new Error("Maximum events must be a non-negative safe integer.");
-      }
-      await apiRequest(
-        `/wallets/${enc(substrate)}/activations/${enc(activation)}/budgets/${enc(network.id)}`,
-        { method: "PUT", body: JSON.stringify(body) },
-      );
+      if (!Number.isSafeInteger(body.min_events) || body.min_events < 0) throw new Error("Minimum events must be a non-negative safe integer.");
+      if (!Number.isSafeInteger(body.max_events) || body.max_events < 0) throw new Error("Maximum events must be a non-negative safe integer.");
+      await apiRequest(`/wallets/${enc(substrate)}/activations/${enc(activation)}/budgets/${enc(network.id)}`, { method: "PUT", body: JSON.stringify(body) });
       setBudgetNotices((current) => ({ ...current, [key]: "Network budget saved." }));
       await loadBudgets(substrate, activation);
     } catch (err) {
-      setBudgetErrors((current) => ({
-        ...current,
-        [key]: err instanceof Error ? err.message : "Unable to save network budget.",
-      }));
+      setBudgetErrors((current) => ({ ...current, [key]: err instanceof Error ? err.message : "Unable to save network budget." }));
     }
   };
 
   const appendStreamResult = (networkId, label, body) => {
     setStreamResults((current) => ({
       ...current,
-      [networkId]: [
-        ...(current[networkId] || []),
-        {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          label,
-          time: new Date().toLocaleTimeString(),
-          body,
-        },
-      ].slice(-60),
+      [networkId]: [...(current[networkId] || []), {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        label,
+        time: new Date().toLocaleTimeString(),
+        body,
+      }].slice(-60),
     }));
   };
 
-  // One explicit status request. Never called on a timer.
- const refreshStream = async (network) => {
-  const id = network.id;
-  const route = `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/observation`;
+  const refreshStream = async (network) => {
+    const id = network.id;
+    const selectedSubstrate = substrate;
+    const selectedActivation = String(activation);
+    const route = `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(id)}/observation`;
+    setBusyObservation((current) => ({ ...current, [id]: true }));
+    try {
+      const status = await apiRequest(route);
+      if (selectedSubstrateRef.current !== selectedSubstrate || selectedActivationRef.current !== selectedActivation) return;
+      setObservations((current) => ({ ...current, [id]: status }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to retrieve bit-miner process status.");
+    } finally {
+      setBusyObservation((current) => ({ ...current, [id]: false }));
+    }
+  };
 
-  setBusyObservation((current) => ({
-    ...current,
-    [id]: true,
-  }));
-
-  try {
-    const status = await apiRequest(route);
-
-    setObservations((current) => ({
-      ...current,
-      [id]: status,
-    }));
-  } catch (err) {
-    setError(
-      err instanceof Error
-        ? err.message
-        : "Unable to retrieve bit-miner process status.",
-    );
-  } finally {
-    setBusyObservation((current) => ({
-      ...current,
-      [id]: false,
-    }));
-  }
-};
-
-  // Start: one POST, one initial status GET, one payload-board + wirepackets fetch.
-  // Stop: one DELETE. No polling.
   const streamAction = async (action, network) => {
     const id = network.id;
-    const route = `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/observation`;
-
+    const selectedSubstrate = substrate;
+    const selectedActivation = String(activation);
+    const route = `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(id)}/observation`;
     setBusyObservation((current) => ({ ...current, [id]: true }));
-
     try {
-      const result = await apiRequest(route, {
-        method: action === "start" ? "POST" : "DELETE",
-      });
-
+      const result = await apiRequest(route, { method: action === "start" ? "POST" : "DELETE" });
+      if (selectedSubstrateRef.current !== selectedSubstrate || selectedActivationRef.current !== selectedActivation) return;
       appendStreamResult(id, `${action.toUpperCase()} observation response`, result);
       setObservations((current) => ({ ...current, [id]: result }));
 
       if (action === "start") {
         const status = await apiRequest(route);
+        if (selectedSubstrateRef.current !== selectedSubstrate || selectedActivationRef.current !== selectedActivation) return;
         appendStreamResult(id, "Initial process status", status);
         setObservations((current) => ({ ...current, [id]: status }));
 
         const [board, wire] = await Promise.all([
-          apiRequest(
-            `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/payload-board`,
-          ),
-          apiRequest(
-            `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(id)}/wirepackets`,
-          ),
+          apiRequest(`/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(id)}/payload-board`),
+          apiRequest(`/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(id)}/wirepackets`),
         ]);
-
+        if (selectedSubstrateRef.current !== selectedSubstrate || selectedActivationRef.current !== selectedActivation) return;
         setBoards((current) => ({ ...current, [id]: board }));
         setWirePackets((current) => ({ ...current, [id]: wire }));
       }
-
       setNotice(result?.message || `Bitcoin bit-miner ${action} request completed.`);
     } catch (err) {
-      const failure = {
-        error: err instanceof Error ? err.message : "Bitcoin bit-miner request failed.",
-      };
+      const failure = { error: err instanceof Error ? err.message : "Bitcoin bit-miner request failed." };
       appendStreamResult(id, `${action.toUpperCase()} request error`, failure);
       setError(failure.error);
     } finally {
@@ -1669,7 +1267,6 @@ export default function EventStorePage() {
     }
   };
 
-  // Only render the popup while its recorded scope still matches the current selection.
   const activeLogViewer =
     logViewer &&
     logViewer.substrate === substrate &&
@@ -1680,11 +1277,7 @@ export default function EventStorePage() {
 
   const openBitMinerLogs = (network) => {
     if (!substrate || !network?.id || !/^\d+$/.test(String(activation))) return;
-    setLogViewer({
-      substrate,
-      activation: String(activation),
-      network: network.id,
-    });
+    setLogViewer({ substrate, activation: String(activation), network: network.id });
   };
 
   const closeBitMinerLogs = useCallback(() => setLogViewer(null), []);
@@ -1700,81 +1293,37 @@ export default function EventStorePage() {
   return (
     <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
       <style>{QTM_STYLES}</style>
-      <div
-        className="mx-auto flex w-full max-w-7xl flex-col gap-4"
-        inert={activeLogViewer ? true : undefined}
-        aria-hidden={activeLogViewer ? true : undefined}
-      >
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4" inert={activeLogViewer ? true : undefined} aria-hidden={activeLogViewer ? true : undefined}>
         <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div className="min-w-0">
             <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">QTM Event Store</h1>
             <p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 sm:text-sm dark:text-zinc-400">
-              Persisted substrate events, activation-scoped payloads, network budgets, payload
-              boards, Bitcoin observation and API-owned wirepackets.
+              Persisted substrate events, activation-scoped payloads, network budgets, payload boards, Bitcoin observation and API-owned wirepackets.
             </p>
           </div>
           <div className="grid grid-cols-3 gap-2 sm:flex">
-            <a href="/network" className={BUTTON}>
-              Network
-            </a>
-            <a href="/" className={BUTTON}>
-              QTM
-            </a>
-            <button
-              type="button"
-              className={BUTTON}
-              disabled={!substrate || anyLoading}
-              onClick={refreshAll}
-            >
-              {anyLoading ? "Syncing…" : "Refresh"}
-            </button>
+            <a href="/network" className={BUTTON}>Network</a>
+            <a href="/" className={BUTTON}>QTM</a>
+            <button type="button" className={BUTTON} disabled={!substrate || anyLoading} onClick={refreshAll}>{anyLoading ? "Syncing…" : "Refresh"}</button>
           </div>
         </header>
 
         {error && <Notice>{error}</Notice>}
         {notice && <Notice type="success">{notice}</Notice>}
 
-        <Card
-          defaultOpen
-          title="Overview"
-          subtitle={substrate ? `${substrate} · activation ${activation || "—"}` : "No substrate selected"}
-          badge={anyLoading ? <Pill>Syncing</Pill> : <Pill tone="ok">Ready</Pill>}
-          className="w-full"
-        >
+        <Card defaultOpen title="Overview" subtitle={substrate ? `${substrate} · activation ${activation || "—"}` : "No substrate selected"} badge={anyLoading ? <Pill>Syncing</Pill> : <Pill tone="ok">Ready</Pill>} className="w-full">
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block min-w-0">
-              <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
-                Persistent substrate
-              </span>
-              <select
-                className={INPUT}
-                value={substrate}
-                disabled={loadingList}
-                onChange={(event) => chooseSubstrate(event.target.value)}
-              >
+              <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">Persistent substrate</span>
+              <select className={INPUT} value={substrate} disabled={loadingList} onChange={(event) => chooseSubstrate(event.target.value)}>
                 <option value="">{loadingList ? "Loading substrates…" : "Select substrate"}</option>
-                {substrates.map((entry) => (
-                  <option key={entry.name} value={entry.name}>
-                    {entry.name}
-                  </option>
-                ))}
+                {substrates.map((entry) => <option key={entry.name} value={entry.name}>{entry.name}</option>)}
               </select>
             </label>
             <label className="block min-w-0">
-              <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
-                Activation
-              </span>
-              <select
-                className={INPUT}
-                value={activation}
-                disabled={!substrate}
-                onChange={(event) => chooseActivation(event.target.value)}
-              >
-                {activationOptions.map((value) => (
-                  <option key={value} value={value}>
-                    Activation {value}
-                  </option>
-                ))}
+              <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">Activation</span>
+              <select className={INPUT} value={activation} disabled={!substrate} onChange={(event) => chooseActivation(event.target.value)}>
+                {activationOptions.map((value) => <option key={value} value={value}>Activation {value}</option>)}
               </select>
             </label>
           </div>
@@ -1789,9 +1338,7 @@ export default function EventStorePage() {
           </div>
         </Card>
 
-        <SectionHeading title="Bitcoin" meta={`coin type ${COIN_TYPES[0].type}`}>
-          Legacy and SegWit share the single Bitcoin payload kind.
-        </SectionHeading>
+        <SectionHeading title="Bitcoin" meta={`coin type ${COIN_TYPES[0].type}`}>Legacy and SegWit share the single Bitcoin payload kind.</SectionHeading>
         {loadingPayloads && <p className="px-1 text-xs text-zinc-500">Rendering payload records…</p>}
         <div className="grid grid-cols-1 items-start gap-3 xl:grid-cols-2">
           {bitcoinSlots.map((slot, index) => {
@@ -1825,24 +1372,14 @@ export default function EventStorePage() {
           })}
         </div>
 
-        <SectionHeading title="Other chains" meta="not yet implemented">
-          One payload kind each, from the paths registry. Placeholders until wired up.
-        </SectionHeading>
+        <SectionHeading title="Other chains" meta="not yet implemented">One payload kind each, from the paths registry. Placeholders until wired up.</SectionHeading>
         <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {COIN_TYPES.filter((coin) => coin.key !== "bitcoin").map((coin, index) => {
             const registered = networks.filter((network) => coinKey(network) === coin.key).length;
             return (
-              <Card
-                key={coin.key}
-                title={coin.name}
-                subtitle={`coin type ${coin.type}`}
-                badge={<Pill tone="warn">Planned</Pill>}
-                style={{ animationDelay: `${index * 60}ms` }}
-              >
+              <Card key={coin.key} title={coin.name} subtitle={`coin type ${coin.type}`} badge={<Pill tone="warn">Planned</Pill>} style={{ animationDelay: `${index * 60}ms` }}>
                 <Fields min="7rem">
-                  <Field label="Registry path">
-                    <span className="break-all font-mono text-xs">{coin.path}</span>
-                  </Field>
+                  <Field label="Registry path"><span className="break-all font-mono text-xs">{coin.path}</span></Field>
                   <Field label="API networks">{registered}</Field>
                 </Fields>
               </Card>
@@ -1851,67 +1388,28 @@ export default function EventStorePage() {
         </div>
 
         <SectionHeading title="Diagnostics" />
-        <Card
-          scroll
-          title="Persisted event records"
-          subtitle="GET /wallets/:name/events"
-          badge={<Pill>{events.length}</Pill>}
-          className="w-full"
-        >
+        <Card scroll title="Persisted event records" subtitle="GET /wallets/:name/events" badge={<Pill>{events.length}</Pill>} className="w-full">
           <div className="hidden overflow-x-auto rounded-xl border border-zinc-200 lg:block dark:border-zinc-800">
             <table className="w-full min-w-[850px] border-collapse text-left text-sm">
               <thead className="bg-zinc-100 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                <tr>
-                  {[
-                    "Activation",
-                    "Event type",
-                    "Record reference",
-                    "Dimension",
-                    "Structural value (Σ)",
-                    "Depth objects",
-                    "Retained mass",
-                  ].map((heading) => (
-                    <th key={heading} className="px-4 py-3 font-semibold">
-                      {heading}
-                    </th>
-                  ))}
-                </tr>
+                <tr>{["Activation", "Event type", "Record reference", "Dimension", "Structural value (Σ)", "Depth objects", "Retained mass"].map((heading) => <th key={heading} className="px-4 py-3 font-semibold">{heading}</th>)}</tr>
               </thead>
               <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
                 {events.map((event, index) => {
                   const state = event?.heritage?.state;
                   return (
-                    <tr
-                      key={`${event.record}-${index}`}
-                      className="align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
-                    >
-                      <td className="whitespace-nowrap px-4 py-3 font-mono">
-                        {activationFromEvent(event) ?? money(event.activation)}
-                      </td>
+                    <tr key={`${event.record}-${index}`} className="align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+                      <td className="whitespace-nowrap px-4 py-3 font-mono">{activationFromEvent(event) ?? money(event.activation)}</td>
                       <td className="px-4 py-3">{money(event.kind)}</td>
-                      <td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">
-                        {money(event.record)}
-                      </td>
-                      <td className="break-all px-4 py-3 font-mono">
-                        {money(event.dimension ?? state?.dimension)}
-                      </td>
-                      <td className="break-all px-4 py-3 font-mono">
-                        {money(event.structural_value ?? state?.structural_value)}
-                      </td>
+                      <td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">{money(event.record)}</td>
+                      <td className="break-all px-4 py-3 font-mono">{money(event.dimension ?? state?.dimension)}</td>
+                      <td className="break-all px-4 py-3 font-mono">{money(event.structural_value ?? state?.structural_value)}</td>
                       <td className="px-4 py-3">{money(event.depth_objects)}</td>
-                      <td className="break-all px-4 py-3 font-mono">
-                        {money(event.retained_mass ?? state?.retained_mass)}
-                      </td>
+                      <td className="break-all px-4 py-3 font-mono">{money(event.retained_mass ?? state?.retained_mass)}</td>
                     </tr>
                   );
                 })}
-                {events.length === 0 && (
-                  <tr>
-                    <td colSpan={7} className="px-4 py-10 text-center text-sm text-zinc-500">
-                      {eventsEmptyText}
-                    </td>
-                  </tr>
-                )}
+                {events.length === 0 && <tr><td colSpan={7} className="px-4 py-10 text-center text-sm text-zinc-500">{eventsEmptyText}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -1925,35 +1423,23 @@ export default function EventStorePage() {
                     <h4 className="min-w-0 break-all text-sm font-semibold">{money(event.kind)}</h4>
                     <Pill>Act. {activationFromEvent(event) ?? money(event.activation)}</Pill>
                   </div>
-                  <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">
-                    {money(event.record)}
-                  </p>
+                  <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">{money(event.record)}</p>
                   <div className="mt-3">
                     <Fields min="7rem">
                       <Field label="Dimension">{money(event.dimension ?? state?.dimension)}</Field>
-                      <Field label="Structural value (Σ)">
-                        {money(event.structural_value ?? state?.structural_value)}
-                      </Field>
+                      <Field label="Structural value (Σ)">{money(event.structural_value ?? state?.structural_value)}</Field>
                       <Field label="Depth objects">{money(event.depth_objects)}</Field>
-                      <Field label="Retained mass">
-                        {money(event.retained_mass ?? state?.retained_mass)}
-                      </Field>
+                      <Field label="Retained mass">{money(event.retained_mass ?? state?.retained_mass)}</Field>
                     </Fields>
                   </div>
                 </article>
               );
             })}
-            {events.length === 0 && (
-              <p className="col-span-full rounded-xl border border-zinc-200 p-4 text-sm text-zinc-500 dark:border-zinc-800 lg:hidden">
-                {eventsEmptyText}
-              </p>
-            )}
+            {events.length === 0 && <p className="col-span-full rounded-xl border border-zinc-200 p-4 text-sm text-zinc-500 dark:border-zinc-800 lg:hidden">{eventsEmptyText}</p>}
           </div>
         </Card>
 
-        <footer className="border-t border-zinc-200 pt-4 text-xs text-zinc-500 dark:border-zinc-800">
-          QTM Event Store · {API_BASE}
-        </footer>
+        <footer className="border-t border-zinc-200 pt-4 text-xs text-zinc-500 dark:border-zinc-800">QTM Event Store · {API_BASE}</footer>
       </div>
 
       {activeLogViewer && (
