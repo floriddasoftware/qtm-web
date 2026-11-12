@@ -676,20 +676,25 @@ function StreamBody({ status, busy, results, network, onAction, onRefresh, onVie
   );
 }
 
+
 function WirePacketsBody({ metadata, loading }) {
+  const [selectedSubmission, setSelectedSubmission] = useState("");
   const route = metadata?.file_route;
   const href = route
     ? `${API_BASE}${route.startsWith("/") ? route : `/${route}`}`
     : null;
-
-  const packets = Array.isArray(metadata?.packets)
-    ? metadata.packets
+  const packets = Array.isArray(metadata?.packets) ? metadata.packets : [];
+  const selectedPacket =
+    packets.find((packet) => String(packet.submission) === selectedSubmission) ||
+    packets[packets.length - 1] ||
+    null;
+  const entries = Array.isArray(selectedPacket?.packets)
+    ? [...selectedPacket.packets].sort((a, b) => Number(a.vout) - Number(b.vout))
     : [];
 
   if (loading && !metadata) {
     return <p className="text-xs text-zinc-500">Loading WirePackets…</p>;
   }
-
   if (!metadata) {
     return <p className="text-xs text-zinc-500">No WirePackets metadata response.</p>;
   }
@@ -699,61 +704,82 @@ function WirePacketsBody({ metadata, loading }) {
       <Fields min="7rem">
         <Field label="Scope">{money(metadata.scope)}</Field>
         <Field label="Total bytes">
-          {metadata.bytes == null
-            ? "Not reported"
-            : Number(metadata.bytes).toLocaleString()}
+          {metadata.bytes == null ? "Not reported" : Number(metadata.bytes).toLocaleString()}
         </Field>
         <Field label="Persisted submissions">{packets.length}</Field>
         <Field label="Files present">{flag(metadata.exists)}</Field>
       </Fields>
 
       {metadata.path && (
-        <p className="break-all font-mono text-[11px] text-zinc-500">
-          {metadata.path}
-        </p>
+        <p className="break-all font-mono text-[11px] text-zinc-500">{metadata.path}</p>
       )}
 
       {packets.length > 0 ? (
         <div className="space-y-2">
-          {packets.map((packet) => (
-            <div
-              key={packet.submission}
-              className={`${INNER} flex min-w-0 items-center justify-between gap-3 p-3`}
+          <label className="flex min-w-0 items-center gap-2">
+            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Submission</span>
+            <select
+              aria-label="Select WirePacket submission"
+              className="h-8 min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-2 text-xs dark:border-zinc-700 dark:bg-zinc-950"
+              value={selectedPacket ? String(selectedPacket.submission) : ""}
+              onChange={(event) => setSelectedSubmission(event.target.value)}
             >
-              <div className="min-w-0">
-                <p className="text-xs font-semibold">
-                  Submission {packet.submission}
-                </p>
-                <p className="mt-1 break-all font-mono text-[10px] text-zinc-500">
-                  {packet.path}
-                </p>
-                <p className="mt-1 text-[10px] text-zinc-500">
-                  {Number(packet.bytes || 0).toLocaleString()} bytes
-                </p>
-              </div>
-              <Pill tone="ok">Persisted</Pill>
+              {packets.map((packet) => (
+                <option key={packet.submission} value={String(packet.submission)}>
+                  Submission {packet.submission} · {packet.packet_count ?? packet.packets?.length ?? 0} vout entries
+                </option>
+              ))}
+            </select>
+            <Pill tone="ok">{entries.length} vout</Pill>
+          </label>
+
+          {selectedPacket && (
+            <div className="min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/70 p-2 dark:border-zinc-800 dark:bg-zinc-950/60">
+              <p className="mb-2 break-all font-mono text-[10px] text-zinc-500">{selectedPacket.path}</p>
+              {entries.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[620px] table-fixed text-left text-[10px]">
+                    <thead className="text-[9px] uppercase tracking-wider text-zinc-500">
+                      <tr>
+                        <th className="w-12 px-2 py-1.5">Vout</th>
+                        <th className="w-24 px-2 py-1.5 text-right">Value (sat)</th>
+                        <th className="w-44 px-2 py-1.5">Txid</th>
+                        <th className="px-2 py-1.5">Script pubkey</th>
+                        <th className="w-32 px-2 py-1.5">Commitment</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                      {entries.map((entry, index) => (
+                        <tr key={`${entry.vout}-${index}`} className="align-top">
+                          <td className="whitespace-nowrap px-2 py-2 font-mono tabular-nums">{money(entry.vout)}</td>
+                          <td className="whitespace-nowrap px-2 py-2 text-right font-mono tabular-nums">{entry.value_sat == null ? "—" : Number(entry.value_sat).toLocaleString()}</td>
+                          <td className="break-all px-2 py-2 font-mono text-zinc-500">{money(entry.txid)}</td>
+                          <td className="break-all px-2 py-2 font-mono text-zinc-500">{money(entry.script_pubkey)}</td>
+                          <td className="break-all px-2 py-2 font-mono text-zinc-500">{money(entry.commitment)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-xs text-zinc-500">No decoded packet values for this submission.</p>
+              )}
             </div>
-          ))}
+          )}
         </div>
       ) : (
-        <p className="text-xs text-zinc-500">
-          The API returned no persisted submission files for this activation.
-        </p>
+        <p className="text-xs text-zinc-500">The API returned no persisted submission files for this activation.</p>
       )}
 
       {href && (
-        <a
-          className={`${BUTTON} w-full`}
-          href={href}
-          target="_blank"
-          rel="noreferrer"
-        >
+        <a className={`${BUTTON} w-full`} href={href} target="_blank" rel="noreferrer">
           Open combined WirePackets file
         </a>
       )}
     </div>
   );
 }
+
 
 function PayloadItem({ payload }) {
   const [open, setOpen] = useState(false);
