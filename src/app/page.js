@@ -1348,10 +1348,6 @@ export default function Home() {
           );
         }
 
-        const directory = await callRuntime("openSubstrate", {
-          name: selectedSubstrate,
-        });
-
         const receive = await callRuntime("receive", {
   name: selectedSubstrate,
   request: {
@@ -1362,6 +1358,16 @@ export default function Home() {
   },
 });
 
+setResult({
+  receive,
+  requested_amount: amount,
+  network: selectedNetwork,
+  ordinal,
+  flow: receiveFlow,
+  substrate: selectedSubstrate,
+});
+
+return;
         setResult({
   directory,
   receive,
