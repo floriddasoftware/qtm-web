@@ -433,57 +433,128 @@ function NumberField({ label, value, onChange, min = 0 }) {
   );
 }
 
-function ReceiveUnitIdentifiers({ amount }) {
+// Controlled ordinal selector. Amount (N) defines the coordinate range 1…N;
+// every unit is its own button and button n means ordinal coordinate n.
+// The grid is windowed (only visible rows are mounted) inside a scroll
+// container, so there is no display cutoff and every ordinal stays reachable.
+const ORDINAL_COLUMNS = 8;
+const ORDINAL_ROW_HEIGHT = 52;
+const ORDINAL_VIEWPORT_HEIGHT = 208;
+const ORDINAL_OVERSCAN = 2;
+
+function ReceiveOrdinalSelector({ amount, ordinal, onChange }) {
+  const [scrollTop, setScrollTop] = useState(0);
+
   const count = Number(amount);
+  const selected = Number(ordinal);
 
   if (!Number.isSafeInteger(count) || count <= 0) {
     return (
       <p className="text-xs text-zinc-500 dark:text-zinc-400">
-        A valid positive amount was not returned; unit identifiers cannot be
-        listed.
+        Enter a positive amount to choose an ordinal.
       </p>
     );
   }
 
-  const limit = 200;
+  const totalRows = Math.ceil(count / ORDINAL_COLUMNS);
+  const firstRow = Math.max(
+    0,
+    Math.floor(scrollTop / ORDINAL_ROW_HEIGHT) - ORDINAL_OVERSCAN
+  );
+  const lastRow = Math.min(
+    totalRows - 1,
+    Math.ceil((scrollTop + ORDINAL_VIEWPORT_HEIGHT) / ORDINAL_ROW_HEIGHT) +
+      ORDINAL_OVERSCAN
+  );
+
+  const rows = [];
+
+  for (let row = firstRow; row <= lastRow; row += 1) {
+    const cells = [];
+
+    for (let column = 0; column < ORDINAL_COLUMNS; column += 1) {
+      const id = row * ORDINAL_COLUMNS + column + 1;
+      if (id > count) break;
+
+      const isSelected = id === selected;
+
+      cells.push(
+        <button
+          key={id}
+          type="button"
+          aria-pressed={isSelected}
+          aria-label={`Ordinal ${id}`}
+          onClick={() => onChange(id)}
+          className={`flex h-[46px] flex-col items-center justify-center rounded-md border px-1 text-center transition-colors ${
+            isSelected
+              ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-950"
+              : "border-zinc-200 bg-zinc-50 hover:border-zinc-400 hover:bg-white dark:border-zinc-700 dark:bg-zinc-950 dark:hover:border-zinc-500 dark:hover:bg-zinc-900"
+          }`}
+        >
+          <span
+            className={`text-[10px] ${
+              isSelected
+                ? "text-zinc-300 dark:text-zinc-600"
+                : "text-zinc-500 dark:text-zinc-400"
+            }`}
+          >
+            Unit
+          </span>
+
+          <span className="font-mono text-sm font-semibold">{id}</span>
+        </button>
+      );
+    }
+
+    rows.push(
+      <div
+        key={row}
+        className="grid gap-1.5 pb-1.5"
+        style={{
+          height: ORDINAL_ROW_HEIGHT,
+          gridTemplateColumns: `repeat(${ORDINAL_COLUMNS}, minmax(0, 1fr))`,
+        }}
+      >
+        {cells}
+      </div>
+    );
+  }
 
   return (
     <section className="space-y-2">
       <div>
-        <h4 className="text-xs font-semibold">Receive unit ordinals</h4>
+        <h4 className="text-xs font-semibold">Receive ordinal</h4>
 
         <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-          {count} {count === 1 ? "unit" : "units"} · Ordinals 1–{count}
+          {count} {count === 1 ? "unit" : "units"} · Coordinates 1–{count} ·
+          Selected ordinal{" "}
+          <span className="font-mono font-semibold text-zinc-800 dark:text-zinc-200">
+            {Number.isSafeInteger(selected) ? selected : "none"}
+          </span>
         </p>
       </div>
 
-      <div className="grid grid-cols-5 gap-1.5 sm:grid-cols-8">
-        {Array.from(
-          { length: Math.min(count, limit) },
-          (_, index) => index + 1
-        ).map((id) => (
+      <div
+        onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+        className="overflow-y-auto rounded-md border border-zinc-200 p-1.5 dark:border-zinc-800"
+        style={{ height: ORDINAL_VIEWPORT_HEIGHT }}
+      >
+        <div
+          className="relative"
+          style={{ height: totalRows * ORDINAL_ROW_HEIGHT }}
+        >
           <div
-            key={id}
-            className="rounded-md border border-zinc-200 bg-zinc-50 px-2 py-2 text-center dark:border-zinc-700 dark:bg-zinc-950"
+            className="absolute left-0 right-0"
+            style={{ top: firstRow * ORDINAL_ROW_HEIGHT }}
           >
-            <span className="block text-[10px] text-zinc-500 dark:text-zinc-400">
-              Unit
-            </span>
-
-            <span className="mt-0.5 block font-mono text-xs">{id}</span>
+            {rows}
           </div>
-        ))}
+        </div>
       </div>
-
-      {count > limit && (
-        <p className="text-xs text-zinc-500 dark:text-zinc-400">
-          Showing the first {limit} of {count} ordinals.
-        </p>
-      )}
 
       <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-        These are display ordinals from 1 through N, not distinct persisted
-        identifiers supplied by the API.
+        The selected ordinal is submitted as the receive coordinate. Receive
+        or Change applies to it.
       </p>
     </section>
   );
@@ -537,6 +608,32 @@ function recordNameOf(record) {
   return "";
 }
 
+// Dedicated section for the coordinated QTM returned by a receive.
+// Exposes only event.heritage.qtm.
+function CoordinatedQtmSection({ qtm, ordinal, flow }) {
+  return (
+    <section className="space-y-3 rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+      <div>
+        <h3 className="text-xs font-semibold">Coordinated QTM</h3>
+
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          {ordinal !== undefined && ordinal !== null
+            ? `Heritage QTM for ordinal ${ordinal} (${flow ?? "receive"}).`
+            : "Heritage QTM returned by the receive operation."}
+        </p>
+      </div>
+
+      {hasContent(qtm) ? (
+        <KeyValueList value={qtm} />
+      ) : (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          The receive event did not include heritage QTM values.
+        </p>
+      )}
+    </section>
+  );
+}
+
 function OpenResults({ result }) {
   const directory = result?.directory;
   const receive = result?.receive;
@@ -551,6 +648,14 @@ function OpenResults({ result }) {
   const depth = objectAt(event, ["depth"]);
   const objects = Array.isArray(depth?.objects) ? depth.objects : [];
 
+  const heritage = objectAt(event, [
+    "heritage",
+    "state_heritage",
+    "stateHeritage",
+  ]);
+
+  const heritageQtm = valueAt(heritage, ["qtm"]);
+
   const amount =
     valueAt(transaction, ["amount"]) ?? result?.requested_amount;
 
@@ -561,6 +666,12 @@ function OpenResults({ result }) {
         description="Directory metadata returned for the selected substrate."
         value={directory}
         defaultOpen
+      />
+
+      <CoordinatedQtmSection
+        qtm={heritageQtm}
+        ordinal={result?.ordinal}
+        flow={result?.flow}
       />
 
       <ResultSection
@@ -590,15 +701,11 @@ function OpenResults({ result }) {
             value={{
               transaction_returned: Boolean(transaction),
               amount,
+              ordinal: result?.ordinal,
               flow: result?.flow,
               constant: valueAt(transaction, ["constant"]),
-              qtm: objectAt(transaction, ["qtm"]),
             }}
           />
-        </div>
-
-        <div className="mt-4">
-          <ReceiveUnitIdentifiers amount={amount} />
         </div>
       </section>
 
@@ -824,6 +931,7 @@ export default function Home() {
   const [activation, setActivation] = useState("1");
 
   const [receiveAmount, setReceiveAmount] = useState("1");
+  const [receiveOrdinal, setReceiveOrdinal] = useState("1");
   const [receiveFlow, setReceiveFlow] = useState("receive");
 
   const [exileRecords, setExileRecords] = useState([]);
@@ -1109,6 +1217,20 @@ export default function Home() {
     setPath(network.path || "");
   }
 
+  // Keep the selected ordinal inside the 1…N coordinate range.
+  function handleReceiveAmountChange(value) {
+    setReceiveAmount(value);
+
+    const amount = Number(value);
+    const ordinal = Number(receiveOrdinal);
+
+    if (!Number.isSafeInteger(amount) || amount < 1) {
+      setReceiveOrdinal("1");
+    } else if (ordinal > amount) {
+      setReceiveOrdinal(String(amount));
+    }
+  }
+
   async function handleSubmit(event) {
     event.preventDefault();
     setError("");
@@ -1209,19 +1331,36 @@ export default function Home() {
           throw new Error("Select a valid receive flow.");
         }
 
+        const ordinal = Number(receiveOrdinal);
+
+        if (
+          !Number.isSafeInteger(ordinal) ||
+          ordinal < 1 ||
+          ordinal > amount
+        ) {
+          throw new Error(
+            "Select a valid ordinal within the receive amount."
+          );
+        }
+
         const directory = await callRuntime("openSubstrate", {
           name: selectedSubstrate,
         });
 
         const receive = await callRuntime("receive", {
           name: selectedSubstrate,
-          request: { amount, flow: receiveFlow },
+          request: {
+            amount,
+            flow: receiveFlow,
+            ordinal,
+          },
         });
 
         setResult({
           directory,
           receive,
           requested_amount: amount,
+          ordinal,
           flow: receiveFlow,
           substrate: selectedSubstrate,
         });
@@ -1535,7 +1674,7 @@ export default function Home() {
                 "Initialize a persistent substrate using PERM indices or a BIP39 mnemonic."}
 
               {tab === "open" &&
-                "Read the selected substrate directory and perform a receive operation."}
+                "Read the selected substrate directory and perform a receive operation at a chosen ordinal."}
 
               {tab === "transit" &&
                 "Apply a network derivation request in the selected substrate's state context."}
@@ -1701,7 +1840,7 @@ export default function Home() {
                   <NumberField
                     label="Transaction amount (N)"
                     value={receiveAmount}
-                    onChange={setReceiveAmount}
+                    onChange={handleReceiveAmountChange}
                     min={1}
                   />
 
@@ -1723,11 +1862,11 @@ export default function Home() {
                   </label>
                 </div>
 
-                <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                  Unit ordinals are display values from 1 through the
-                  amount returned by the API, not canonical persisted
-                  identifiers unless the backend supplies them.
-                </p>
+                <ReceiveOrdinalSelector
+                  amount={receiveAmount}
+                  ordinal={receiveOrdinal}
+                  onChange={(n) => setReceiveOrdinal(String(n))}
+                />
               </div>
             )}
 
