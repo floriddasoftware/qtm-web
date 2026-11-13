@@ -608,135 +608,303 @@ function recordNameOf(record) {
   return "";
 }
 
-// Dedicated section for the coordinated QTM returned by a receive.
-// Exposes only event.heritage.qtm.
-function CoordinatedQtmSection({ qtm, ordinal, flow }) {
-  return (
-    <section className="space-y-3 rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-      <div>
-        <h3 className="text-xs font-semibold">Coordinated QTM</h3>
+// ---------------------------------------------------------------------------
+// Open / Receive: four presentation-only frames.
+//
+// Verified against qtm-api src/main.rs (handle_receive_wallet). The response is
+//   ReceiveResponse {
+//     frame: {
+//       quantum_transaction: { amount, qtm: { identifier, qtm }, constant,
+//                              constant_delta },
+//       event: { scale, runtime, heritage: { state, transition },
+//                qtm: { identifier, qtm }, depth },
+//     }
+//   }
+// where qtm = { commitment, coordinate, sigma, network } and
+// identifier = qtm.commitment. quantum_transaction.amount is the activation
+// (QuantumTransaction::send(name, ordinal)), not the requested amount N.
+// There is NO direction field: the flow ("receive" | "change") exists only in
+// the request, so it is read from the submitted request (result.flow).
+// qtm-api exposes no route that returns scriptPubKey, xpub, zpub, xpriv or
+// addresses: the bitblock_* helpers are feature-gated and no handler uses them.
+//
+// Every frame reads from ONE completed receive result. No frame loads a
+// directory, an event-store record, or reconstructs a QTM.
+//   Opened QTM            <- frame.quantum_transaction.qtm
+//   Network               <- selected network registry entry + QTM inputs
+//   Receive derivations   <- frame.quantum_transaction (amount, constant, ...)
+//   Immediate heritage    <- frame.event (heritage, depth, scale, runtime)
+// ---------------------------------------------------------------------------
 
-        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-          {ordinal !== undefined && ordinal !== null
-            ? `Heritage QTM for ordinal ${ordinal} (${flow ?? "receive"}).`
-            : "Heritage QTM returned by the receive operation."}
-        </p>
+// Same 6:3 (2:1) ratio for every frame; stacks and relaxes the ratio on
+// narrow screens, scrolling inside the frame when content is taller.
+function Frame({ eyebrow, title, tone = "default", actions, children }) {
+  const toneClass =
+    tone === "sensitive"
+      ? "border-amber-300 bg-amber-50/60 dark:border-amber-900 dark:bg-amber-950/30"
+      : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900";
+
+  return (
+    <section
+      className={`flex min-w-0 flex-col overflow-hidden rounded-md border sm:aspect-[2/1] ${toneClass}`}
+    >
+      <div className="flex shrink-0 items-start justify-between gap-2 border-b border-inherit px-3 py-2">
+        <div className="min-w-0">
+          {eyebrow && (
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+              {eyebrow}
+            </p>
+          )}
+
+          <h3 className="text-xs font-semibold">{title}</h3>
+        </div>
+
+        {actions && (
+          <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+            {actions}
+          </div>
+        )}
       </div>
 
-      {hasContent(qtm) ? (
-        <KeyValueList value={qtm} />
-      ) : (
-        <p className="text-xs text-zinc-500 dark:text-zinc-400">
-          The receive event did not include heritage QTM values.
-        </p>
-      )}
+      <div className="min-h-0 flex-1 overflow-auto p-3">{children}</div>
     </section>
   );
 }
 
+function FrameButton({ onClick, disabled, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded-md border border-zinc-300 bg-white px-2 py-1 text-[11px] font-medium hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+    >
+      {children}
+    </button>
+  );
+}
+
+// Display safeguard only; it is not access control.
+function Blurred({ revealed, children }) {
+  return (
+    <div
+      aria-hidden={!revealed}
+      className={
+        revealed
+          ? ""
+          : "pointer-events-none select-none blur-sm transition-[filter]"
+      }
+    >
+      {children}
+    </div>
+  );
+}
+
 function OpenResults({ result }) {
-  const directory = result?.directory;
-  const receive = result?.receive;
-  const frame = objectAt(receive, ["frame"]) ?? receive;
+  const [revealReceive, setRevealReceive] = useState(false);
+  const [revealNetwork, setRevealNetwork] = useState(false);
 
-  const transaction = objectAt(frame, [
-    "quantum_transaction",
-    "quantumTransaction",
-  ]);
+  const frame = objectAt(result?.receive, ["frame"]);
+  const transaction = objectAt(frame, ["quantum_transaction"]);
+  const event = objectAt(frame, ["event"]);
 
-  const event = eventMapOf(receive);
+  // { identifier, qtm: { commitment, coordinate, sigma, network } }
+  const openedQtm = objectAt(transaction, ["qtm"]);
+  const qtmValues = objectAt(openedQtm, ["qtm"]);
+
+  const heritage = objectAt(event, ["heritage"]);
   const depth = objectAt(event, ["depth"]);
-  const objects = Array.isArray(depth?.objects) ? depth.objects : [];
+  const runtime = objectAt(event, ["runtime"]);
 
-  const heritage = objectAt(event, [
-    "heritage",
-    "state_heritage",
-    "stateHeritage",
-  ]);
+  const activation = valueAt(transaction, ["amount"]);
+  const commitment = valueAt(qtmValues, ["commitment"]);
+  const networkOption = result?.network_option;
 
-  const heritageQtm = valueAt(heritage, ["qtm"]);
+  const identity = {
+    substrate: result?.substrate,
+    network: result?.network,
+    ordinal: result?.ordinal,
+    activation,
+    flow: result?.flow,
+    commitment,
+  };
 
-  const amount =
-    valueAt(transaction, ["amount"]) ?? result?.requested_amount;
+  // User-facing receive values: exactly the non-QTM fields of the
+  // QuantumTransactionResponse, plus the request values that produced them.
+  const receiveValues = transaction
+    ? {
+        receive_amount: result?.requested_amount,
+        activation,
+        flow: result?.flow,
+        constant: valueAt(transaction, ["constant"]),
+        constant_delta: valueAt(transaction, ["constant_delta"]),
+      }
+    : undefined;
+
+  // Inputs the bit_block derivations take: coordinate, commitment, activation
+  // and the network's registered path.
+  const derivationInputs = qtmValues
+    ? {
+        coordinate: valueAt(qtmValues, ["coordinate"]),
+        commitment,
+        activation,
+        path: valueAt(networkOption, ["path"]),
+      }
+    : undefined;
 
   return (
     <div className="space-y-3">
-      <ResultSection
-        title="Substrate directory"
-        description="Directory metadata returned for the selected substrate."
-        value={directory}
-        defaultOpen
-      />
-
-      <CoordinatedQtmSection
-        qtm={heritageQtm}
-        ordinal={result?.ordinal}
-        flow={result?.flow}
-      />
-
-      <ResultSection
-        title="Receive event depth"
-        description="Depth data returned by the receive operation."
-        value={depth}
-        defaultOpen
-      />
-
-      {objects.length > 0 && (
-        <ResultSection title="Retained objects" value={objects} />
-      )}
-
       <section className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-        <h3 className="text-xs font-semibold">
-          QuantumTransaction validation
-        </h3>
+        <h3 className="text-xs font-semibold">Receive event identity</h3>
 
         <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-          {transaction
-            ? "A QuantumTransaction was returned by the receive operation."
-            : "The response did not contain the expected QuantumTransaction."}
+          All four frames below read this one receive response.
         </p>
 
         <div className="mt-3">
-          <KeyValueList
-            value={{
-              transaction_returned: Boolean(transaction),
-              amount,
-              ordinal: result?.ordinal,
-              flow: result?.flow,
-              constant: valueAt(transaction, ["constant"]),
-            }}
-          />
+          <KeyValueList value={identity} />
         </div>
       </section>
 
-      {event && (
-        <ResultSection title="Receive event fields" value={event} />
-      )}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Frame eyebrow="Frame 1" title="Opened QTM">
+          {hasContent(openedQtm) ? (
+            <KeyValueList value={openedQtm} />
+          ) : (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              The receive response did not include
+              frame.quantum_transaction.qtm.
+            </p>
+          )}
+        </Frame>
+
+        <Frame
+          eyebrow="Frame 2 · Sensitive"
+          title="Network"
+          tone="sensitive"
+          actions={
+            <FrameButton
+              onClick={() => setRevealNetwork((current) => !current)}
+            >
+              {revealNetwork ? "Hide inputs" : "Reveal inputs"}
+            </FrameButton>
+          }
+        >
+          <div className="space-y-3">
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                Registered network
+              </p>
+
+              {hasContent(networkOption) ? (
+                <div className="mt-1">
+                  <KeyValueList value={networkOption} />
+                </div>
+              ) : (
+                <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                  The selected network was not found in the registry list.
+                </p>
+              )}
+            </div>
+
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                Derivation inputs from the opened QTM
+              </p>
+
+              {revealNetwork ? (
+                hasContent(derivationInputs) ? (
+                  <div className="mt-1">
+                    <KeyValueList value={derivationInputs} />
+                  </div>
+                ) : (
+                  <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                    No QTM was returned to derive from.
+                  </p>
+                )
+              ) : (
+                <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                  Hidden until revealed.
+                </p>
+              )}
+            </div>
+
+            <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
+              scriptPubKey, xpub, zpub, xpriv and address outputs are not
+              available yet: qtm-api has no route that returns them.
+            </p>
+          </div>
+        </Frame>
+
+        <Frame
+          eyebrow="Frame 3"
+          title="Receive derivations"
+          actions={
+            <FrameButton
+              onClick={() => setRevealReceive((current) => !current)}
+            >
+              {revealReceive ? "Clear" : "Reveal"}
+            </FrameButton>
+          }
+        >
+          {receiveValues ? (
+            <Blurred revealed={revealReceive}>
+              <KeyValueList value={receiveValues} />
+            </Blurred>
+          ) : (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              The response did not contain the expected QuantumTransaction.
+            </p>
+          )}
+        </Frame>
+
+        <Frame eyebrow="Frame 4" title="Immediate heritage">
+          <div className="space-y-3">
+            <KeyValueList
+              value={{
+                flow: result?.flow,
+                scale: valueAt(event, ["scale"]),
+                runtime_unix_seconds: valueAt(runtime, ["unix_seconds"]),
+                runtime_subsec_nanos: valueAt(runtime, ["subsec_nanos"]),
+              }}
+            />
+
+            {hasContent(heritage) ? (
+              <div className="space-y-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                  Heritage
+                </p>
+
+                <KeyValueList value={heritage} />
+              </div>
+            ) : (
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                The receive event did not include heritage.
+              </p>
+            )}
+
+            {hasContent(depth) && (
+              <div className="space-y-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                  Depth
+                </p>
+
+                <KeyValueList value={depth} />
+              </div>
+            )}
+          </div>
+        </Frame>
+      </div>
     </div>
   );
 }
 
 function EventMapSections({ event, prefix = "" }) {
   const depth = objectAt(event, ["depth"]);
-
-  const heritage = objectAt(event, [
-    "heritage",
-    "state_heritage",
-    "stateHeritage",
-  ]);
-
-  const transition = objectAt(event, [
-    "transition",
-    "transition_heritage",
-    "transitionHeritage",
-  ]);
-
-  const identifier = valueAt(depth, [
-    "identifier",
-    "depth_identifier",
-    "depthIdentifier",
-    "id",
-  ]);
+  const heritage = objectAt(event, ["heritage"]);
+  const state = objectAt(heritage, ["state"]);
+  const transition = objectAt(heritage, ["transition"]);
+  const depthPath = valueAt(depth, ["path"]);
 
   return (
     <div className="space-y-3">
@@ -744,20 +912,17 @@ function EventMapSections({ event, prefix = "" }) {
         <ResultSection
           title={`${prefix}Final depth`}
           description={
-            identifier === undefined
+            depthPath === undefined
               ? "Final depth data returned by the API."
-              : `Depth identifier: ${friendlyValue(identifier)}`
+              : `Depth path: ${friendlyValue(depthPath)}`
           }
           value={depth}
           defaultOpen
         />
       )}
 
-      {heritage && (
-        <ResultSection
-          title={`${prefix}Heritage state`}
-          value={heritage}
-        />
+      {state && (
+        <ResultSection title={`${prefix}Heritage state`} value={state} />
       )}
 
       {transition && (
@@ -1320,21 +1485,21 @@ export default function Home() {
       }
 
       if (tab === "open") {
-  const amount = Number(receiveAmount);
+        const amount = Number(receiveAmount);
 
-  if (!Number.isSafeInteger(amount) || amount <= 0) {
-    throw new Error(
-      "Receive amount must be a positive safe integer."
-    );
-  }
+        if (!Number.isSafeInteger(amount) || amount <= 0) {
+          throw new Error(
+            "Receive amount must be a positive safe integer."
+          );
+        }
 
-  if (!selectedNetwork) {
-    throw new Error("Select a coordination network before receiving.");
-  }
+        if (!selectedNetwork) {
+          throw new Error("Select a coordination network before receiving.");
+        }
 
-  if (!["receive", "change"].includes(receiveFlow)) {
-    throw new Error("Select a valid receive flow.");
-  }
+        if (!["receive", "change"].includes(receiveFlow)) {
+          throw new Error("Select a valid receive flow.");
+        }
 
         const ordinal = Number(receiveOrdinal);
 
@@ -1349,34 +1514,25 @@ export default function Home() {
         }
 
         const receive = await callRuntime("receive", {
-  name: selectedSubstrate,
-  request: {
-    amount,
-    network: selectedNetwork,
-    flow: receiveFlow,
-    ordinal,
-  },
-});
+          name: selectedSubstrate,
+          request: {
+            amount,
+            network: selectedNetwork,
+            flow: receiveFlow,
+            ordinal,
+          },
+        });
 
-setResult({
-  receive,
-  requested_amount: amount,
-  network: selectedNetwork,
-  ordinal,
-  flow: receiveFlow,
-  substrate: selectedSubstrate,
-});
-
-return;
+        // One authoritative result: every Open frame reads from `receive`.
         setResult({
-  directory,
-  receive,
-  requested_amount: amount,
-  network: selectedNetwork,
-  ordinal,
-  flow: receiveFlow,
-  substrate: selectedSubstrate,
-});
+          receive,
+          requested_amount: amount,
+          network: selectedNetwork,
+          network_option: currentNetwork,
+          ordinal,
+          flow: receiveFlow,
+          substrate: selectedSubstrate,
+        });
 
         return;
       }
@@ -1687,7 +1843,7 @@ return;
                 "Initialize a persistent substrate using PERM indices or a BIP39 mnemonic."}
 
               {tab === "open" &&
-                "Read the selected substrate directory and perform a receive operation at a chosen ordinal."}
+                "Perform a receive operation at a chosen ordinal and view the opened QTM, its network derivations, and its immediate heritage."}
 
               {tab === "transit" &&
                 "Apply a network derivation request in the selected substrate's state context."}
