@@ -155,11 +155,10 @@ const BRIDGE_ROUTES = {
   listSubstrates: () => ["GET", "/wallets"],
   listNetworks: () => ["GET", "/networks"],
   createSubstrate: () => ["POST", "/wallets"],
-  openSubstrate: ({ name }) => ["GET", `/wallets/${encodeURIComponent(name)}`],
-  receive: ({ name }) => [
-    "POST",
-    `/wallets/${encodeURIComponent(name)}/receive`,
-  ],
+  openSubstrate: ({ name, activation }) => [
+  "GET",
+  `/wallets/${encodeURIComponent(name)}/activations/${activation}/open`,
+],
   transit: ({ name }) => [
     "POST",
     `/wallets/${encodeURIComponent(name)}/transit`,
@@ -1558,7 +1557,7 @@ export default function Home() {
         return;
       }
 
-      if (tab === "open") {
+            if (tab === "open") {
         const amount = Number(receiveAmount);
 
         if (!Number.isSafeInteger(amount) || amount <= 0) {
@@ -1587,8 +1586,23 @@ export default function Home() {
           );
         }
 
-        // Step 1: Receive first. No derivation request is made before
-        // the receiver has successfully reconstructed its event.
+        // Step 1: Open the exact persisted event at the selected ordinal.
+        const opened = await callRuntime(
+          "openSubstrate",
+          {
+            name: selectedSubstrate,
+            activation: ordinal,
+          },
+          true
+        );
+
+        if (!opened || !opened.event) {
+          throw new Error(
+            `Open did not return the persisted event at ordinal ${ordinal}.`
+          );
+        }
+
+        // Step 2: Receive using the same selected ordinal.
         const receive = await callRuntime("receive", {
           name: selectedSubstrate,
           request: {
