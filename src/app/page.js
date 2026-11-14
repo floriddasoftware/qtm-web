@@ -187,9 +187,9 @@ const BRIDGE_ROUTES = {
     `/wallets/${encodeURIComponent(name)}/activations/${activation}/submissions/${submission}/derive`,
   ],
 
-  submissionValue: ({ name, activation, submission, field }) => [
+      submissionValue: ({ name, activation, submission, network, field }) => [
     "GET",
-    `/wallets/${encodeURIComponent(name)}/activations/${activation}/submissions/${submission}/${field}`,
+    `/wallets/${encodeURIComponent(name)}/activations/${activation}/submissions/${submission}/networks/${encodeURIComponent(network)}/${field}`,
   ],
 };
 // The runtime's own error text, with no transport details added.
@@ -781,6 +781,7 @@ function OpenResults({ result }) {
           name: result.substrate,
           activation: result.activation,
           submission: result.ordinal,
+          network: result.network,
           field: "xpriv",
         },
         true
@@ -802,184 +803,191 @@ function OpenResults({ result }) {
     }
   }
 
-  return (
-    <div className="space-y-3">
-      <section className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-        <h3 className="text-xs font-semibold">Receive event identity</h3>
+    return (
+  <div className="space-y-3">
+    <section className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+      <h3 className="text-xs font-semibold">Receive event identity</h3>
 
-        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-          All four frames below read this one receive response.
-        </p>
+      <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+        All four frames below read this one receive response.
+      </p>
 
-        <div className="mt-3">
-          <KeyValueList value={identity} />
-        </div>
-      </section>
-
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <Frame eyebrow="Frame 1" title="Opened QTM">
-          {hasContent(openedQtm) ? (
-            <KeyValueList value={openedQtm} />
-          ) : (
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              The receive response did not include
-              frame.quantum_transaction.qtm.
-            </p>
-          )}
-        </Frame>
-
-        <Frame
-          eyebrow="Frame 2 · Sensitive"
-          title="Network"
-          tone="sensitive"
-          actions={
-            <FrameButton
-              onClick={() => setRevealNetwork((current) => !current)}
-            >
-              {revealNetwork ? "Hide inputs" : "Reveal inputs"}
-            </FrameButton>
-          }
-        >
-          <div className="space-y-3">
-            <KeyValueList
-              value={{
-                network: result?.network,
-                activation: result?.activation,
-                submission: result?.ordinal,
-                derivation_path: result?.derivation?.derivation_path,
-              }}
-            />
-
-            {revealNetwork ? (
-              <div className="space-y-3 border-t border-amber-200 pt-3 dark:border-amber-900">
-                <ResultSection
-                  title="ScriptPubKey"
-                  value={result?.derivations?.scriptpubkey}
-                  defaultOpen
-                />
-
-                <ResultSection
-                  title="Xpub"
-                  value={result?.derivations?.xpub}
-                />
-
-                <ResultSection
-                  title="Zpub"
-                  value={result?.derivations?.zpub}
-                />
-
-                <ResultSection
-                  title="Address"
-                  value={result?.derivations?.address}
-                />
-
-                <div className="space-y-2 rounded-md border border-amber-300 p-3 dark:border-amber-800">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-xs font-semibold">
-                      Private extended key · Xpriv
-                    </p>
-
-                    <FrameButton
-                      onClick={revealPrivateKey}
-                      disabled={privateKeyLoading}
-                    >
-                      {privateKeyLoading
-                        ? "Loading…"
-                        : privateKey
-                          ? "Clear"
-                          : "Reveal Xpriv"}
-                    </FrameButton>
-                  </div>
-
-                  {privateKeyError && (
-                    <p role="alert" className="text-xs text-red-600">
-                      {privateKeyError}
-                    </p>
-                  )}
-
-                  {privateKey && (
-                    <p className="break-all rounded-md bg-amber-100 p-2 font-mono text-xs text-amber-950 dark:bg-amber-950 dark:text-amber-100">
-                      {privateKey}
-                    </p>
-                  )}
-
-                  {!privateKey && !privateKeyError && (
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                      Xpriv is not requested until you explicitly reveal it.
-                    </p>
-                  )}
-                </div>
-              </div>
-            ) : (
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                Network derivations are hidden. Reveal to inspect this
-                submission&apos;s script, extended public keys and address.
-              </p>
-            )}
-          </div>
-        </Frame>
-
-        <Frame
-          eyebrow="Frame 3"
-          title="Receive derivations"
-          actions={
-            <FrameButton
-              onClick={() => setRevealReceive((current) => !current)}
-            >
-              {revealReceive ? "Clear" : "Reveal"}
-            </FrameButton>
-          }
-        >
-          {receiveValues ? (
-            <Blurred revealed={revealReceive}>
-              <KeyValueList value={receiveValues} />
-            </Blurred>
-          ) : (
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              The response did not contain the expected QuantumTransaction.
-            </p>
-          )}
-        </Frame>
-
-        <Frame eyebrow="Frame 4" title="Immediate heritage">
-          <div className="space-y-3">
-            <KeyValueList
-              value={{
-                flow: result?.flow,
-                scale: valueAt(event, ["scale"]),
-                runtime_unix_seconds: valueAt(runtime, ["unix_seconds"]),
-                runtime_subsec_nanos: valueAt(runtime, ["subsec_nanos"]),
-              }}
-            />
-
-            {hasContent(heritage) ? (
-              <div className="space-y-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                  Heritage
-                </p>
-
-                <KeyValueList value={heritage} />
-              </div>
-            ) : (
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                The receive event did not include heritage.
-              </p>
-            )}
-
-            {hasContent(depth) && (
-              <div className="space-y-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                  Depth
-                </p>
-
-                <KeyValueList value={depth} />
-              </div>
-            )}
-          </div>
-        </Frame>
+      <div className="mt-3">
+        <KeyValueList value={identity} />
       </div>
+    </section>
+
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <Frame eyebrow="Frame 1" title="Opened QTM">
+        {hasContent(openedQtm) ? (
+          <KeyValueList value={openedQtm} />
+        ) : (
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+            The receive response did not include
+            frame.quantum_transaction.qtm.
+          </p>
+        )}
+      </Frame>
+
+      <Frame
+        eyebrow="Frame 2 · Sensitive"
+        title="Network"
+        tone="sensitive"
+        actions={
+          <FrameButton
+            onClick={() => setRevealNetwork((current) => !current)}
+          >
+            {revealNetwork ? "Hide inputs" : "Reveal inputs"}
+          </FrameButton>
+        }
+      >
+        <div className="space-y-3">
+          <KeyValueList
+            value={{
+              network: result?.network,
+              activation: result?.activation,
+              submission: result?.ordinal,
+              derivation_path: result?.derivation?.derivation_path,
+              master_fingerprint: result?.derivations?.fingerprint,
+            }}
+          />
+
+          {revealNetwork ? (
+            <div className="space-y-3 border-t border-amber-200 pt-3 dark:border-amber-900">
+              <ResultSection
+                title="ScriptPubKey"
+                value={result?.derivations?.scriptpubkey}
+                defaultOpen
+              />
+
+              <ResultSection
+                title="Master fingerprint"
+                value={result?.derivations?.fingerprint}
+              />
+
+              <ResultSection
+                title="Xpub"
+                value={result?.derivations?.xpub}
+              />
+
+              <ResultSection
+                title="Zpub"
+                value={result?.derivations?.zpub}
+              />
+
+              <ResultSection
+                title="Address"
+                value={result?.derivations?.address}
+              />
+
+              <div className="space-y-2 rounded-md border border-amber-300 p-3 dark:border-amber-800">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-semibold">
+                    Private extended key · Xpriv
+                  </p>
+
+                  <FrameButton
+                    onClick={revealPrivateKey}
+                    disabled={privateKeyLoading}
+                  >
+                    {privateKeyLoading
+                      ? "Loading…"
+                      : privateKey
+                        ? "Clear"
+                        : "Reveal Xpriv"}
+                  </FrameButton>
+                </div>
+
+                {privateKeyError && (
+                  <p role="alert" className="text-xs text-red-600">
+                    {privateKeyError}
+                  </p>
+                )}
+
+                {privateKey && (
+                  <p className="break-all rounded-md bg-amber-100 p-2 font-mono text-xs text-amber-950 dark:bg-amber-950 dark:text-amber-100">
+                    {privateKey}
+                  </p>
+                )}
+
+                {!privateKey && !privateKeyError && (
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    Xpriv is not requested until you explicitly reveal it.
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Network derivations are hidden. Reveal to inspect this
+              submission&apos;s script, fingerprint, extended public keys and
+              address.
+            </p>
+          )}
+        </div>
+      </Frame>
+
+      <Frame
+        eyebrow="Frame 3"
+        title="Receive derivations"
+        actions={
+          <FrameButton
+            onClick={() => setRevealReceive((current) => !current)}
+          >
+            {revealReceive ? "Clear" : "Reveal"}
+          </FrameButton>
+        }
+      >
+        {receiveValues ? (
+          <Blurred revealed={revealReceive}>
+            <KeyValueList value={receiveValues} />
+          </Blurred>
+        ) : (
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+            The response did not contain the expected QuantumTransaction.
+          </p>
+        )}
+      </Frame>
+
+      <Frame eyebrow="Frame 4" title="Immediate heritage">
+        <div className="space-y-3">
+          <KeyValueList
+            value={{
+              flow: result?.flow,
+              scale: valueAt(event, ["scale"]),
+              runtime_unix_seconds: valueAt(runtime, ["unix_seconds"]),
+              runtime_subsec_nanos: valueAt(runtime, ["subsec_nanos"]),
+            }}
+          />
+
+          {hasContent(heritage) ? (
+            <div className="space-y-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                Heritage
+              </p>
+
+              <KeyValueList value={heritage} />
+            </div>
+          ) : (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              The receive event did not include heritage.
+            </p>
+          )}
+
+          {hasContent(depth) && (
+            <div className="space-y-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                Depth
+              </p>
+
+              <KeyValueList value={depth} />
+            </div>
+          )}
+        </div>
+      </Frame>
     </div>
-  );
+  </div>
+);
 }
 
 function EventMapSections({ event, prefix = "" }) {
@@ -1670,19 +1678,27 @@ export default function Home() {
 
         // Step 3: Retrieve public derivation values for the same
         // substrate / activation / submission.
-        const readValue = (field) =>
+          const readValue = (field) =>
           callRuntime(
             "submissionValue",
             {
               name: selectedSubstrate,
               activation: receivedActivation,
               submission: ordinal,
+              network: selectedNetwork,
               field,
             },
             true
           );
 
-        const [scriptpubkey, xpub, zpub, address] = await Promise.all([
+                 const [
+          fingerprint,
+          scriptpubkey,
+          xpub,
+          zpub,
+          address,
+        ] = await Promise.all([
+          readValue("fingerprint"),
           readValue("scriptpubkey"),
           readValue("xpub"),
           readValue("zpub"),
@@ -1696,6 +1712,7 @@ export default function Home() {
           receive,
           derivation,
           derivations: {
+            fingerprint,
             scriptpubkey,
             xpub,
             zpub,
