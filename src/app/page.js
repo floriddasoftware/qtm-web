@@ -48,17 +48,6 @@ const valueAt = (source, keys) => {
   return undefined;
 };
 
-// Plain-text routes (submission values) come back from callRuntime wrapped as
-// { response_text }. Unwrap them to a plain string.
-const textOf = (value) =>
-  typeof value === "string"
-    ? value
-    : typeof value?.response_text === "string"
-      ? value.response_text
-      : value === null || value === undefined
-        ? ""
-        : JSON.stringify(value);
-
 const formatKey = (key) =>
   String(key)
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
@@ -206,8 +195,6 @@ function directMessage(cause) {
   return "The QP runtime reported an error.";
 }
 
-// bridgeOnly forces the HTTP API even inside a native shell. The submission
-// derivation operations are qtm-api routes with no native IPC command.
 async function callRuntime(operation, args = {}, bridgeOnly = false) {
   const invoke = bridgeOnly ? null : nativeInvoke();
 
@@ -648,18 +635,13 @@ function recordNameOf(record) {
 // (QuantumTransaction::send(name, ordinal)), not the requested amount N.
 // There is NO direction field: the flow ("receive" | "change") exists only in
 // the request, so it is read from the submitted request (result.flow).
+// qtm-api exposes no route that returns scriptPubKey, xpub, zpub, xpriv or
+// addresses: the bitblock_* helpers are feature-gated and no handler uses them.
 //
-// Network derivations come from the qtm-api submission routes, and only after
-// a successful receive:
-//   POST /wallets/:name/activations/:activation/submissions/:submission/derive
-//   GET  /wallets/:name/activations/:activation/submissions/:submission/:field
-// The submission is the selected ordinal; the activation is the received
-// event's heritage activation. xpriv is fetched only on explicit reveal.
-//
-// Every frame reads from ONE completed receive result.
+// Every frame reads from ONE completed receive result. No frame loads a
+// directory, an event-store record, or reconstructs a QTM.
 //   Opened QTM            <- frame.quantum_transaction.qtm
-//   Network               <- submission derivation routes (same activation /
-//                            ordinal as the receive)
+//   Network               <- selected network registry entry + QTM inputs
 //   Receive derivations   <- frame.quantum_transaction (amount, constant, ...)
 //   Immediate heritage    <- frame.event (heritage, depth, scale, runtime)
 // ---------------------------------------------------------------------------
@@ -747,11 +729,10 @@ function OpenResults({ result }) {
   const depth = objectAt(event, ["depth"]);
   const runtime = objectAt(event, ["runtime"]);
 
-  const activation = valueAt(transaction, ["amount"]);
+  const activation = result?.activation ?? valueAt(transaction, ["amount"]);
   const commitment = valueAt(qtmValues, ["commitment"]);
+  const networkOption = result?.network_option;
 
-  // Activation and submission shared by every frame: the received event's
-  // heritage activation and the selected ordinal.
   const identity = {
     substrate: result?.substrate,
     network: result?.network,
@@ -773,7 +754,6 @@ function OpenResults({ result }) {
       }
     : undefined;
 
-  // xpriv is a separate request, made only on explicit reveal.
   async function revealPrivateKey() {
     if (privateKey) {
       setPrivateKey("");
@@ -795,7 +775,11 @@ function OpenResults({ result }) {
         true
       );
 
-      setPrivateKey(textOf(value));
+      setPrivateKey(
+        typeof value === "string"
+          ? value
+          : value?.response_text ?? JSON.stringify(value)
+      );
     } catch (error) {
       setPrivateKeyError(
         error instanceof Error
@@ -918,7 +902,7 @@ function OpenResults({ result }) {
             ) : (
               <p className="text-xs text-zinc-500 dark:text-zinc-400">
                 Network derivations are hidden. Reveal to inspect this
-                submission's script, extended public keys and address.
+                submission&apos;s script, extended public keys and address.
               </p>
             )}
           </div>
@@ -1451,29 +1435,27 @@ export default function Home() {
   }
 
   function handleNetworkChange(id) {
-    const network = networks.find((item) => item.id === id);
+  const network = networks.find((item) => item.id === id);
 
-    setSelectedNetwork(id);
-    setReceiveOrdinal("1");
-    setResult(null);
-    setError("");
+  setSelectedNetwork(id);
+  setReceiveOrdinal("1");
+  setResult(null);
+  setError("");
 
-    if (!network) return;
+  if (!network) return;
 
-    if (Number.isFinite(network.purpose)) {
-      setPurpose(String(network.purpose));
-    }
-
-    if (Number.isFinite(network.coin)) {
-      setCoin(String(network.coin));
-    }
-
-    setPath(network.path || "");
+  if (Number.isFinite(network.purpose)) {
+    setPurpose(String(network.purpose));
   }
 
-  // Keep the selected ordinal inside the 1…N coordinate range. Changing the
-  // amount also clears any previous result so derivations from an earlier
-  // submission can never remain visible.
+  if (Number.isFinite(network.coin)) {
+    setCoin(String(network.coin));
+  }
+
+  setPath(network.path || "");
+}
+
+  // Keep the selected ordinal inside the 1…N coordinate range.
   function handleReceiveAmountChange(value) {
     setReceiveAmount(value);
     setResult(null);
@@ -1619,11 +1601,11 @@ export default function Home() {
 
         const frame = objectAt(receive, ["frame"]);
         const transaction = objectAt(frame, ["quantum_transaction"]);
-        const receivedEvent = objectAt(frame, ["event"]);
-        const heritage = objectAt(receivedEvent, ["heritage"]);
+        const event = objectAt(frame, ["event"]);
+        const heritage = objectAt(event, ["heritage"]);
         const state = objectAt(heritage, ["state"]);
 
-        if (!transaction || !receivedEvent || !heritage) {
+        if (!transaction || !event || !heritage) {
           throw new Error(
             "Receive succeeded but did not return the expected transaction and event heritage."
           );
@@ -1662,18 +1644,16 @@ export default function Home() {
 
         // Step 3: Retrieve public derivation values for the same
         // substrate / activation / submission.
-        const readValue = async (field) =>
-          textOf(
-            await callRuntime(
-              "submissionValue",
-              {
-                name: selectedSubstrate,
-                activation: receivedActivation,
-                submission: ordinal,
-                field,
-              },
-              true
-            )
+        const readValue = (field) =>
+          callRuntime(
+            "submissionValue",
+            {
+              name: selectedSubstrate,
+              activation: receivedActivation,
+              submission: ordinal,
+              field,
+            },
+            true
           );
 
         const [scriptpubkey, xpub, zpub, address] = await Promise.all([
@@ -2152,7 +2132,7 @@ export default function Home() {
               </>
             )}
 
-            {tab === "open" && (
+                        {tab === "open" && (
               <div className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
                 <div>
                   <h3 className="text-xs font-semibold">
