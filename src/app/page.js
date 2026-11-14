@@ -151,19 +151,32 @@ const NATIVE_COMMANDS = {
 };
 
 // Bridge adapter routes (browser only). Same operations, same payloads.
+// Bridge adapter routes (browser only). Same operations, same payloads.
 const BRIDGE_ROUTES = {
   listSubstrates: () => ["GET", "/wallets"],
   listNetworks: () => ["GET", "/networks"],
   createSubstrate: () => ["POST", "/wallets"],
+
   openSubstrate: ({ name, activation }) => [
-  "GET",
-  `/wallets/${encodeURIComponent(name)}/activations/${activation}/open`,
-],
+    "GET",
+    `/wallets/${encodeURIComponent(name)}/activations/${activation}/open`,
+  ],
+
+  receive: ({ name }) => [
+    "POST",
+    `/wallets/${encodeURIComponent(name)}/receive`,
+  ],
+
   transit: ({ name }) => [
     "POST",
     `/wallets/${encodeURIComponent(name)}/transit`,
   ],
-  exile: ({ name }) => ["POST", `/wallets/${encodeURIComponent(name)}/exile`],
+
+  exile: ({ name }) => [
+    "POST",
+    `/wallets/${encodeURIComponent(name)}/exile`,
+  ],
+
   listEvents: ({ name }) => [
     "GET",
     `/wallets/${encodeURIComponent(name)}/events`,
@@ -179,7 +192,6 @@ const BRIDGE_ROUTES = {
     `/wallets/${encodeURIComponent(name)}/activations/${activation}/submissions/${submission}/${field}`,
   ],
 };
-
 // The runtime's own error text, with no transport details added.
 function directMessage(cause) {
   if (typeof cause === "string" && cause.trim()) return cause;
