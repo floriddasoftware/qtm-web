@@ -150,8 +150,8 @@ const NATIVE_COMMANDS = {
   listEvents: "qtm_events",
 };
 
-// Bridge adapter routes (browser only). Same operations, same payloads.
-// Bridge adapter routes (browser only). Same operations, same payloads.
+
+// Browser HTTP bridge. Native calls continue to use the local runtime.
 const BRIDGE_ROUTES = {
   listSubstrates: () => ["GET", "/wallets"],
   listNetworks: () => ["GET", "/networks"],
@@ -159,7 +159,7 @@ const BRIDGE_ROUTES = {
 
   openSubstrate: ({ name, activation }) => [
     "GET",
-    `/wallets/${encodeURIComponent(name)}/activations/${activation}/open`,
+    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/open`,
   ],
 
   receive: ({ name }) => [
@@ -184,104 +184,214 @@ const BRIDGE_ROUTES = {
 
   deriveSubmission: ({ name, activation, submission }) => [
     "POST",
-    `/wallets/${encodeURIComponent(name)}/activations/${activation}/submissions/${submission}/derive`,
+    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/submissions/${encodeURIComponent(submission)}/derive`,
   ],
 
-      submissionValue: ({ name, activation, submission, network, field }) => [
+  submissionValue: ({ name, activation, submission, network, field }) => [
     "GET",
-    `/wallets/${encodeURIComponent(name)}/activations/${activation}/submissions/${submission}/networks/${encodeURIComponent(network)}/${field}`,
+    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/submissions/${encodeURIComponent(submission)}/networks/${encodeURIComponent(network)}/${encodeURIComponent(field)}`,
   ],
 };
-// The runtime's own error text, with no transport details added.
+
+const BRIDGE_TIMEOUT_MS = 45000;
+
 function directMessage(cause) {
-  if (typeof cause === "string" && cause.trim()) return cause;
+  if (typeof cause === "string" && cause.trim()) return cause.trim();
 
   if (cause instanceof Error && cause.message) return cause.message;
 
   if (isRecord(cause)) {
     const message = valueAt(cause, ["error", "message", "detail"]);
-    if (typeof message === "string" && message.trim()) return message;
+
+    if (typeof message === "string" && message.trim()) {
+      return message.trim();
+    }
+
+    if (message !== undefined) return String(message);
   }
 
   return "The QP runtime reported an error.";
 }
 
+function bridgeError(message, details = {}) {
+  return new RuntimeError(message, details);
+}
+
+function bridgeBase() {
+  const base = String(BRIDGE_BASE || "").trim().replace(/\/+$/, "");
+
+  if (!base) {
+    throw bridgeError(
+      "The QP runtime is not available in this browser. Set NEXT_PUBLIC_QTM_API_BASE to the running qtm-api URL and redeploy qtm-web.",
+      { status: 0 }
+    );
+  }
+
+  if (!/^https?:\/\//i.test(base)) {
+    throw bridgeError(
+      `Invalid QTM API address: ${base}. NEXT_PUBLIC_QTM_API_BASE must be an HTTP or HTTPS URL.`,
+      { status: 0, url: base }
+    );
+  }
+
+  return base;
+}
+
+function responseData(bodyText) {
+  if (!bodyText) return {};
+
+  try {
+    return JSON.parse(bodyText);
+  } catch {
+    return { response_text: bodyText };
+  }
+}
+
 async function callRuntime(operation, args = {}, bridgeOnly = false) {
   const invoke = bridgeOnly ? null : nativeInvoke();
 
+  // Never retry a failed native mutation through HTTP.
   if (invoke) {
     try {
       return await invoke(NATIVE_COMMANDS[operation], args);
     } catch (cause) {
-      throw new RuntimeError(directMessage(cause));
+      throw bridgeError(directMessage(cause));
     }
   }
 
-  if (!BRIDGE_BASE) {
-    throw new RuntimeError(
-      "The local QP runtime is not available in this browser. Open the console in the native QP app, or set NEXT_PUBLIC_QTM_API_BASE to a running qtm-api."
+  const route = BRIDGE_ROUTES[operation];
+
+  if (typeof route !== "function") {
+    throw bridgeError(
+      `Unsupported QP runtime operation: ${String(operation)}.`,
+      { status: 0 }
     );
   }
 
-  const [method, path] = BRIDGE_ROUTES[operation](args);
-  const url = `${BRIDGE_BASE}${path}`;
+  let method;
+  let path;
+
+  try {
+    [method, path] = route(args || {});
+  } catch (cause) {
+    throw bridgeError(
+      `Invalid arguments for QP runtime operation "${operation}": ${directMessage(cause)}`,
+      { status: 0 }
+    );
+  }
+
+  if (
+    !["GET", "POST"].includes(method) ||
+    typeof path !== "string" ||
+    !path.startsWith("/") ||
+    path.startsWith("//")
+  ) {
+    throw bridgeError(
+      `Invalid HTTP bridge route for operation "${operation}".`,
+      { status: 0 }
+    );
+  }
+
+  const base = bridgeBase();
+  const url = `${base}${path}`;
+
+  let body;
+
+  if (method === "POST" && args?.request !== undefined) {
+    try {
+      body = JSON.stringify(args.request);
+
+      if (body === undefined) {
+        throw new Error("Request payload could not be serialized.");
+      }
+    } catch (cause) {
+      throw bridgeError(
+        `Could not serialize the request for "${operation}": ${directMessage(cause)}`,
+        { status: 0, url }
+      );
+    }
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    BRIDGE_TIMEOUT_MS
+  );
 
   let response;
 
   try {
     response = await fetch(url, {
       method,
-      headers:
-        method === "POST" ? { "Content-Type": "application/json" } : undefined,
-      body:
-        method === "POST" && args.request !== undefined
-          ? JSON.stringify(args.request)
-          : undefined,
+      headers: {
+        Accept: "application/json",
+        ...(body !== undefined
+          ? { "Content-Type": "application/json" }
+          : {}),
+      },
+      ...(body !== undefined ? { body } : {}),
       cache: "no-store",
+      credentials: "omit",
+      redirect: "follow",
+      signal: controller.signal,
     });
   } catch (cause) {
-    const reason =
-      cause instanceof Error && cause.message ? cause.message : "network error";
+    const timedOut =
+      cause?.name === "AbortError" || controller.signal.aborted;
 
-    throw new RuntimeError(
-      `Could not reach the QTM runtime at ${BRIDGE_BASE} (${reason}). Make sure qtm-api is running at that address, and that this page is allowed to call it (CORS / mixed content). Hosted instances can take about a minute to wake from sleep.`,
-      { status: 0, url }
+    const reason = timedOut
+      ? `request timed out after ${BRIDGE_TIMEOUT_MS / 1000} seconds`
+      : cause instanceof Error && cause.message
+        ? cause.message
+        : "network request failed";
+
+    throw bridgeError(
+      timedOut
+        ? `The QTM API at ${base} did not respond in time. Check that the service is running and reachable.`
+        : `Could not reach the QTM runtime at ${base} (${reason}). Check the API URL, Render service health, browser CORS permissions, and HTTPS configuration.`,
+      { status: 0, url, cause }
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  let bodyText;
+
+  try {
+    bodyText = await response.text();
+  } catch (cause) {
+    throw bridgeError(
+      `The QTM API connection closed before its response could be read (${directMessage(cause)}).`,
+      {
+        status: response.status,
+        statusText: response.statusText,
+        url: response.url || url,
+      }
     );
   }
 
-  const bodyText = await response.text();
-  let data = {};
-  let parsed = false;
-
-  if (bodyText) {
-    try {
-      data = JSON.parse(bodyText);
-      parsed = true;
-    } catch {
-      data = { response_text: bodyText };
-    }
-  }
+  const data = responseData(bodyText);
 
   if (!response.ok) {
     const apiMessage = valueAt(data, ["error", "message", "detail"]);
 
     const reason =
-      typeof apiMessage === "string"
-        ? apiMessage
+      typeof apiMessage === "string" && apiMessage.trim()
+        ? apiMessage.trim()
         : apiMessage !== undefined
           ? JSON.stringify(apiMessage)
-          : bodyText && !parsed
-            ? bodyText.slice(0, 300)
-            : "no error body returned";
+          : bodyText
+            ? bodyText.slice(0, 500)
+            : "The API returned no error details.";
 
-    throw new RuntimeError(
+    throw bridgeError(
       `${reason} [HTTP ${response.status}${
         response.statusText ? ` ${response.statusText}` : ""
       }${response.url ? ` · ${response.url}` : ""}]`,
       {
         status: response.status,
         statusText: response.statusText,
-        url: response.url,
+        url: response.url || url,
         body: data,
       }
     );
@@ -289,6 +399,7 @@ async function callRuntime(operation, args = {}, bridgeOnly = false) {
 
   return data;
 }
+
 
 function eventMapOf(source) {
   const direct = objectAt(source, ["event", "event_map", "eventMap"]);
