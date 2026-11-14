@@ -12,6 +12,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 // Substrate storage is owned by the server-side QP runtime.
 // substrate_root() is resolved by Rust, never by the browser.
 
+const TABS = [
+  { id: "create", label: "Create" },
+  { id: "open", label: "Open" },
+  { id: "transit", label: "Transit" },
+  { id: "exile", label: "Exile" },
+];
+
+const API_BASE = (
+  process.env.NEXT_PUBLIC_QTM_API_BASE ||
+  "https://qtm-api.onrender.com"
+).replace(/\/+$/, "");
+
 const API_BASE = (
   process.env.NEXT_PUBLIC_QTM_API_BASE ||
   "https://qtm-api.onrender.com"
