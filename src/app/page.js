@@ -11,133 +11,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 // itself.
 // Substrate storage is owned by the server-side QP runtime.
 // substrate_root() is resolved by Rust, never by the browser.
-const BRIDGE_BASE = (
+
+const API_BASE = (
   process.env.NEXT_PUBLIC_QTM_API_BASE ||
   "https://qtm-api.onrender.com"
 ).replace(/\/+$/, "");
-
-const TABS = [
-  { id: "create", label: "Create" },
-  { id: "open", label: "Open / Receive" },
-  { id: "transit", label: "Transit" },
-  { id: "exile", label: "Exile" },
-];
-
-const isRecord = (value) =>
-  value !== null && typeof value === "object" && !Array.isArray(value);
-
-const objectAt = (source, keys) => {
-  if (!isRecord(source)) return undefined;
-
-  for (const key of keys) {
-    if (isRecord(source[key])) return source[key];
-  }
-
-  return undefined;
-};
-
-const valueAt = (source, keys) => {
-  if (!isRecord(source)) return undefined;
-
-  for (const key of keys) {
-    if (source[key] !== null && source[key] !== undefined) {
-      return source[key];
-    }
-  }
-
-  return undefined;
-};
-
-const formatKey = (key) =>
-  String(key)
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/[_-]+/g, " ")
-    .replace(/\b\w/g, (character) => character.toUpperCase());
-
-function friendlyValue(value) {
-  if (value === null || value === undefined || value === "") {
-    return "Not provided";
-  }
-
-  if (typeof value === "boolean") {
-    return value ? "Yes" : "No";
-  }
-
-  if (["string", "number", "bigint"].includes(typeof value)) {
-    return String(value);
-  }
-
-  if (Array.isArray(value)) {
-    return value.length ? `${value.length} items` : "None";
-  }
-
-  return "Details available";
-}
-
-function flatten(value, prefix = "", rows = []) {
-  if (value === null || value === undefined) {
-    if (prefix) rows.push([prefix, "Not provided"]);
-  } else if (Array.isArray(value)) {
-    if (!value.length && prefix) {
-      rows.push([prefix, "None"]);
-    }
-
-    value.forEach((item, index) => {
-      flatten(item, `${prefix || "Item"} ${index + 1}`, rows);
-    });
-  } else if (isRecord(value)) {
-    const entries = Object.entries(value);
-
-    if (!entries.length && prefix) {
-      rows.push([prefix, "No details returned"]);
-    }
-
-    entries.forEach(([key, child]) => {
-      flatten(
-        child,
-        prefix ? `${prefix} · ${formatKey(key)}` : formatKey(key),
-        rows
-      );
-    });
-  } else {
-    rows.push([prefix || "Value", friendlyValue(value)]);
-  }
-
-  return rows;
-}
-
-function hasContent(value) {
-  return (
-    value !== null &&
-    value !== undefined &&
-    (typeof value !== "object" ||
-      (Array.isArray(value)
-        ? value.length > 0
-        : Object.keys(value).length > 0))
-  );
-}
-
-class RuntimeError extends Error {
-  constructor(message, details = {}) {
-    super(message);
-    this.name = "RuntimeError";
-    this.status = details.status ?? 0;
-    this.statusText = details.statusText ?? "";
-    this.url = details.url ?? "";
-    this.body = details.body;
-  }
-}
-
-// Native IPC entry point, present only inside a native shell.
-function nativeInvoke() {
-  if (typeof window === "undefined") return null;
-
-  return (
-    window.__TAURI__?.core?.invoke ??
-    window.__TAURI_INTERNALS__?.invoke ??
-    null
-  );
-}
 
 const NATIVE_COMMANDS = {
   listSubstrates: "qtm_list_substrates",
@@ -150,9 +28,7 @@ const NATIVE_COMMANDS = {
   listEvents: "qtm_events",
 };
 
-
-// Browser HTTP bridge. Native calls continue to use the local runtime.
-const BRIDGE_ROUTES = {
+const API_ROUTES = {
   listSubstrates: () => ["GET", "/wallets"],
   listNetworks: () => ["GET", "/networks"],
   createSubstrate: () => ["POST", "/wallets"],
@@ -193,175 +69,75 @@ const BRIDGE_ROUTES = {
   ],
 };
 
-const BRIDGE_TIMEOUT_MS = 45000;
-
 function directMessage(cause) {
   if (typeof cause === "string" && cause.trim()) return cause.trim();
-
   if (cause instanceof Error && cause.message) return cause.message;
 
   if (isRecord(cause)) {
     const message = valueAt(cause, ["error", "message", "detail"]);
-
-    if (typeof message === "string" && message.trim()) {
-      return message.trim();
-    }
-
+    if (typeof message === "string" && message.trim()) return message.trim();
     if (message !== undefined) return String(message);
   }
 
   return "The QP runtime reported an error.";
 }
 
-function bridgeError(message, details = {}) {
-  return new RuntimeError(message, details);
-}
-
-function bridgeBase() {
-  const base = String(BRIDGE_BASE || "").trim().replace(/\/+$/, "");
-
-  if (!base) {
-    throw bridgeError(
-      "The QP runtime is not available in this browser. Set NEXT_PUBLIC_QTM_API_BASE to the running qtm-api URL and redeploy qtm-web.",
-      { status: 0 }
-    );
-  }
-
-  if (!/^https?:\/\//i.test(base)) {
-    throw bridgeError(
-      `Invalid QTM API address: ${base}. NEXT_PUBLIC_QTM_API_BASE must be an HTTP or HTTPS URL.`,
-      { status: 0, url: base }
-    );
-  }
-
-  return base;
-}
-
-function responseData(bodyText) {
-  if (!bodyText) return {};
+function parseApiResponse(raw) {
+  if (!raw) return {};
 
   try {
-    return JSON.parse(bodyText);
+    return JSON.parse(raw);
   } catch {
-    return { response_text: bodyText };
+    return { response_text: raw };
   }
 }
 
-async function callRuntime(operation, args = {}, bridgeOnly = false) {
-  const invoke = bridgeOnly ? null : nativeInvoke();
-
-  // Never retry a failed native mutation through HTTP.
-  if (invoke) {
-    try {
-      return await invoke(NATIVE_COMMANDS[operation], args);
-    } catch (cause) {
-      throw bridgeError(directMessage(cause));
-    }
-  }
-
-  const route = BRIDGE_ROUTES[operation];
-
-  if (typeof route !== "function") {
-    throw bridgeError(
-      `Unsupported QP runtime operation: ${String(operation)}.`,
-      { status: 0 }
-    );
-  }
-
-  let method;
-  let path;
-
-  try {
-    [method, path] = route(args || {});
-  } catch (cause) {
-    throw bridgeError(
-      `Invalid arguments for QP runtime operation "${operation}": ${directMessage(cause)}`,
-      { status: 0 }
-    );
-  }
-
-  if (
-    !["GET", "POST"].includes(method) ||
-    typeof path !== "string" ||
-    !path.startsWith("/") ||
-    path.startsWith("//")
-  ) {
-    throw bridgeError(
-      `Invalid HTTP bridge route for operation "${operation}".`,
-      { status: 0 }
-    );
-  }
-
-  const base = bridgeBase();
-  const url = `${base}${path}`;
-
-  let body;
-
-  if (method === "POST" && args?.request !== undefined) {
-    try {
-      body = JSON.stringify(args.request);
-
-      if (body === undefined) {
-        throw new Error("Request payload could not be serialized.");
-      }
-    } catch (cause) {
-      throw bridgeError(
-        `Could not serialize the request for "${operation}": ${directMessage(cause)}`,
-        { status: 0, url }
-      );
-    }
-  }
-
+async function apiRequest(path, options = {}) {
+  const url = `${API_BASE}${path}`;
   const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(),
-    BRIDGE_TIMEOUT_MS
-  );
+  const timeout = setTimeout(() => controller.abort(), 45000);
 
   let response;
 
   try {
     response = await fetch(url, {
-      method,
+      method: options.method || "GET",
       headers: {
         Accept: "application/json",
-        ...(body !== undefined
+        ...(options.body !== undefined
           ? { "Content-Type": "application/json" }
           : {}),
+        ...options.headers,
       },
-      ...(body !== undefined ? { body } : {}),
+      ...(options.body !== undefined
+        ? { body: JSON.stringify(options.body) }
+        : {}),
       cache: "no-store",
-      credentials: "omit",
-      redirect: "follow",
-      signal: controller.signal,
+      signal: options.signal || controller.signal,
     });
   } catch (cause) {
     const timedOut =
       cause?.name === "AbortError" || controller.signal.aborted;
 
-    const reason = timedOut
-      ? `request timed out after ${BRIDGE_TIMEOUT_MS / 1000} seconds`
-      : cause instanceof Error && cause.message
-        ? cause.message
-        : "network request failed";
-
-    throw bridgeError(
+    throw new RuntimeError(
       timedOut
-        ? `The QTM API at ${base} did not respond in time. Check that the service is running and reachable.`
-        : `Could not reach the QTM runtime at ${base} (${reason}). Check the API URL, Render service health, browser CORS permissions, and HTTPS configuration.`,
-      { status: 0, url, cause }
+        ? `The QTM API did not respond within 45 seconds: ${url}`
+        : `Could not reach the QTM API at ${API_BASE}: ${
+            cause instanceof Error ? cause.message : "network error"
+          }`,
+      { status: 0, url }
     );
   } finally {
     clearTimeout(timeout);
   }
 
-  let bodyText;
+  let raw;
 
   try {
-    bodyText = await response.text();
+    raw = await response.text();
   } catch (cause) {
-    throw bridgeError(
-      `The QTM API connection closed before its response could be read (${directMessage(cause)}).`,
+    throw new RuntimeError(
+      `The QTM API connection closed before the response was read: ${directMessage(cause)}`,
       {
         status: response.status,
         statusText: response.statusText,
@@ -370,24 +146,24 @@ async function callRuntime(operation, args = {}, bridgeOnly = false) {
     );
   }
 
-  const data = responseData(bodyText);
+  const data = parseApiResponse(raw);
 
   if (!response.ok) {
-    const apiMessage = valueAt(data, ["error", "message", "detail"]);
+    const message = valueAt(data, ["error", "message", "detail"]);
 
     const reason =
-      typeof apiMessage === "string" && apiMessage.trim()
-        ? apiMessage.trim()
-        : apiMessage !== undefined
-          ? JSON.stringify(apiMessage)
-          : bodyText
-            ? bodyText.slice(0, 500)
+      typeof message === "string" && message.trim()
+        ? message.trim()
+        : message !== undefined
+          ? JSON.stringify(message)
+          : raw
+            ? raw.slice(0, 500)
             : "The API returned no error details.";
 
-    throw bridgeError(
+    throw new RuntimeError(
       `${reason} [HTTP ${response.status}${
         response.statusText ? ` ${response.statusText}` : ""
-      }${response.url ? ` · ${response.url}` : ""}]`,
+      }]`,
       {
         status: response.status,
         statusText: response.statusText,
@@ -399,6 +175,56 @@ async function callRuntime(operation, args = {}, bridgeOnly = false) {
 
   return data;
 }
+
+async function callRuntime(operation, args = {}) {
+  const payload = args || {};
+  const invoke = nativeInvoke();
+  const nativeCommand = NATIVE_COMMANDS[operation];
+
+  // Native runtime: invoke directly. Never retry a failed mutation over HTTP.
+  if (invoke && nativeCommand) {
+    try {
+      return await invoke(nativeCommand, payload);
+    } catch (cause) {
+      throw new RuntimeError(directMessage(cause));
+    }
+  }
+
+  // Browser runtime: call qtm-api directly.
+  const route = API_ROUTES[operation];
+
+  if (typeof route !== "function") {
+    throw new RuntimeError(
+      `Unsupported QP runtime operation: ${String(operation)}`
+    );
+  }
+
+  let method;
+  let path;
+
+  try {
+    [method, path] = route(payload);
+  } catch (cause) {
+    throw new RuntimeError(
+      `Invalid arguments for ${operation}: ${directMessage(cause)}`
+    );
+  }
+
+  if (
+    !["GET", "POST"].includes(method) ||
+    typeof path !== "string" ||
+    !path.startsWith("/") ||
+    path.startsWith("//")
+  ) {
+    throw new RuntimeError(`Invalid API route for ${operation}.`);
+  }
+
+  return apiRequest(path, {
+    method,
+    body: method === "POST" ? payload.request : undefined,
+  });
+}
+
 
 
 function eventMapOf(source) {
