@@ -2312,39 +2312,6 @@ export default function Home() {
               </>
             )}
 
-            {tab === "open" && (
-              <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
-                <div>
-                  <h3 className="text-xs font-semibold">
-                    Recover persisted ordinal event
-                  </h3>
-
-                  <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                    Calls GET /wallets/:name/activations/:activation/open to
-                    load the persisted transit or exile record for the given
-                    ordinal without deriving keys or modifying state.
-                  </p>
-                </div>
-
-                <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-                  <p className="text-xs font-medium">Selected substrate</p>
-                  <p className="mt-1 break-all font-mono text-xs">
-                    {selectedSubstrate || "No substrate selected"}
-                  </p>
-                </div>
-
-                <NumberField
-                  label="Activation ordinal"
-                  value={openActivation}
-                  onChange={(val) => {
-                    setOpenActivation(val);
-                    setResult(null);
-                    setError("");
-                  }}
-                  min={1}
-                />
-              </div>
-            )}
 
             {tab === "derive" && (
               <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
