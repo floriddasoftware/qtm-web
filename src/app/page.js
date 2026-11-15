@@ -14,8 +14,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const TABS = [
   { id: "create", label: "Create" },
-  { id: "open", label: "Open" },
-  { id: "derive", label: "Derive" },
   { id: "receive", label: "Receive" },
   { id: "transit", label: "Transit" },
   { id: "exile", label: "Exile" },
