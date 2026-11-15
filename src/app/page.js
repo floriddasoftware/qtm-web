@@ -504,16 +504,24 @@ const ORDINAL_ROW_HEIGHT = 52;
 const ORDINAL_VIEWPORT_HEIGHT = 208;
 const ORDINAL_OVERSCAN = 2;
 
-function ReceiveOrdinalSelector({ amount, ordinal, onChange }) {
+function ReceiveOrdinalSelector({
+  amount,
+  ordinal,
+  onChange,
+  persistedOrdinals = [],
+  persistedLoading = false,
+  persistedError = "",
+}) {
   const [scrollTop, setScrollTop] = useState(0);
 
   const count = Number(amount);
   const selected = Number(ordinal);
+  const persisted = new Set(persistedOrdinals);
 
   if (!Number.isSafeInteger(count) || count <= 0) {
     return (
       <p className="text-xs text-zinc-500 dark:text-zinc-400">
-        Enter a positive amount to choose an ordinal.
+        Enter a positive amount to load persisted ordinals.
       </p>
     );
   }
@@ -539,30 +547,28 @@ function ReceiveOrdinalSelector({ amount, ordinal, onChange }) {
       if (id > count) break;
 
       const isSelected = id === selected;
+      const isPersisted = persisted.has(id);
+
+      const cellClass = isPersisted
+        ? isSelected
+          ? "border-blue-600 bg-blue-200 text-blue-950 ring-2 ring-blue-500 dark:border-blue-400 dark:bg-blue-950/70 dark:text-blue-100"
+          : "border-blue-300 bg-blue-100 text-blue-950 hover:bg-blue-200 dark:border-blue-800 dark:bg-blue-950/50 dark:text-blue-200 dark:hover:bg-blue-900/70"
+        : isSelected
+          ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-950"
+          : "border-zinc-200 bg-zinc-50 hover:border-zinc-400 hover:bg-white dark:border-zinc-700 dark:bg-zinc-950 dark:hover:border-zinc-500 dark:hover:bg-zinc-900";
 
       cells.push(
         <button
           key={id}
           type="button"
           aria-pressed={isSelected}
-          aria-label={`Ordinal ${id}`}
+          aria-label={`Ordinal ${id}${isPersisted ? ", persisted transit" : ""}`}
           onClick={() => onChange(id)}
-          className={`flex h-[46px] flex-col items-center justify-center rounded-lg border px-1 text-center transition-colors ${
-            isSelected
-              ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-950"
-              : "border-zinc-200 bg-zinc-50 hover:border-zinc-400 hover:bg-white dark:border-zinc-700 dark:bg-zinc-950 dark:hover:border-zinc-500 dark:hover:bg-zinc-900"
-          }`}
+          className={`flex h-[46px] flex-col items-center justify-center rounded-lg border px-1 text-center transition-colors ${cellClass}`}
         >
-          <span
-            className={`text-[10px] ${
-              isSelected
-                ? "text-zinc-300 dark:text-zinc-600"
-                : "text-zinc-500 dark:text-zinc-400"
-            }`}
-          >
-            Unit
+          <span className="text-[10px] opacity-70">
+            {isPersisted ? "Persisted" : "Unit"}
           </span>
-
           <span className="font-mono text-sm font-semibold">{id}</span>
         </button>
       );
@@ -585,16 +591,26 @@ function ReceiveOrdinalSelector({ amount, ordinal, onChange }) {
   return (
     <section className="space-y-2">
       <div>
-        <h4 className="text-xs font-semibold">Receive ordinal</h4>
-
+        <h4 className="text-xs font-semibold">
+          Ordinal persistence · Range 0–{count}
+        </h4>
         <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-          {count} {count === 1 ? "unit" : "units"} · Coordinates 1–{count} ·
-          Selected ordinal{" "}
-          <span className="font-mono font-semibold text-zinc-800 dark:text-zinc-200">
-            {Number.isSafeInteger(selected) ? selected : "none"}
-          </span>
+          {persisted.size} persisted transit(s) · {count} available coordinates
+          · Selected {Number.isSafeInteger(selected) ? selected : "none"}
         </p>
       </div>
+
+      {persistedLoading && (
+        <p className="text-xs text-blue-600 dark:text-blue-400">
+          Loading persisted events…
+        </p>
+      )}
+
+      {persistedError && (
+        <p role="alert" className="text-xs text-amber-700 dark:text-amber-400">
+          {persistedError}
+        </p>
+      )}
 
       <div
         onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
@@ -614,10 +630,12 @@ function ReceiveOrdinalSelector({ amount, ordinal, onChange }) {
         </div>
       </div>
 
-      <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-        The selected ordinal is submitted as the receive coordinate. Receive
-        or Change applies to it.
-      </p>
+      <div className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+        <span className="size-3 rounded border border-blue-300 bg-blue-100 dark:border-blue-800 dark:bg-blue-950/50" />
+        Persisted transit
+        <span className="ml-3 size-3 rounded border border-zinc-300 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900" />
+        No persisted transit
+      </div>
     </section>
   );
 }
@@ -1296,6 +1314,12 @@ export default function Home() {
   const [receiveOrdinal, setReceiveOrdinal] = useState("1");
   const [receiveFlow, setReceiveFlow] = useState("receive");
 
+  // Receive persistence tracking state
+  const [receiveEvents, setReceiveEvents] = useState([]);
+  const [receiveEventsLoading, setReceiveEventsLoading] = useState(false);
+  const [receiveEventsError, setReceiveEventsError] = useState("");
+  const receiveEventsRequestRef = useRef(0);
+
   const [exileRecords, setExileRecords] = useState([]);
   const [exileRecordsLoading, setExileRecordsLoading] = useState(false);
   const [exileRecordsError, setExileRecordsError] = useState("");
@@ -1525,6 +1549,81 @@ export default function Home() {
     }
   }, [selectedSubstrate]);
 
+  const loadReceiveEvents = useCallback(async () => {
+    const substrate = selectedSubstrate;
+    const amount = Number(receiveAmount);
+    const requestId = ++receiveEventsRequestRef.current;
+
+    const isCurrent = () =>
+      requestId === receiveEventsRequestRef.current &&
+      selectedRef.current === substrate;
+
+    if (
+      !substrate ||
+      !Number.isSafeInteger(amount) ||
+      amount <= 0
+    ) {
+      setReceiveEvents([]);
+      setReceiveEventsLoading(false);
+      setReceiveEventsError("");
+      return;
+    }
+
+    setReceiveEventsLoading(true);
+    setReceiveEventsError("");
+
+    try {
+      const data = await callRuntime("listEvents", {
+        name: substrate,
+      });
+
+      if (!isCurrent()) return;
+
+      const records = eventRecordsOf(data);
+
+      const recognizedList =
+        Array.isArray(data.events) ||
+        Array.isArray(data.records) ||
+        Array.isArray(data.event_records) ||
+        Array.isArray(data.eventRecords) ||
+        Array.isArray(data.items) ||
+        Array.isArray(data.data?.events) ||
+        Array.isArray(data.data?.records);
+
+      if (!records.length && !recognizedList) {
+        throw new Error(
+          "The events endpoint did not return a persisted event list."
+        );
+      }
+
+      setReceiveEvents(
+        records.filter((record) => {
+          const activation = Number(record.activation);
+
+          return (
+            record.kind === "transit" &&
+            Number.isSafeInteger(activation) &&
+            activation >= 1 &&
+            activation <= amount
+          );
+        })
+      );
+    } catch (err) {
+      if (!isCurrent()) return;
+
+      setReceiveEvents([]);
+      setReceiveEventsError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load persisted receive events."
+      );
+    } finally {
+      if (requestId === receiveEventsRequestRef.current) {
+        setReceiveEventsLoading(false);
+      }
+    }
+  }, [selectedSubstrate, receiveAmount]);
+
   useEffect(() => {
     loadSubstrates();
   }, [loadSubstrates]);
@@ -1539,6 +1638,15 @@ export default function Home() {
     }
   }, [tab, selectedSubstrate, loadExileRecords]);
 
+  useEffect(() => {
+    if (tab === "receive" && selectedSubstrate) {
+      loadReceiveEvents();
+    } else {
+      receiveEventsRequestRef.current += 1;
+      setReceiveEventsLoading(false);
+    }
+  }, [tab, selectedSubstrate, receiveAmount, loadReceiveEvents]);
+
   const currentNetwork = useMemo(
     () =>
       networks.find((network) => network.id === selectedNetwork) ?? null,
@@ -1548,12 +1656,16 @@ export default function Home() {
   function handleSubstrateChange(value) {
     selectedRef.current = value;
     exileRequestRef.current += 1;
+    receiveEventsRequestRef.current += 1;
     setExileRecordsLoading(false);
+    setReceiveEventsLoading(false);
     setSelectedSubstrate(value);
     setResult(null);
     setError("");
     setExileRecords([]);
     setExileRecordsError("");
+    setReceiveEvents([]);
+    setReceiveEventsError("");
   }
 
   function handleNetworkChange(id) {
@@ -1750,6 +1862,9 @@ export default function Home() {
       flow: receiveFlow,
       substrate: selectedSubstrate,
     });
+
+    // Reload persisted events after successful execution
+    void loadReceiveEvents();
   }
 
   async function handleSubmit(event) {
@@ -2509,6 +2624,11 @@ export default function Home() {
                     <ReceiveOrdinalSelector
                       amount={receiveAmount}
                       ordinal={receiveOrdinal}
+                      persistedOrdinals={receiveEvents.map((record) =>
+                        Number(record.activation)
+                      )}
+                      persistedLoading={receiveEventsLoading}
+                      persistedError={receiveEventsError}
                       onChange={(n) => {
                         setReceiveOrdinal(String(n));
                         setResult(null);
@@ -2788,3 +2908,4 @@ export default function Home() {
     </div>
   );
 }
+
