@@ -15,6 +15,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 const TABS = [
   { id: "create", label: "Create" },
   { id: "open", label: "Open" },
+  { id: "derive", label: "Derive" },
+  { id: "receive", label: "Receive" },
   { id: "transit", label: "Transit" },
   { id: "exile", label: "Exile" },
 ];
@@ -181,9 +183,9 @@ const API_ROUTES = {
     `/wallets/${encodeURIComponent(name)}/events`,
   ],
 
-  deriveSubmission: ({ name, activation, submission }) => [
+  deriveSubmission: ({ name, activation, submission, network }) => [
     "POST",
-    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/submissions/${encodeURIComponent(submission)}/derive`,
+    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/submissions/${encodeURIComponent(submission)}/networks/${encodeURIComponent(network)}/derive`,
   ],
 
   submissionValue: ({ name, activation, submission, network, field }) => [
@@ -328,7 +330,6 @@ async function callRuntime(operation, args = {}) {
     body: method === "POST" ? payload.request : undefined,
   });
 }
-
 
 function eventMapOf(source) {
   const direct = objectAt(source, ["event", "event_map", "eventMap"]);
@@ -669,34 +670,6 @@ function recordNameOf(record) {
   return "";
 }
 
-// ---------------------------------------------------------------------------
-// Open / Receive: four presentation-only frames.
-//
-// Verified against qtm-api src/main.rs (handle_receive_wallet). The response is
-//   ReceiveResponse {
-//     frame: {
-//       quantum_transaction: { amount, qtm: { identifier, qtm }, constant,
-//                              constant_delta },
-//       event: { scale, runtime, heritage: { state, transition },
-//                qtm: { identifier, qtm }, depth },
-//     }
-//   }
-// where qtm = { commitment, coordinate, sigma, network } and
-// identifier = qtm.commitment. quantum_transaction.amount is the activation
-// (QuantumTransaction::send(name, ordinal)), not the requested amount N.
-// There is NO direction field: the flow ("receive" | "change") exists only in
-// the request, so it is read from the submitted request (result.flow).
-// qtm-api exposes no route that returns scriptPubKey, xpub, zpub, xpriv or
-// addresses: the bitblock_* helpers are feature-gated and no handler uses them.
-//
-// Every frame reads from ONE completed receive result. No frame loads a
-// directory, an event-store record, or reconstructs a QTM.
-//   Opened QTM            <- frame.quantum_transaction.qtm
-//   Network               <- selected network registry entry + QTM inputs
-//   Receive derivations   <- frame.quantum_transaction (amount, constant, ...)
-//   Immediate heritage    <- frame.event (heritage, depth, scale, runtime)
-// ---------------------------------------------------------------------------
-
 // Same 6:3 (2:1) ratio for every frame; stacks and relaxes the ratio on
 // narrow screens, scrolling inside the frame when content is taller.
 function Frame({ eyebrow, title, tone = "default", actions, children }) {
@@ -761,49 +734,71 @@ function Blurred({ revealed, children }) {
   );
 }
 
-function OpenResults({ result }) {
-  const [revealReceive, setRevealReceive] = useState(false);
-  const [revealNetwork, setRevealNetwork] = useState(false);
+// ---------------------------------------------------------------------------
+// Operation 1: Recovery-Only Open Results
+// ---------------------------------------------------------------------------
+function OpenRecoveryResults({ result }) {
+  const substrate = objectAt(result?.opened, ["substrate"]);
+  const event = objectAt(result?.opened, ["event"]);
+  const heritage = objectAt(event, ["heritage"]);
+  const depth = objectAt(event, ["depth"]);
+
+  return (
+    <div className="space-y-3">
+      <section className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+        <h3 className="text-xs font-semibold">Recovered ordinal event</h3>
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          Read-only recovery of persisted activation state without derivation or Receive execution.
+        </p>
+        <div className="mt-3">
+          <KeyValueList
+            value={{
+              substrate: result?.substrate,
+              activation: result?.activation,
+              record: valueAt(event, ["record"]),
+              scale: valueAt(event, ["scale"]),
+            }}
+          />
+        </div>
+      </section>
+
+      <ResultSection
+        title="Substrate state"
+        value={substrate}
+        defaultOpen
+      />
+
+      {event && (
+        <>
+          {heritage && (
+            <ResultSection
+              title="Recovered heritage"
+              value={heritage}
+              defaultOpen
+            />
+          )}
+          {depth && (
+            <ResultSection
+              title="Recovered depth"
+              value={depth}
+              defaultOpen
+            />
+          )}
+          <ResultSection title="Complete event payload" value={event} />
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Operation 2: Independent Submission Derivation Results
+// ---------------------------------------------------------------------------
+function DeriveResults({ result }) {
+  const [revealSensitive, setRevealSensitive] = useState(false);
   const [privateKey, setPrivateKey] = useState("");
   const [privateKeyLoading, setPrivateKeyLoading] = useState(false);
   const [privateKeyError, setPrivateKeyError] = useState("");
-
-  const frame = objectAt(result?.receive, ["frame"]);
-  const transaction = objectAt(frame, ["quantum_transaction"]);
-  const event = objectAt(frame, ["event"]);
-
-  // { identifier, qtm: { commitment, coordinate, sigma, network } }
-  const openedQtm = objectAt(transaction, ["qtm"]);
-  const qtmValues = objectAt(openedQtm, ["qtm"]);
-
-  const heritage = objectAt(event, ["heritage"]);
-  const depth = objectAt(event, ["depth"]);
-  const runtime = objectAt(event, ["runtime"]);
-
-  const activation = result?.activation ?? valueAt(transaction, ["amount"]);
-  const commitment = valueAt(qtmValues, ["commitment"]);
-  const networkOption = result?.network_option;
-
-    const identity = {
-    substrate: result?.substrate,
-    network: result?.network,
-    activation: result?.activation,
-    submission: result?.submission,
-    flow: result?.flow,
-    commitment,
-  };
-
-  // User-facing receive values: exactly the non-QTM fields of the
-  // QuantumTransactionResponse, plus the request values that produced them.
-  const receiveValues = transaction
-    ? {
-        receive_amount: result?.requested_amount,
-        activation,
-        flow: result?.flow,
-        constant: valueAt(transaction, ["constant"]),
-        constant_delta: valueAt(transaction, ["constant_delta"]),
-      }
-    : undefined;
 
   async function revealPrivateKey() {
     if (privateKey) {
@@ -815,16 +810,13 @@ function OpenResults({ result }) {
     setPrivateKeyError("");
 
     try {
-      const value = await callRuntime(
-        "submissionValue",
-                  {
-          name: result.substrate,
-          activation: result.activation,
-          submission: result.submission,
-          network: result.network,
-          field: "xpriv",
-        }
-      );
+      const value = await callRuntime("submissionValue", {
+        name: result.substrate,
+        activation: result.activation,
+        submission: result.submission,
+        network: result.network,
+        field: "xpriv",
+      });
 
       setPrivateKey(
         typeof value === "string"
@@ -842,57 +834,57 @@ function OpenResults({ result }) {
     }
   }
 
-    return (
-  <div className="space-y-3">
-    <section className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-      <h3 className="text-xs font-semibold">Receive event identity</h3>
-
-      <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-        All four frames below read this one receive response.
-      </p>
-
-      <div className="mt-3">
-        <KeyValueList value={identity} />
-      </div>
-    </section>
-
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-      <Frame eyebrow="Frame 1" title="Opened QTM">
-        {hasContent(openedQtm) ? (
-          <KeyValueList value={openedQtm} />
-        ) : (
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            The receive response did not include
-            frame.quantum_transaction.qtm.
-          </p>
-        )}
-      </Frame>
+  return (
+    <div className="space-y-3">
+      <section className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+        <h3 className="text-xs font-semibold">Submission derivation identity</h3>
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          Persisted independently under activation {result?.activation}, submission {result?.submission}, network {result?.network}.
+        </p>
+        <div className="mt-3">
+          <KeyValueList
+            value={{
+              substrate: result?.substrate,
+              activation: result?.activation,
+              submission: result?.submission,
+              network: result?.network,
+              derivation_path: result?.derivation?.derivation_path,
+              directory: result?.derivation?.directory,
+              authorization_state: result?.derivation?.authorization_state,
+              settlement_state: result?.derivation?.settlement_state,
+            }}
+          />
+        </div>
+      </section>
 
       <Frame
-        eyebrow="Frame 2 · Sensitive"
-        title="Network"
+        eyebrow="Derived Values · Sensitive"
+        title="Network Key Material & Address"
         tone="sensitive"
         actions={
           <FrameButton
-            onClick={() => setRevealNetwork((current) => !current)}
+            onClick={() => setRevealSensitive((current) => !current)}
           >
-            {revealNetwork ? "Hide inputs" : "Reveal inputs"}
+            {revealSensitive ? "Hide values" : "Reveal values"}
           </FrameButton>
         }
       >
         <div className="space-y-3">
           <KeyValueList
             value={{
-              network: result?.network,
-              activation: result?.activation,
-              submission: result?.submission,
-              derivation_path: result?.derivation?.derivation_path,
               master_fingerprint: result?.derivations?.fingerprint,
+              address: result?.derivations?.address,
             }}
           />
 
-          {revealNetwork ? (
+          {revealSensitive ? (
             <div className="space-y-3 border-t border-amber-200 pt-3 dark:border-amber-900">
+              <ResultSection
+                title="Address"
+                value={result?.derivations?.address}
+                defaultOpen
+              />
+
               <ResultSection
                 title="ScriptPubKey"
                 value={result?.derivations?.scriptpubkey}
@@ -912,11 +904,6 @@ function OpenResults({ result }) {
               <ResultSection
                 title="Zpub"
                 value={result?.derivations?.zpub}
-              />
-
-              <ResultSection
-                title="Address"
-                value={result?.derivations?.address}
               />
 
               <div className="space-y-2 rounded-lg border border-amber-300 p-3 dark:border-amber-800">
@@ -951,44 +938,112 @@ function OpenResults({ result }) {
 
                 {!privateKey && !privateKeyError && (
                   <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                    Xpriv is not requested until you explicitly reveal it.
+                    Xpriv is fetched on demand only when explicitly revealed.
                   </p>
                 )}
               </div>
             </div>
           ) : (
             <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              Network derivations are hidden. Reveal to inspect this
-              submission&apos;s script, fingerprint, extended public keys and
-              address.
+              Full scriptPubKey and extended keys are hidden. Reveal to inspect all derived values for this submission.
             </p>
           )}
         </div>
       </Frame>
 
-      <Frame
-        eyebrow="Frame 3"
-        title="Receive derivations"
-        actions={
-          <FrameButton
-            onClick={() => setRevealReceive((current) => !current)}
-          >
-            {revealReceive ? "Clear" : "Reveal"}
-          </FrameButton>
-        }
-      >
-        {receiveValues ? (
-          <Blurred revealed={revealReceive}>
-            <KeyValueList value={receiveValues} />
-          </Blurred>
-        ) : (
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            The response did not contain the expected QuantumTransaction.
-          </p>
-        )}
-      </Frame>
+      <ResultSection
+        title="Complete derivation response"
+        value={result?.derivation}
+      />
+    </div>
+  );
+}
 
-      <Frame eyebrow="Frame 4" title="Immediate heritage">
+// ---------------------------------------------------------------------------
+// Operation 3: Activation-Scoped Receive Results
+// ---------------------------------------------------------------------------
+function ReceiveResults({ result }) {
+  const [revealReceive, setRevealReceive] = useState(false);
+
+  const frame = objectAt(result?.receive, ["frame"]);
+  const transaction = objectAt(frame, ["quantum_transaction"]);
+  const event = objectAt(frame, ["event"]);
+
+  const openedQtm = objectAt(transaction, ["qtm"]);
+  const qtmValues = objectAt(openedQtm, ["qtm"]);
+
+  const heritage = objectAt(event, ["heritage"]);
+  const depth = objectAt(event, ["depth"]);
+  const runtime = objectAt(event, ["runtime"]);
+
+  const activation = result?.ordinal ?? valueAt(transaction, ["amount"]);
+  const commitment = valueAt(qtmValues, ["commitment"]);
+
+  const identity = {
+    substrate: result?.substrate,
+    network: result?.network,
+    ordinal: result?.ordinal,
+    flow: result?.flow,
+    commitment,
+  };
+
+  const receiveValues = transaction
+    ? {
+        receive_amount: result?.requested_amount,
+        activation,
+        flow: result?.flow,
+        constant: valueAt(transaction, ["constant"]),
+        constant_delta: valueAt(transaction, ["constant_delta"]),
+      }
+    : undefined;
+
+  return (
+    <div className="space-y-3">
+      <section className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+        <h3 className="text-xs font-semibold">Receive event identity</h3>
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          Executed independently via POST /wallets/:name/receive without implicit derivation.
+        </p>
+        <div className="mt-3">
+          <KeyValueList value={identity} />
+        </div>
+      </section>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Frame eyebrow="Frame 1" title="Transaction QTM">
+          {hasContent(openedQtm) ? (
+            <KeyValueList value={openedQtm} />
+          ) : (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              The receive response did not include frame.quantum_transaction.qtm.
+            </p>
+          )}
+        </Frame>
+
+        <Frame
+          eyebrow="Frame 2"
+          title="Receive values"
+          actions={
+            <FrameButton
+              onClick={() => setRevealReceive((current) => !current)}
+            >
+              {revealReceive ? "Clear" : "Reveal"}
+            </FrameButton>
+          }
+        >
+          {receiveValues ? (
+            <Blurred revealed={revealReceive}>
+              <KeyValueList value={receiveValues} />
+            </Blurred>
+          ) : (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              The response did not contain the expected QuantumTransaction.
+            </p>
+          )}
+        </Frame>
+      </div>
+
+      <Frame eyebrow="Frame 3" title="Immediate heritage">
         <div className="space-y-3">
           <KeyValueList
             value={{
@@ -1025,8 +1080,7 @@ function OpenResults({ result }) {
         </div>
       </Frame>
     </div>
-  </div>
-);
+  );
 }
 
 function EventMapSections({ event, prefix = "" }) {
@@ -1163,7 +1217,11 @@ function ResultCard({ result, tab, network, path, substrate }) {
 
   return (
     <div className="mt-4 space-y-3">
-      {tab === "open" && <OpenResults result={result} />}
+      {tab === "open" && <OpenRecoveryResults result={result} />}
+
+      {tab === "derive" && <DeriveResults result={result} />}
+
+      {tab === "receive" && <ReceiveResults result={result} />}
 
       {tab === "transit" && (
         <TransitResults
@@ -1225,6 +1283,15 @@ export default function Home() {
   const [external, setExternal] = useState("0");
   const [activation, setActivation] = useState("1");
 
+  // Recovery-only Open state
+  const [openActivation, setOpenActivation] = useState("1");
+
+  // Independent Derivation state
+  const [deriveActivation, setDeriveActivation] = useState("1");
+  const [deriveSubmission, setDeriveSubmission] = useState("1");
+  const [deriveNetwork, setDeriveNetwork] = useState("");
+
+  // Activation-scoped Receive state
   const [receiveAmount, setReceiveAmount] = useState("1");
   const [receiveOrdinal, setReceiveOrdinal] = useState("1");
   const [receiveFlow, setReceiveFlow] = useState("receive");
@@ -1248,8 +1315,6 @@ export default function Home() {
     );
   }, []);
 
-  // Substrate requested by links from /network and /eventstore (?substrate=).
-  // Read once (null = not read yet) and consumed by the first resolved load.
   const requestedSubstrateRef = useRef(null);
   const listRequestRef = useRef(0);
   const exileRequestRef = useRef(0);
@@ -1260,8 +1325,6 @@ export default function Home() {
     selectedRef.current = selectedSubstrate;
   }, [selectedSubstrate]);
 
-  // Do not touch the URL until the first list load has resolved the
-  // selection; otherwise the requested ?substrate= would be stripped.
   useEffect(() => {
     if (!selectionReady) return;
 
@@ -1300,7 +1363,6 @@ export default function Home() {
         );
       }
 
-      // A newer list request has started; this response is stale.
       if (requestId !== listRequestRef.current) return;
 
       const valid = data.substrates.filter(
@@ -1312,8 +1374,6 @@ export default function Home() {
 
       setSubstrates(valid);
 
-      // Priority: explicit choice, the user's current selection, the URL
-      // request, then the first substrate only if none of those exist.
       setSelectedSubstrate((current) => {
         const wanted = [preferred, current, requested].find(
           (candidate) =>
@@ -1367,6 +1427,12 @@ export default function Home() {
           : valid[0]?.id || ""
       );
 
+      setDeriveNetwork((current) =>
+        valid.some((network) => network.id === current)
+          ? current
+          : valid[0]?.id || ""
+      );
+
       const first = valid[0];
 
       if (first) {
@@ -1401,7 +1467,6 @@ export default function Home() {
     const substrate = selectedSubstrate;
     const requestId = ++exileRequestRef.current;
 
-    // Only the latest request for the still-selected substrate may update state.
     const isCurrent = () =>
       requestId === exileRequestRef.current &&
       selectedRef.current === substrate;
@@ -1482,7 +1547,6 @@ export default function Home() {
 
   function handleSubstrateChange(value) {
     selectedRef.current = value;
-    // Invalidate in-flight exile-record loads for the previous substrate.
     exileRequestRef.current += 1;
     setExileRecordsLoading(false);
     setSelectedSubstrate(value);
@@ -1493,27 +1557,26 @@ export default function Home() {
   }
 
   function handleNetworkChange(id) {
-  const network = networks.find((item) => item.id === id);
+    const network = networks.find((item) => item.id === id);
 
-  setSelectedNetwork(id);
-  setReceiveOrdinal("1");
-  setResult(null);
-  setError("");
+    setSelectedNetwork(id);
+    setReceiveOrdinal("1");
+    setResult(null);
+    setError("");
 
-  if (!network) return;
+    if (!network) return;
 
-  if (Number.isFinite(network.purpose)) {
-    setPurpose(String(network.purpose));
+    if (Number.isFinite(network.purpose)) {
+      setPurpose(String(network.purpose));
+    }
+
+    if (Number.isFinite(network.coin)) {
+      setCoin(String(network.coin));
+    }
+
+    setPath(network.path || "");
   }
 
-  if (Number.isFinite(network.coin)) {
-    setCoin(String(network.coin));
-  }
-
-  setPath(network.path || "");
-}
-
-  // Keep the selected ordinal inside the 1…N coordinate range.
   function handleReceiveAmountChange(value) {
     setReceiveAmount(value);
     setResult(null);
@@ -1527,6 +1590,166 @@ export default function Home() {
     } else if (ordinal > amount) {
       setReceiveOrdinal(String(amount));
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // 1. Recovery-Only Open Handler (GET /wallets/:name/activations/:activation/open)
+  // -------------------------------------------------------------------------
+  async function handleOpenRecovery() {
+    const activationNumber = Number(openActivation);
+
+    if (!Number.isSafeInteger(activationNumber) || activationNumber < 1) {
+      throw new Error(
+        "Activation ordinal must be a positive safe integer."
+      );
+    }
+
+    const opened = await callRuntime("openSubstrate", {
+      name: selectedSubstrate,
+      activation: activationNumber,
+    });
+
+    if (!opened || !opened.event) {
+      throw new Error(
+        `Open did not return a persisted event at activation ${activationNumber}.`
+      );
+    }
+
+    setResult({
+      opened,
+      substrate: selectedSubstrate,
+      activation: activationNumber,
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 2. Independent Submission Derivation Handler
+  //    POST /wallets/:name/activations/:activation/submissions/:submission/networks/:network/derive
+  //    with body { "network": deriveNetwork }
+  // -------------------------------------------------------------------------
+  async function handleIndependentDerivation() {
+    const activationNumber = Number(deriveActivation);
+    const submissionNumber = Number(deriveSubmission);
+
+    if (!Number.isSafeInteger(activationNumber) || activationNumber < 1) {
+      throw new Error("Activation must be a positive safe integer.");
+    }
+
+    if (!Number.isSafeInteger(submissionNumber) || submissionNumber < 1) {
+      throw new Error("Submission must be a positive safe integer.");
+    }
+
+    if (!deriveNetwork) {
+      throw new Error("Select a network identity for submission derivation.");
+    }
+
+    const derivation = await callRuntime("deriveSubmission", {
+      name: selectedSubstrate,
+      activation: activationNumber,
+      submission: submissionNumber,
+      network: deriveNetwork,
+      request: {
+        network: deriveNetwork,
+      },
+    });
+
+    const readValue = (field) =>
+      callRuntime("submissionValue", {
+        name: selectedSubstrate,
+        activation: activationNumber,
+        submission: submissionNumber,
+        network: deriveNetwork,
+        field,
+      });
+
+    const [
+      fingerprint,
+      scriptpubkey,
+      xpub,
+      zpub,
+      address,
+    ] = await Promise.all([
+      readValue("fingerprint"),
+      readValue("scriptpubkey"),
+      readValue("xpub"),
+      readValue("zpub"),
+      readValue("address"),
+    ]);
+
+    setResult({
+      derivation,
+      derivations: {
+        fingerprint,
+        scriptpubkey,
+        xpub,
+        zpub,
+        address,
+      },
+      substrate: selectedSubstrate,
+      activation: activationNumber,
+      submission: submissionNumber,
+      network: deriveNetwork,
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 3. Activation-Scoped Receive Handler (POST /wallets/:name/receive)
+  // -------------------------------------------------------------------------
+  async function handleReceiveExecution() {
+    const amount = Number(receiveAmount);
+
+    if (!Number.isSafeInteger(amount) || amount <= 0) {
+      throw new Error("Receive amount must be a positive safe integer.");
+    }
+
+    if (!selectedNetwork) {
+      throw new Error("Select a coordination network before receiving.");
+    }
+
+    if (!["receive", "change"].includes(receiveFlow)) {
+      throw new Error("Select a valid receive flow.");
+    }
+
+    const ordinal = Number(receiveOrdinal);
+
+    if (
+      !Number.isSafeInteger(ordinal) ||
+      ordinal < 1 ||
+      ordinal > amount
+    ) {
+      throw new Error("Select a valid ordinal within the receive amount.");
+    }
+
+    const receive = await callRuntime("receive", {
+      name: selectedSubstrate,
+      request: {
+        amount,
+        network: selectedNetwork,
+        flow: receiveFlow,
+        ordinal,
+      },
+    });
+
+    const frame = objectAt(receive, ["frame"]);
+    const transaction = objectAt(frame, ["quantum_transaction"]);
+    const event = objectAt(frame, ["event"]);
+    const heritage = objectAt(event, ["heritage"]);
+
+    if (!transaction || !event || !heritage) {
+      throw new Error(
+        "Receive succeeded but did not return the expected transaction and event heritage."
+      );
+    }
+
+    setResult({
+      receive,
+      requested_amount: amount,
+      network: selectedNetwork,
+      network_option: currentNetwork,
+      ordinal,
+      flow: receiveFlow,
+      substrate: selectedSubstrate,
+    });
   }
 
   async function handleSubmit(event) {
@@ -1610,148 +1833,22 @@ export default function Home() {
         setPhrase("");
         setPassphrase("");
 
-        // Background discovery refresh: its failure shows in the substrate
-        // card and never affects the Create result or the form.
         void loadSubstrates(substrateName);
         return;
       }
 
-            if (tab === "open") {
-        const amount = Number(receiveAmount);
+      if (tab === "open") {
+        await handleOpenRecovery();
+        return;
+      }
 
-        if (!Number.isSafeInteger(amount) || amount <= 0) {
-          throw new Error(
-            "Receive amount must be a positive safe integer."
-          );
-        }
+      if (tab === "derive") {
+        await handleIndependentDerivation();
+        return;
+      }
 
-        if (!selectedNetwork) {
-          throw new Error("Select a coordination network before receiving.");
-        }
-
-        if (!["receive", "change"].includes(receiveFlow)) {
-          throw new Error("Select a valid receive flow.");
-        }
-
-        const ordinal = Number(receiveOrdinal);
-
-        if (
-          !Number.isSafeInteger(ordinal) ||
-          ordinal < 1 ||
-          ordinal > amount
-        ) {
-          throw new Error(
-            "Select a valid ordinal within the receive amount."
-          );
-        }
-
-        // Step 1: Open the exact persisted event at the selected ordinal.
-        const opened = await callRuntime(
-          "openSubstrate",
-          {
-            name: selectedSubstrate,
-            activation: ordinal,
-          }
-        );
-
-        if (!opened || !opened.event) {
-          throw new Error(
-            `Open did not return the persisted event at ordinal ${ordinal}.`
-          );
-        }
-
-        // Step 2: Receive using the same selected ordinal.
-        const receive = await callRuntime("receive", {
-          name: selectedSubstrate,
-          request: {
-            amount,
-            network: selectedNetwork,
-            flow: receiveFlow,
-            ordinal,
-          },
-        });
-
-        const frame = objectAt(receive, ["frame"]);
-        const transaction = objectAt(frame, ["quantum_transaction"]);
-        const event = objectAt(frame, ["event"]);
-        const heritage = objectAt(event, ["heritage"]);
-        const state = objectAt(heritage, ["state"]);
-
-        if (!transaction || !event || !heritage) {
-          throw new Error(
-            "Receive succeeded but did not return the expected transaction and event heritage."
-          );
-        }
-
-                // The selected ordinal identifies the persisted activation.
-        const activation = ordinal;
-
-        // First derivation submission for this activation.
-        const submission = 1;
-
-        // Step 2: Derive and persist against the selected activation.
-        const derivation = await callRuntime(
-          "deriveSubmission",
-          {
-            name: selectedSubstrate,
-            activation,
-            submission,
-            request: {
-              network: selectedNetwork,
-            },
-          }
-        );
-
-        // Step 3: Retrieve values from the same activation and submission.
-        const readValue = (field) =>
-          callRuntime(
-            "submissionValue",
-            {
-              name: selectedSubstrate,
-              activation,
-              submission,
-              network: selectedNetwork,
-              field,
-            }
-          );
-
-                 const [
-          fingerprint,
-          scriptpubkey,
-          xpub,
-          zpub,
-          address,
-        ] = await Promise.all([
-          readValue("fingerprint"),
-          readValue("scriptpubkey"),
-          readValue("xpub"),
-          readValue("zpub"),
-          readValue("address"),
-        ]);
-
-        // xpriv is intentionally not fetched here.
-        // It is requested only after an explicit reveal action.
-
-        setResult({
-          receive,
-          derivation,
-          derivations: {
-            fingerprint,
-            scriptpubkey,
-            xpub,
-            zpub,
-            address,
-          },
-          requested_amount: amount,
-          network: selectedNetwork,
-          network_option: currentNetwork,
-          ordinal,
-          activation,
-          submission,
-          flow: receiveFlow,
-          substrate: selectedSubstrate,
-        });
-
+      if (tab === "receive") {
+        await handleReceiveExecution();
         return;
       }
 
@@ -1777,8 +1874,6 @@ export default function Home() {
           }
         }
 
-        // The selected substrate is the state context for this transition.
-        // The network/path configure derivation; they do not replace the substrate.
         const data = await callRuntime("transit", {
           name: selectedSubstrate,
           request: {
@@ -1793,9 +1888,6 @@ export default function Home() {
       }
 
       if (tab === "exile") {
-        // The Rust API decides eligibility and derives the exile depth from
-        // this substrate's persisted event history. The browser neither gates
-        // the request nor submits a client-created depth snapshot.
         const data = await callRuntime("exile", {
           name: selectedSubstrate,
         });
@@ -1867,9 +1959,9 @@ export default function Home() {
           </h1>
 
           <p className="mt-1 text-xs leading-5 text-zinc-600 dark:text-zinc-400">
-            Create and inspect persistent substrates, derive network paths,
-            and transition or exile state through the local QP runtime or the
-            configured API bridge.
+            Create and inspect persistent substrates, recover persisted
+            ordinals, derive submission keys, and execute receive, transit, or
+            exile operations.
           </p>
         </header>
 
@@ -1927,9 +2019,8 @@ export default function Home() {
                 </p>
 
                 <p className="mt-1 text-xs leading-4 text-zinc-500 dark:text-zinc-400">
-                  Transit and exile operate against this substrate. Network
-                  and derivation path are operation parameters, not separate
-                  state hosts.
+                  Open, Derive, Receive, Transit, and Exile operate against
+                  this substrate independently without implicit cross-triggering.
                 </p>
               </div>
 
@@ -2019,7 +2110,7 @@ export default function Home() {
 
         <nav
           aria-label="Substrate operations"
-          className="mb-3 grid grid-cols-4 gap-1 rounded-lg border border-zinc-200 bg-zinc-100/80 p-1 dark:border-zinc-800 dark:bg-zinc-900"
+          className="mb-3 grid grid-cols-3 gap-1 rounded-lg border border-zinc-200 bg-zinc-100/80 p-1 sm:grid-cols-6 dark:border-zinc-800 dark:bg-zinc-900"
         >
           {TABS.map((item) => (
             <button
@@ -2053,7 +2144,13 @@ export default function Home() {
                 "Initialize a persistent substrate using PERM indices or a BIP39 mnemonic."}
 
               {tab === "open" &&
-                "Perform a receive operation at a chosen ordinal and view the opened QTM, its network derivations, and its immediate heritage."}
+                "Recovery-only operation: inspect and recover the persisted event at a specific activation ordinal without deriving keys or executing Receive."}
+
+              {tab === "derive" &&
+                "Independent submission derivation: establish the submission directory and derive network-scoped keys and address for an explicit activation, submission, and network."}
+
+              {tab === "receive" &&
+                "Activation-scoped Receive: execute Receive or Change at a chosen ordinal independently of submission derivation."}
 
               {tab === "transit" &&
                 "Apply a network derivation request in the selected substrate's state context."}
@@ -2192,25 +2289,147 @@ export default function Home() {
               </>
             )}
 
-                        {tab === "open" && (
+            {tab === "open" && (
               <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
                 <div>
                   <h3 className="text-xs font-semibold">
-                    Open substrate and receive
+                    Recover persisted ordinal event
                   </h3>
 
                   <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                    Select a coordination network before receiving. Its
-                    persisted event budget determines the permitted ordinal
-                    range for this operation.
+                    Calls GET /wallets/:name/activations/:activation/open to
+                    load the persisted transit or exile record for the given
+                    ordinal without deriving keys or modifying state.
                   </p>
                 </div>
 
                 <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-                  <p className="text-xs font-medium">
-                    Selected substrate
+                  <p className="text-xs font-medium">Selected substrate</p>
+                  <p className="mt-1 break-all font-mono text-xs">
+                    {selectedSubstrate || "No substrate selected"}
                   </p>
+                </div>
 
+                <NumberField
+                  label="Activation ordinal"
+                  value={openActivation}
+                  onChange={(val) => {
+                    setOpenActivation(val);
+                    setResult(null);
+                    setError("");
+                  }}
+                  min={1}
+                />
+              </div>
+            )}
+
+            {tab === "derive" && (
+              <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+                <div>
+                  <h3 className="text-xs font-semibold">
+                    Submission key & address derivation
+                  </h3>
+
+                  <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                    Posts to /wallets/:name/activations/:activation/submissions/:submission/networks/:network/derive
+                    with explicit activation, submission, and network identity,
+                    then retrieves the derived values from the network-scoped endpoints.
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                  <p className="text-xs font-medium">Selected substrate</p>
+                  <p className="mt-1 break-all font-mono text-xs">
+                    {selectedSubstrate || "No substrate selected"}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <NumberField
+                    label="Activation"
+                    value={deriveActivation}
+                    onChange={(val) => {
+                      setDeriveActivation(val);
+                      setResult(null);
+                      setError("");
+                    }}
+                    min={1}
+                  />
+
+                  <NumberField
+                    label="Submission"
+                    value={deriveSubmission}
+                    onChange={(val) => {
+                      setDeriveSubmission(val);
+                      setResult(null);
+                      setError("");
+                    }}
+                    min={1}
+                  />
+                </div>
+
+                <label className="flex min-w-0 flex-col gap-1">
+                  <span className="text-xs font-medium">
+                    Network identity
+                  </span>
+
+                  <select
+                    value={deriveNetwork}
+                    onChange={(event) => {
+                      setDeriveNetwork(event.target.value);
+                      setResult(null);
+                      setError("");
+                    }}
+                    disabled={networkLoading || !networks.length}
+                    className="h-9 min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                  >
+                    {!networks.length && (
+                      <option value="">
+                        {networkLoading ? "Loading…" : "No networks"}
+                      </option>
+                    )}
+
+                    {networks.map((network) => (
+                      <option key={network.id} value={network.id}>
+                        {network.name} — {network.id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                {networkError && (
+                  <p
+                    role="alert"
+                    className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
+                  >
+                    Networks could not be loaded: {networkError}{" "}
+                    <button
+                      type="button"
+                      onClick={loadNetworks}
+                      className="font-semibold underline"
+                    >
+                      Retry
+                    </button>
+                  </p>
+                )}
+              </div>
+            )}
+
+            {tab === "receive" && (
+              <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+                <div>
+                  <h3 className="text-xs font-semibold">
+                    Activation-scoped Receive
+                  </h3>
+
+                  <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                    Executes POST /wallets/:name/receive at a chosen ordinal
+                    coordinate. Independent of submission derivation.
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                  <p className="text-xs font-medium">Selected substrate</p>
                   <p className="mt-1 break-all font-mono text-xs">
                     {selectedSubstrate || "No substrate selected"}
                   </p>
@@ -2301,7 +2520,7 @@ export default function Home() {
                 {currentNetwork && (
                   <ResultSection
                     title="Selected coordination network"
-                    description="This network is used to load and validate the receive budget."
+                    description="Network parameter passed in the receive request."
                     value={currentNetwork}
                   />
                 )}
@@ -2521,20 +2740,25 @@ export default function Home() {
               disabled={
                 loading ||
                 (substrateRequired && (listLoading || !selectedSubstrate)) ||
-                ((tab === "transit" || tab === "open") &&
-                  (networkLoading || !selectedNetwork))
+                ((tab === "transit" || tab === "receive") &&
+                  (networkLoading || !selectedNetwork)) ||
+                (tab === "derive" && (networkLoading || !deriveNetwork))
               }
               className="mt-1 inline-flex min-h-10 items-center justify-center rounded-lg bg-zinc-950 px-5 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
             >
               {loading
                 ? "Processing…"
                 : tab === "open"
-                  ? "Open and Receive"
-                  : tab === "transit"
-                    ? "Transit Selected Substrate"
-                    : tab === "exile"
-                      ? "Exile Selected Substrate"
-                      : "Create Substrate"}
+                  ? "Recover Persisted Ordinal"
+                  : tab === "derive"
+                    ? "Derive Submission"
+                    : tab === "receive"
+                      ? "Execute Receive"
+                      : tab === "transit"
+                        ? "Transit Selected Substrate"
+                        : tab === "exile"
+                          ? "Exile Selected Substrate"
+                          : "Create Substrate"}
             </button>
           </form>
         </section>
