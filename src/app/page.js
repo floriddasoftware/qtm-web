@@ -180,9 +180,9 @@ const API_ROUTES = {
     `/wallets/${encodeURIComponent(name)}/events`,
   ],
 
-  deriveSubmission: ({ name, activation, submission, network }) => [
+    deriveSubmission: ({ name, activation, submission }) => [
     "POST",
-    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/submissions/${encodeURIComponent(submission)}/networks/${encodeURIComponent(network)}/derive`,
+    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/submissions/${encodeURIComponent(submission)}/derive`,
   ],
 
   submissionValue: ({ name, activation, submission, network, field }) => [
