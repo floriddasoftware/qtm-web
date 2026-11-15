@@ -499,6 +499,9 @@ function NumberField({ label, value, onChange, min = 0 }) {
 // every unit is its own button and button n means ordinal coordinate n.
 // The grid is windowed (only visible rows are mounted) inside a scroll
 // container, so there is no display cutoff and every ordinal stays reachable.
+// When amount changes to N the frame loads persisted events for that range
+// (0..N) and marks every ordinal backed by a persisted transit event with a
+// light primary-blue background. Only kind === "transit" is considered.
 const ORDINAL_COLUMNS = 8;
 const ORDINAL_ROW_HEIGHT = 52;
 const ORDINAL_VIEWPORT_HEIGHT = 208;
@@ -1206,7 +1209,7 @@ function ExileResults({ result, substrate }) {
             {depth.path || "Depth path not returned"}
           </p>
 
-          <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-300">
+          <p class="mt-2 text-xs text-zinc-600 dark:text-zinc-300">
             {objects.length} retained{" "}
             {objects.length === 1 ? "object" : "objects"} returned by the API.
           </p>
@@ -1314,7 +1317,7 @@ export default function Home() {
   const [receiveOrdinal, setReceiveOrdinal] = useState("1");
   const [receiveFlow, setReceiveFlow] = useState("receive");
 
-  // Receive persistence tracking state
+  // Receive persistence state (amount-range transit events)
   const [receiveEvents, setReceiveEvents] = useState([]);
   const [receiveEventsLoading, setReceiveEventsLoading] = useState(false);
   const [receiveEventsError, setReceiveEventsError] = useState("");
@@ -1549,6 +1552,8 @@ export default function Home() {
     }
   }, [selectedSubstrate]);
 
+  // Receive persistence loader — uses existing listEvents / GET /wallets/:name/events.
+  // Only kind === "transit" events whose activation falls inside 1..amount are kept.
   const loadReceiveEvents = useCallback(async () => {
     const substrate = selectedSubstrate;
     const amount = Number(receiveAmount);
@@ -1638,6 +1643,7 @@ export default function Home() {
     }
   }, [tab, selectedSubstrate, loadExileRecords]);
 
+  // Load (or clear) the amount-range transit events for the Receive tab.
   useEffect(() => {
     if (tab === "receive" && selectedSubstrate) {
       loadReceiveEvents();
@@ -1862,9 +1868,6 @@ export default function Home() {
       flow: receiveFlow,
       substrate: selectedSubstrate,
     });
-
-    // Reload persisted events after successful execution
-    void loadReceiveEvents();
   }
 
   async function handleSubmit(event) {
@@ -2908,4 +2911,3 @@ export default function Home() {
     </div>
   );
 }
-
