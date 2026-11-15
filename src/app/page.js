@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 // Substrate state lives in the machine-local ~/.qp/substrates and is operated
 // on by the QP runtime. Inside a native shell (for example Tauri) the console
 // calls that runtime directly through IPC: no HTTP. A plain browser cannot
-// reach the local filesystem, so it uses an optional bridge to a runtime.
+// reach the local filesystem, so it uses the qtm-api HTTP server.
 // Prefer NEXT_PUBLIC_QTM_API_BASE when set; otherwise fall back to the public
 // qtm-api deployment so a Vercel (or similar) host never routes /wallets to
 // itself.
@@ -24,6 +24,121 @@ const API_BASE = (
   "https://qtm-api.onrender.com"
 ).replace(/\/+$/, "");
 
+const isRecord = (value) =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+const objectAt = (source, keys) => {
+  if (!isRecord(source)) return undefined;
+
+  for (const key of keys) {
+    if (isRecord(source[key])) return source[key];
+  }
+
+  return undefined;
+};
+
+const valueAt = (source, keys) => {
+  if (!isRecord(source)) return undefined;
+
+  for (const key of keys) {
+    if (source[key] !== null && source[key] !== undefined) {
+      return source[key];
+    }
+  }
+
+  return undefined;
+};
+
+const formatKey = (key) =>
+  String(key)
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+
+function friendlyValue(value) {
+  if (value === null || value === undefined || value === "") {
+    return "Not provided";
+  }
+
+  if (typeof value === "boolean") {
+    return value ? "Yes" : "No";
+  }
+
+  if (["string", "number", "bigint"].includes(typeof value)) {
+    return String(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value.length ? `${value.length} items` : "None";
+  }
+
+  return "Details available";
+}
+
+function flatten(value, prefix = "", rows = []) {
+  if (value === null || value === undefined) {
+    if (prefix) rows.push([prefix, "Not provided"]);
+  } else if (Array.isArray(value)) {
+    if (!value.length && prefix) {
+      rows.push([prefix, "None"]);
+    }
+
+    value.forEach((item, index) => {
+      flatten(item, `${prefix || "Item"} ${index + 1}`, rows);
+    });
+  } else if (isRecord(value)) {
+    const entries = Object.entries(value);
+
+    if (!entries.length && prefix) {
+      rows.push([prefix, "No details returned"]);
+    }
+
+    entries.forEach(([key, child]) => {
+      flatten(
+        child,
+        prefix ? `${prefix} · ${formatKey(key)}` : formatKey(key),
+        rows
+      );
+    });
+  } else {
+    rows.push([prefix || "Value", friendlyValue(value)]);
+  }
+
+  return rows;
+}
+
+function hasContent(value) {
+  return (
+    value !== null &&
+    value !== undefined &&
+    (typeof value !== "object" ||
+      (Array.isArray(value)
+        ? value.length > 0
+        : Object.keys(value).length > 0))
+  );
+}
+
+class RuntimeError extends Error {
+  constructor(message, details = {}) {
+    super(message);
+    this.name = "RuntimeError";
+    this.status = details.status ?? 0;
+    this.statusText = details.statusText ?? "";
+    this.url = details.url ?? "";
+    this.body = details.body;
+  }
+}
+
+// Native IPC entry point, present only inside a native shell.
+function nativeInvoke() {
+  if (typeof window === "undefined") return null;
+
+  return (
+    window.__TAURI__?.core?.invoke ??
+    window.__TAURI_INTERNALS__?.invoke ??
+    null
+  );
+}
 
 const NATIVE_COMMANDS = {
   listSubstrates: "qtm_list_substrates",
@@ -101,6 +216,7 @@ function parseApiResponse(raw) {
 }
 
 async function apiRequest(path, options = {}) {
+  const method = options.method || "GET";
   const url = `${API_BASE}${path}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 45000);
@@ -109,7 +225,7 @@ async function apiRequest(path, options = {}) {
 
   try {
     response = await fetch(url, {
-      method: options.method || "GET",
+      method,
       headers: {
         Accept: "application/json",
         ...(options.body !== undefined
@@ -129,8 +245,8 @@ async function apiRequest(path, options = {}) {
 
     throw new RuntimeError(
       timedOut
-        ? `The QTM API did not respond within 45 seconds: ${url}`
-        : `Could not reach the QTM API at ${API_BASE}: ${
+        ? `The QTM API did not respond within 45 seconds: ${method} ${url}`
+        : `Could not reach the QTM API at ${API_BASE} while calling ${method} ${path}: ${
             cause instanceof Error ? cause.message : "network error"
           }`,
       { status: 0, url }
@@ -145,7 +261,7 @@ async function apiRequest(path, options = {}) {
     raw = await response.text();
   } catch (cause) {
     throw new RuntimeError(
-      `The QTM API connection closed before the response was read: ${directMessage(cause)}`,
+      `The QTM API connection closed before the response was read (${method} ${path}): ${directMessage(cause)}`,
       {
         status: response.status,
         statusText: response.statusText,
@@ -171,7 +287,7 @@ async function apiRequest(path, options = {}) {
     throw new RuntimeError(
       `${reason} [HTTP ${response.status}${
         response.statusText ? ` ${response.statusText}` : ""
-      }]`,
+      } · ${method} ${path}]`,
       {
         status: response.status,
         statusText: response.statusText,
@@ -232,7 +348,6 @@ async function callRuntime(operation, args = {}) {
     body: method === "POST" ? payload.request : undefined,
   });
 }
-
 
 
 function eventMapOf(source) {
@@ -310,7 +425,7 @@ function ResultSection({
   const [open, setOpen] = useState(defaultOpen);
 
   return (
-    <section className="overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-800">
+    <section className="overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-800">
       <button
         type="button"
         aria-expanded={open}
@@ -329,7 +444,7 @@ function ResultSection({
 
         <span
           aria-hidden="true"
-          className={`flex size-7 shrink-0 items-center justify-center rounded-md border border-zinc-200 transition-transform dark:border-zinc-700 ${
+          className={`flex size-7 shrink-0 items-center justify-center rounded-lg border border-zinc-200 transition-transform dark:border-zinc-700 ${
             open ? "rotate-180" : ""
           }`}
         >
@@ -373,7 +488,7 @@ function Field({
         onChange={(event) => onChange(event.target.value)}
         required={required}
         placeholder={placeholder}
-        className={`h-9 w-full rounded-md border border-zinc-300 bg-white px-3 text-xs text-zinc-900 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800 ${
+        className={`h-9 w-full rounded-lg border border-zinc-300 bg-white px-3 text-xs text-zinc-900 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800 ${
           mono ? "font-mono" : ""
         }`}
       />
@@ -393,7 +508,7 @@ function NumberField({ label, value, onChange, min = 0 }) {
         value={value}
         onChange={(event) => onChange(event.target.value)}
         required
-        className="h-9 w-full rounded-md border border-zinc-300 bg-white px-2.5 font-mono text-xs text-zinc-900 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800"
+        className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-2.5 font-mono text-xs text-zinc-900 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800"
       />
     </label>
   );
@@ -451,7 +566,7 @@ function ReceiveOrdinalSelector({ amount, ordinal, onChange }) {
           aria-pressed={isSelected}
           aria-label={`Ordinal ${id}`}
           onClick={() => onChange(id)}
-          className={`flex h-[46px] flex-col items-center justify-center rounded-md border px-1 text-center transition-colors ${
+          className={`flex h-[46px] flex-col items-center justify-center rounded-lg border px-1 text-center transition-colors ${
             isSelected
               ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-950"
               : "border-zinc-200 bg-zinc-50 hover:border-zinc-400 hover:bg-white dark:border-zinc-700 dark:bg-zinc-950 dark:hover:border-zinc-500 dark:hover:bg-zinc-900"
@@ -502,7 +617,7 @@ function ReceiveOrdinalSelector({ amount, ordinal, onChange }) {
 
       <div
         onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
-        className="overflow-y-auto rounded-md border border-zinc-200 p-1.5 dark:border-zinc-800"
+        className="overflow-y-auto rounded-lg border border-zinc-200 p-1.5 dark:border-zinc-800"
         style={{ height: ORDINAL_VIEWPORT_HEIGHT }}
       >
         <div
@@ -612,7 +727,7 @@ function Frame({ eyebrow, title, tone = "default", actions, children }) {
 
   return (
     <section
-      className={`flex min-w-0 flex-col overflow-hidden rounded-md border sm:aspect-[2/1] ${toneClass}`}
+      className={`flex min-w-0 flex-col overflow-hidden rounded-xl border sm:aspect-[2/1] ${toneClass}`}
     >
       <div className="flex shrink-0 items-start justify-between gap-2 border-b border-inherit px-3 py-2">
         <div className="min-w-0">
@@ -643,7 +758,7 @@ function FrameButton({ onClick, disabled, children }) {
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="rounded-md border border-zinc-300 bg-white px-2 py-1 text-[11px] font-medium hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+      className="rounded-lg border border-zinc-300 bg-white px-2 py-1 text-[11px] font-medium hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
     >
       {children}
     </button>
@@ -728,8 +843,7 @@ function OpenResults({ result }) {
           submission: result.ordinal,
           network: result.network,
           field: "xpriv",
-        },
-        true
+        }
       );
 
       setPrivateKey(
@@ -750,7 +864,7 @@ function OpenResults({ result }) {
 
     return (
   <div className="space-y-3">
-    <section className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+    <section className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
       <h3 className="text-xs font-semibold">Receive event identity</h3>
 
       <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
@@ -825,7 +939,7 @@ function OpenResults({ result }) {
                 value={result?.derivations?.address}
               />
 
-              <div className="space-y-2 rounded-md border border-amber-300 p-3 dark:border-amber-800">
+              <div className="space-y-2 rounded-lg border border-amber-300 p-3 dark:border-amber-800">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-xs font-semibold">
                     Private extended key · Xpriv
@@ -850,7 +964,7 @@ function OpenResults({ result }) {
                 )}
 
                 {privateKey && (
-                  <p className="break-all rounded-md bg-amber-100 p-2 font-mono text-xs text-amber-950 dark:bg-amber-950 dark:text-amber-100">
+                  <p className="break-all rounded-lg bg-amber-100 p-2 font-mono text-xs text-amber-950 dark:bg-amber-950 dark:text-amber-100">
                     {privateKey}
                   </p>
                 )}
@@ -1033,7 +1147,7 @@ function ExileResults({ result, substrate }) {
       />
 
       {depth && (
-        <section className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+        <section className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
           <h3 className="text-xs font-semibold">Exile depth record</h3>
 
           <p className="mt-2 break-all font-mono text-xs text-zinc-500 dark:text-zinc-400">
@@ -1148,8 +1262,8 @@ export default function Home() {
     setRuntimeMode(
       nativeInvoke()
         ? "local QP runtime (native)"
-        : BRIDGE_BASE
-          ? `bridge ${BRIDGE_BASE}`
+        : API_BASE
+          ? `API ${API_BASE}`
           : "not available in this browser"
     );
   }, []);
@@ -1557,8 +1671,7 @@ export default function Home() {
           {
             name: selectedSubstrate,
             activation: ordinal,
-          },
-          true
+          }
         );
 
         if (!opened || !opened.event) {
@@ -1617,8 +1730,7 @@ export default function Home() {
             request: {
               network: selectedNetwork,
             },
-          },
-          true
+          }
         );
 
         // Step 3: Retrieve public derivation values for the same
@@ -1632,8 +1744,7 @@ export default function Home() {
               submission: ordinal,
               network: selectedNetwork,
               field,
-            },
-            true
+            }
           );
 
                  const [
@@ -1709,11 +1820,6 @@ export default function Home() {
         });
         setResult(data);
 
-        await Promise.all([
-          loadSubstrates(),
-          loadExileRecords(),
-        ]);
-
         return;
       }
 
@@ -1726,10 +1832,7 @@ export default function Home() {
         });
         setResult(data);
 
-        await Promise.all([
-          loadExileRecords(),
-          loadSubstrates(),
-        ]);
+        await loadExileRecords();
       }
     } catch (err) {
       setError(
@@ -1801,7 +1904,7 @@ export default function Home() {
           </p>
         </header>
 
-        <section className="mb-3 rounded-md border border-zinc-200 bg-white p-2.5 shadow-sm sm:p-3 dark:border-zinc-800 dark:bg-zinc-900">
+        <section className="mb-3 rounded-xl border border-zinc-200 bg-white p-2.5 shadow-sm sm:p-3 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="mb-2 flex items-center justify-between gap-3">
             <label htmlFor="substrate" className="text-xs font-semibold">
               Active substrate
@@ -1811,7 +1914,7 @@ export default function Home() {
               type="button"
               onClick={() => loadSubstrates()}
               disabled={listLoading}
-              className="rounded-md px-2.5 py-1.5 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-800"
+              className="rounded-lg px-2.5 py-1.5 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-800"
             >
               {listLoading ? "Refreshing…" : "Refresh"}
             </button>
@@ -1824,7 +1927,7 @@ export default function Home() {
               handleSubstrateChange(event.target.value)
             }
             disabled={listLoading || loading || !substrates.length}
-            className="h-9 w-full rounded-md border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-950 dark:focus:ring-zinc-800"
+            className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-950 dark:focus:ring-zinc-800"
           >
             {!substrates.length && (
               <option value="">
@@ -1845,7 +1948,7 @@ export default function Home() {
 
           {selectedSubstrate && (
             <div className="mt-3 space-y-2">
-              <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2.5 dark:border-zinc-800 dark:bg-zinc-950">
+              <div className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5 dark:border-zinc-800 dark:bg-zinc-950">
                 <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                   State context
                 </p>
@@ -1876,7 +1979,7 @@ export default function Home() {
           {listError && (
             <p
               role="status"
-              className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
+              className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
             >
               Substrate list unavailable: {listError} You can still create a
               substrate in the Create tab.
@@ -1896,7 +1999,7 @@ export default function Home() {
         >
           <a
             href={linkWithSubstrate("/eventstore")}
-            className="block rounded-md border border-zinc-200 bg-white px-3 py-2.5 shadow-sm transition-colors hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-600 dark:hover:bg-zinc-800/60"
+            className="block rounded-lg border border-zinc-200 bg-white px-3 py-2.5 shadow-sm transition-colors hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-600 dark:hover:bg-zinc-800/60"
           >
             <div className="flex items-center justify-between gap-3">
               <div>
@@ -1913,7 +2016,7 @@ export default function Home() {
                 </p>
               </div>
 
-              <span className="rounded-md border border-zinc-300 px-2 py-1 text-[11px] font-medium dark:border-zinc-700">
+              <span className="rounded-lg border border-zinc-300 px-2 py-1 text-[11px] font-medium dark:border-zinc-700">
                 Open
               </span>
             </div>
@@ -1921,7 +2024,7 @@ export default function Home() {
 
           <a
             href={linkWithSubstrate("/network")}
-            className="block rounded-md border border-zinc-200 bg-white px-3 py-2.5 shadow-sm transition-colors hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-600 dark:hover:bg-zinc-800/60"
+            className="block rounded-lg border border-zinc-200 bg-white px-3 py-2.5 shadow-sm transition-colors hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-600 dark:hover:bg-zinc-800/60"
           >
             <div className="flex items-center justify-between gap-3">
               <div>
@@ -1938,7 +2041,7 @@ export default function Home() {
                 </p>
               </div>
 
-              <span className="rounded-md border border-zinc-300 px-2 py-1 text-[11px] font-medium dark:border-zinc-700">
+              <span className="rounded-lg border border-zinc-300 px-2 py-1 text-[11px] font-medium dark:border-zinc-700">
                 Open
               </span>
             </div>
@@ -1947,7 +2050,7 @@ export default function Home() {
 
         <nav
           aria-label="Substrate operations"
-          className="mb-3 grid grid-cols-4 gap-1 rounded-md border border-zinc-200 bg-zinc-100/80 p-1 dark:border-zinc-800 dark:bg-zinc-900"
+          className="mb-3 grid grid-cols-4 gap-1 rounded-lg border border-zinc-200 bg-zinc-100/80 p-1 dark:border-zinc-800 dark:bg-zinc-900"
         >
           {TABS.map((item) => (
             <button
@@ -1959,7 +2062,7 @@ export default function Home() {
                 setResult(null);
                 setError("");
               }}
-              className={`rounded-md px-1.5 py-2 text-xs font-medium transition-colors sm:px-2 ${
+              className={`rounded-lg px-1.5 py-2 text-xs font-medium transition-colors sm:px-2 ${
                 tab === item.id
                   ? "bg-white text-zinc-950 shadow-sm dark:bg-zinc-800 dark:text-zinc-50"
                   : "text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-100"
@@ -1970,7 +2073,7 @@ export default function Home() {
           ))}
         </nav>
 
-        <section className="rounded-md border border-zinc-200 bg-white p-3 shadow-sm sm:p-3.5 dark:border-zinc-800 dark:bg-zinc-900">
+        <section className="rounded-2xl border border-zinc-200 bg-white p-3 shadow-sm sm:p-3.5 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="mb-4">
             <h2 className="text-sm font-semibold">
               {TABS.find((item) => item.id === tab)?.label}
@@ -2012,7 +2115,7 @@ export default function Home() {
                         setSeedSource(source);
                         setError("");
                       }}
-                      className={`rounded-md border px-3 py-3 text-left transition-colors ${
+                      className={`rounded-lg border px-3 py-3 text-left transition-colors ${
                         seedSource === source
                           ? "border-zinc-500 bg-zinc-50 dark:bg-zinc-800/70"
                           : "border-zinc-200 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/50"
@@ -2051,7 +2154,7 @@ export default function Home() {
                     />
                   </>
                 ) : (
-                  <div className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+                  <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
                     <label className="flex flex-col gap-1">
                       <span className="text-xs font-medium">
                         BIP39 language
@@ -2063,7 +2166,7 @@ export default function Home() {
                           setLanguage(event.target.value)
                         }
                         required
-                        className="h-9 rounded-md border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                        className="h-9 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
                       >
                         <option value="">Select language</option>
                         <option value="english">English</option>
@@ -2099,7 +2202,7 @@ export default function Home() {
                         autoCorrect="off"
                         spellCheck={false}
                         placeholder="Enter words in the selected language"
-                        className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                        className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900"
                       />
                     </label>
 
@@ -2121,7 +2224,7 @@ export default function Home() {
             )}
 
                         {tab === "open" && (
-              <div className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+              <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
                 <div>
                   <h3 className="text-xs font-semibold">
                     Open substrate and receive
@@ -2134,7 +2237,7 @@ export default function Home() {
                   </p>
                 </div>
 
-                <div className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
                   <p className="text-xs font-medium">
                     Selected substrate
                   </p>
@@ -2155,7 +2258,7 @@ export default function Home() {
                       handleNetworkChange(event.target.value)
                     }
                     disabled={networkLoading || !networks.length}
-                    className="h-9 min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                    className="h-9 min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
                   >
                     {!networks.length && (
                       <option value="">
@@ -2174,7 +2277,7 @@ export default function Home() {
                 {networkError && (
                   <p
                     role="alert"
-                    className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
+                    className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
                   >
                     Networks could not be loaded: {networkError}{" "}
                     <button
@@ -2205,7 +2308,7 @@ export default function Home() {
                       onChange={(event) =>
                         setReceiveFlow(event.target.value)
                       }
-                      className="h-9 rounded-md border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                      className="h-9 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
                     >
                       <option value="receive">Receive</option>
                       <option value="change">Change</option>
@@ -2238,7 +2341,7 @@ export default function Home() {
 
             {tab === "transit" && (
               <>
-                <div className="rounded-md border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+                <div className="rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
                   <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                     Transition state context
                   </p>
@@ -2264,7 +2367,7 @@ export default function Home() {
                         handleNetworkChange(event.target.value)
                       }
                       disabled={networkLoading || !networks.length}
-                      className="h-9 min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                      className="h-9 min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
                     >
                       {!networks.length && (
                         <option value="">
@@ -2328,7 +2431,7 @@ export default function Home() {
                 {networkError && (
                   <p
                     role="alert"
-                    className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
+                    className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
                   >
                     Networks could not be loaded: {networkError}{" "}
                     <button
@@ -2352,7 +2455,7 @@ export default function Home() {
             )}
 
             {tab === "exile" && (
-              <section className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+              <section className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
                 <div>
                   <h3 className="text-xs font-semibold">
                     Persisted event history
@@ -2385,7 +2488,7 @@ export default function Home() {
                       !selectedSubstrate ||
                       loading
                     }
-                    className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-xs font-medium hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+                    className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-medium hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
                   >
                     {exileRecordsLoading
                       ? "Refreshing…"
@@ -2396,7 +2499,7 @@ export default function Home() {
                 {exileRecordsError && (
                   <p
                     role="status"
-                    className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
+                    className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
                   >
                     {exileRecordsError}
                   </p>
@@ -2408,7 +2511,7 @@ export default function Home() {
                   </p>
 
                   {!exileRecords.length ? (
-                    <p className="rounded-md border border-zinc-200 bg-white p-3 text-xs text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
+                    <p className="rounded-lg border border-zinc-200 bg-white p-3 text-xs text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
                       No event records were returned. Record a transit
                       event, then refresh this list.
                     </p>
@@ -2417,7 +2520,7 @@ export default function Home() {
                       return (
                         <div
                           key={`${recordNameOf(record) || "record"}-${index}`}
-                          className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900"
+                          className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900"
                         >
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <p className="break-all font-mono text-xs font-medium">
@@ -2425,7 +2528,7 @@ export default function Home() {
                                 `Persisted record ${index + 1}`}
                             </p>
 
-                            <span className="rounded-md border border-zinc-200 px-2 py-1 text-[10px] font-medium dark:border-zinc-700">
+                            <span className="rounded-lg border border-zinc-200 px-2 py-1 text-[10px] font-medium dark:border-zinc-700">
                               {formatKey(
                                 valueAt(record, ["kind", "type"]) ?? "record"
                               )}
@@ -2452,7 +2555,7 @@ export default function Home() {
                 ((tab === "transit" || tab === "open") &&
                   (networkLoading || !selectedNetwork))
               }
-              className="mt-1 inline-flex min-h-10 items-center justify-center rounded-md bg-zinc-950 px-5 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
+              className="mt-1 inline-flex min-h-10 items-center justify-center rounded-lg bg-zinc-950 px-5 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
             >
               {loading
                 ? "Processing…"
@@ -2470,7 +2573,7 @@ export default function Home() {
         {error && (
           <p
             role="alert"
-            className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-3 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
+            className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-3 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
           >
             {error}
           </p>
