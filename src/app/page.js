@@ -784,11 +784,11 @@ function OpenResults({ result }) {
   const commitment = valueAt(qtmValues, ["commitment"]);
   const networkOption = result?.network_option;
 
-  const identity = {
+    const identity = {
     substrate: result?.substrate,
     network: result?.network,
     activation: result?.activation,
-    submission: result?.ordinal,
+    submission: result?.submission,
     flow: result?.flow,
     commitment,
   };
@@ -817,10 +817,10 @@ function OpenResults({ result }) {
     try {
       const value = await callRuntime(
         "submissionValue",
-        {
+                  {
           name: result.substrate,
           activation: result.activation,
-          submission: result.ordinal,
+          submission: result.submission,
           network: result.network,
           field: "xpriv",
         }
@@ -885,7 +885,7 @@ function OpenResults({ result }) {
             value={{
               network: result?.network,
               activation: result?.activation,
-              submission: result?.ordinal,
+              submission: result?.submission,
               derivation_path: result?.derivation?.derivation_path,
               master_fingerprint: result?.derivations?.fingerprint,
             }}
@@ -1683,45 +1683,33 @@ export default function Home() {
           );
         }
 
-        // The submission is always the selected ordinal.
-        // Activation comes from the received event's own heritage state.
-        const receivedActivation = Number(
-          valueAt(state, ["activations"]) ??
-            valueAt(transaction, ["amount"])
-        );
+                // The selected ordinal identifies the persisted activation.
+        const activation = ordinal;
 
-        if (
-          !Number.isSafeInteger(receivedActivation) ||
-          receivedActivation < 0
-        ) {
-          throw new Error(
-            "The received event did not return a valid activation."
-          );
-        }
+        // First derivation submission for this activation.
+        const submission = 1;
 
-        // Step 2: Derive and persist values for this exact submission.
-        // This is deliberately after successful receive.
+        // Step 2: Derive and persist against the selected activation.
         const derivation = await callRuntime(
           "deriveSubmission",
           {
             name: selectedSubstrate,
-            activation: receivedActivation,
-            submission: ordinal,
+            activation,
+            submission,
             request: {
               network: selectedNetwork,
             },
           }
         );
 
-        // Step 3: Retrieve public derivation values for the same
-        // substrate / activation / submission.
-          const readValue = (field) =>
+        // Step 3: Retrieve values from the same activation and submission.
+        const readValue = (field) =>
           callRuntime(
             "submissionValue",
             {
               name: selectedSubstrate,
-              activation: receivedActivation,
-              submission: ordinal,
+              activation,
+              submission,
               network: selectedNetwork,
               field,
             }
@@ -1758,7 +1746,8 @@ export default function Home() {
           network: selectedNetwork,
           network_option: currentNetwork,
           ordinal,
-          activation: receivedActivation,
+          activation,
+          submission,
           flow: receiveFlow,
           substrate: selectedSubstrate,
         });
