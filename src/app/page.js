@@ -498,10 +498,10 @@ function NumberField({ label, value, onChange, min = 0 }) {
 // container, so there is no display cutoff and every ordinal stays reachable.
 // When amount changes to N the frame loads persisted events for that range
 // (0..N) and marks every ordinal backed by a persisted transit event with a
-// light primary-blue background. Only kind === "transit" is considered.
+
 const ORDINAL_COLUMNS = 8;
-const ORDINAL_ROW_HEIGHT = 52;
-const ORDINAL_VIEWPORT_HEIGHT = 208;
+const ORDINAL_ROW_HEIGHT = 38;
+const ORDINAL_VIEWPORT_HEIGHT = 190;
 const ORDINAL_OVERSCAN = 2;
 
 function ReceiveOrdinalSelector({
@@ -551,11 +551,11 @@ function ReceiveOrdinalSelector({
 
       const cellClass = isPersisted
         ? isSelected
-          ? "border-blue-600 bg-blue-200 text-blue-950 ring-2 ring-blue-500 dark:border-blue-400 dark:bg-blue-950/70 dark:text-blue-100"
-          : "border-blue-300 bg-blue-100 text-blue-950 hover:bg-blue-200 dark:border-blue-800 dark:bg-blue-950/50 dark:text-blue-200 dark:hover:bg-blue-900/70"
+          ? "border-emerald-600 bg-emerald-200 text-emerald-950 dark:border-emerald-400 dark:bg-emerald-900/70 dark:text-emerald-100"
+          : "border-emerald-300 bg-emerald-100 text-emerald-950 hover:bg-emerald-200 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200 dark:hover:bg-emerald-900/70"
         : isSelected
           ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-950"
-          : "border-zinc-200 bg-zinc-50 hover:border-zinc-400 hover:bg-white dark:border-zinc-700 dark:bg-zinc-950 dark:hover:border-zinc-500 dark:hover:bg-zinc-900";
+          : "border-zinc-200 bg-zinc-50 text-zinc-800 hover:border-zinc-400 hover:bg-white dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200 dark:hover:border-zinc-500 dark:hover:bg-zinc-900";
 
       cells.push(
         <button
@@ -564,12 +564,11 @@ function ReceiveOrdinalSelector({
           aria-pressed={isSelected}
           aria-label={`Ordinal ${id}${isPersisted ? ", persisted transit" : ""}`}
           onClick={() => onChange(id)}
-          className={`flex h-[46px] flex-col items-center justify-center rounded-lg border px-1 text-center transition-colors ${cellClass}`}
+          className={`flex h-8 min-w-0 items-center justify-center rounded-md border px-0.5 text-center transition-colors ${cellClass}`}
         >
-          <span className="text-[10px] opacity-70">
-            {isPersisted ? "Persisted" : "Unit"}
+          <span className="font-mono text-xs font-semibold leading-none">
+            {id}
           </span>
-          <span className="font-mono text-sm font-semibold">{id}</span>
         </button>
       );
     }
@@ -577,7 +576,7 @@ function ReceiveOrdinalSelector({
     rows.push(
       <div
         key={row}
-        className="grid gap-1.5 pb-1.5"
+        className="grid gap-1 pb-1"
         style={{
           height: ORDINAL_ROW_HEIGHT,
           gridTemplateColumns: `repeat(${ORDINAL_COLUMNS}, minmax(0, 1fr))`,
@@ -589,19 +588,19 @@ function ReceiveOrdinalSelector({
   }
 
   return (
-    <section className="space-y-2">
+    <section className="space-y-1.5">
       <div>
         <h4 className="text-xs font-semibold">
-          Ordinal persistence · Range 0–{count}
+          Ordinal units · Range 0–{count}
         </h4>
-        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+        <p className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
           {persisted.size} persisted transit(s) · {count} available coordinates
           · Selected {Number.isSafeInteger(selected) ? selected : "none"}
         </p>
       </div>
 
       {persistedLoading && (
-        <p className="text-xs text-blue-600 dark:text-blue-400">
+        <p className="text-xs text-emerald-600 dark:text-emerald-400">
           Loading persisted events…
         </p>
       )}
@@ -614,7 +613,7 @@ function ReceiveOrdinalSelector({
 
       <div
         onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
-        className="overflow-y-auto rounded-lg border border-zinc-200 p-1.5 dark:border-zinc-800"
+        className="overflow-y-auto rounded-lg border border-zinc-200 p-1 dark:border-zinc-800"
         style={{ height: ORDINAL_VIEWPORT_HEIGHT }}
       >
         <div
@@ -630,15 +629,16 @@ function ReceiveOrdinalSelector({
         </div>
       </div>
 
-      <div className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-        <span className="size-3 rounded border border-blue-300 bg-blue-100 dark:border-blue-800 dark:bg-blue-950/50" />
+      <div className="flex items-center gap-2 text-[10px] text-zinc-500 dark:text-zinc-400">
+        <span className="size-2.5 rounded-sm border border-emerald-300 bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/50" />
         Persisted transit
-        <span className="ml-3 size-3 rounded border border-zinc-300 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900" />
+        <span className="ml-2 size-2.5 rounded-sm border border-zinc-300 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900" />
         No persisted transit
       </div>
     </section>
   );
 }
+
 
 function eventRecordsOf(source) {
   const candidates = [
