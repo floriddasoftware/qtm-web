@@ -218,8 +218,6 @@ function parseApiResponse(raw) {
 async function apiRequest(path, options = {}) {
   const method = options.method || "GET";
   const url = `${API_BASE}${path}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 45000);
 
   let response;
 
@@ -237,22 +235,13 @@ async function apiRequest(path, options = {}) {
         ? { body: JSON.stringify(options.body) }
         : {}),
       cache: "no-store",
-      signal: options.signal || controller.signal,
+      ...(options.signal ? { signal: options.signal } : {}),
     });
   } catch (cause) {
-    const timedOut =
-      cause?.name === "AbortError" || controller.signal.aborted;
-
     throw new RuntimeError(
-      timedOut
-        ? `The QTM API did not respond within 45 seconds: ${method} ${url}`
-        : `Could not reach the QTM API at ${API_BASE} while calling ${method} ${path}: ${
-            cause instanceof Error ? cause.message : "network error"
-          }`,
+      `Could not reach the QTM API at ${API_BASE} while calling ${method} ${path}: ${directMessage(cause)}`,
       { status: 0, url }
     );
-  } finally {
-    clearTimeout(timeout);
   }
 
   let raw;
@@ -275,19 +264,10 @@ async function apiRequest(path, options = {}) {
   if (!response.ok) {
     const message = valueAt(data, ["error", "message", "detail"]);
 
-    const reason =
+    throw new RuntimeError(
       typeof message === "string" && message.trim()
         ? message.trim()
-        : message !== undefined
-          ? JSON.stringify(message)
-          : raw
-            ? raw.slice(0, 500)
-            : "The API returned no error details.";
-
-    throw new RuntimeError(
-      `${reason} [HTTP ${response.status}${
-        response.statusText ? ` ${response.statusText}` : ""
-      } · ${method} ${path}]`,
+        : `Request failed with HTTP ${response.status}: ${method} ${path}`,
       {
         status: response.status,
         statusText: response.statusText,
