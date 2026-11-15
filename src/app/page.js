@@ -15,6 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 const TABS = [
   { id: "create", label: "Create" },
   { id: "open", label: "Open" },
+  { id: "derive", label: "Derive" },
   { id: "receive", label: "Receive" },
   { id: "transit", label: "Transit" },
   { id: "exile", label: "Exile" },
@@ -182,13 +183,11 @@ const API_ROUTES = {
     `/wallets/${encodeURIComponent(name)}/events`,
   ],
 
-  // Corrected Derive POST — network is not in the path; it travels in the body.
-  deriveSubmission: ({ name, activation, submission }) => [
+  deriveSubmission: ({ name, activation, submission, network }) => [
     "POST",
-    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/submissions/${encodeURIComponent(submission)}/derive`,
+    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/submissions/${encodeURIComponent(submission)}/networks/${encodeURIComponent(network)}/derive`,
   ],
 
-  // Network-scoped GET remains correct.
   submissionValue: ({ name, activation, submission, network, field }) => [
     "GET",
     `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/submissions/${encodeURIComponent(submission)}/networks/${encodeURIComponent(network)}/${encodeURIComponent(field)}`,
@@ -814,7 +813,7 @@ function OpenRecoveryResults({ result }) {
 }
 
 // ---------------------------------------------------------------------------
-// Independent Submission Derivation Results (now rendered inside Receive)
+// Operation 2: Independent Submission Derivation Results
 // ---------------------------------------------------------------------------
 function DeriveResults({ result }) {
   const [revealSensitive, setRevealSensitive] = useState(false);
@@ -1003,6 +1002,7 @@ function ReceiveResults({ result }) {
 
   const identity = {
     substrate: result?.substrate,
+    network: result?.network,
     ordinal: result?.ordinal,
     flow: result?.flow,
     commitment,
@@ -1209,7 +1209,7 @@ function ExileResults({ result, substrate }) {
             {depth.path || "Depth path not returned"}
           </p>
 
-          <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-300">
+          <p class="mt-2 text-xs text-zinc-600 dark:text-zinc-300">
             {objects.length} retained{" "}
             {objects.length === 1 ? "object" : "objects"} returned by the API.
           </p>
@@ -1239,6 +1239,8 @@ function ResultCard({ result, tab, network, path, substrate }) {
   return (
     <div className="mt-4 space-y-3">
       {tab === "open" && <OpenRecoveryResults result={result} />}
+
+      {tab === "derive" && <DeriveResults result={result} />}
 
       {tab === "receive" && <ReceiveResults result={result} />}
 
@@ -1305,13 +1307,10 @@ export default function Home() {
   // Recovery-only Open state
   const [openActivation, setOpenActivation] = useState("1");
 
-  // Receive-internal Derivation state
+  // Independent Derivation state
   const [deriveActivation, setDeriveActivation] = useState("1");
   const [deriveSubmission, setDeriveSubmission] = useState("1");
   const [deriveNetwork, setDeriveNetwork] = useState("");
-  const [deriveResult, setDeriveResult] = useState(null);
-  const [deriveLoading, setDeriveLoading] = useState(false);
-  const [deriveError, setDeriveError] = useState("");
 
   // Activation-scoped Receive state
   const [receiveAmount, setReceiveAmount] = useState("1");
@@ -1669,8 +1668,6 @@ export default function Home() {
     setSelectedSubstrate(value);
     setResult(null);
     setError("");
-    setDeriveResult(null);
-    setDeriveError("");
     setExileRecords([]);
     setExileRecordsError("");
     setReceiveEvents([]);
@@ -1681,6 +1678,7 @@ export default function Home() {
     const network = networks.find((item) => item.id === id);
 
     setSelectedNetwork(id);
+    setReceiveOrdinal("1");
     setResult(null);
     setError("");
 
@@ -1743,8 +1741,8 @@ export default function Home() {
   }
 
   // -------------------------------------------------------------------------
-  // 2. Independent Submission Derivation Handler (Receive-internal)
-  //    POST /wallets/:name/activations/:activation/submissions/:submission/derive
+  // 2. Independent Submission Derivation Handler
+  //    POST /wallets/:name/activations/:activation/submissions/:submission/networks/:network/derive
   //    with body { "network": deriveNetwork }
   // -------------------------------------------------------------------------
   async function handleIndependentDerivation() {
@@ -1767,6 +1765,7 @@ export default function Home() {
       name: selectedSubstrate,
       activation: activationNumber,
       submission: submissionNumber,
+      network: deriveNetwork,
       request: {
         network: deriveNetwork,
       },
@@ -1795,7 +1794,7 @@ export default function Home() {
       readValue("address"),
     ]);
 
-    setDeriveResult({
+    setResult({
       derivation,
       derivations: {
         fingerprint,
@@ -1811,24 +1810,6 @@ export default function Home() {
     });
   }
 
-  async function handleDerive() {
-    setDeriveLoading(true);
-    setDeriveError("");
-    setDeriveResult(null);
-
-    try {
-      await handleIndependentDerivation();
-    } catch (error) {
-      setDeriveError(
-        error instanceof Error
-          ? error.message
-          : "Submission derivation failed."
-      );
-    } finally {
-      setDeriveLoading(false);
-    }
-  }
-
   // -------------------------------------------------------------------------
   // 3. Activation-Scoped Receive Handler (POST /wallets/:name/receive)
   // -------------------------------------------------------------------------
@@ -1837,6 +1818,10 @@ export default function Home() {
 
     if (!Number.isSafeInteger(amount) || amount <= 0) {
       throw new Error("Receive amount must be a positive safe integer.");
+    }
+
+    if (!selectedNetwork) {
+      throw new Error("Select a coordination network before receiving.");
     }
 
     if (!["receive", "change"].includes(receiveFlow)) {
@@ -1857,6 +1842,7 @@ export default function Home() {
       name: selectedSubstrate,
       request: {
         amount,
+        network: selectedNetwork,
         flow: receiveFlow,
         ordinal,
       },
@@ -1876,6 +1862,8 @@ export default function Home() {
     setResult({
       receive,
       requested_amount: amount,
+      network: selectedNetwork,
+      network_option: currentNetwork,
       ordinal,
       flow: receiveFlow,
       substrate: selectedSubstrate,
@@ -1969,6 +1957,11 @@ export default function Home() {
 
       if (tab === "open") {
         await handleOpenRecovery();
+        return;
+      }
+
+      if (tab === "derive") {
+        await handleIndependentDerivation();
         return;
       }
 
@@ -2144,7 +2137,7 @@ export default function Home() {
                 </p>
 
                 <p className="mt-1 text-xs leading-4 text-zinc-500 dark:text-zinc-400">
-                  Open, Receive (with internal Derive), Transit, and Exile operate against
+                  Open, Derive, Receive, Transit, and Exile operate against
                   this substrate independently without implicit cross-triggering.
                 </p>
               </div>
@@ -2235,7 +2228,7 @@ export default function Home() {
 
         <nav
           aria-label="Substrate operations"
-          className="mb-3 grid grid-cols-3 gap-1 rounded-lg border border-zinc-200 bg-zinc-100/80 p-1 sm:grid-cols-5 dark:border-zinc-800 dark:bg-zinc-900"
+          className="mb-3 grid grid-cols-3 gap-1 rounded-lg border border-zinc-200 bg-zinc-100/80 p-1 sm:grid-cols-6 dark:border-zinc-800 dark:bg-zinc-900"
         >
           {TABS.map((item) => (
             <button
@@ -2246,8 +2239,6 @@ export default function Home() {
                 setTab(item.id);
                 setResult(null);
                 setError("");
-                setDeriveResult(null);
-                setDeriveError("");
               }}
               className={`rounded-lg px-1.5 py-2 text-xs font-medium transition-colors sm:px-2 ${
                 tab === item.id
@@ -2273,8 +2264,11 @@ export default function Home() {
               {tab === "open" &&
                 "Recovery-only operation: inspect and recover the persisted event at a specific activation ordinal without deriving keys or executing Receive."}
 
+              {tab === "derive" &&
+                "Independent submission derivation: establish the submission directory and derive network-scoped keys and address for an explicit activation, submission, and network."}
+
               {tab === "receive" &&
-                "Derive submission keys (network-scoped) and execute activation-scoped Receive or Change. The two operations remain independent."}
+                "Activation-scoped Receive: execute Receive or Change at a chosen ordinal independently of submission derivation."}
 
               {tab === "transit" &&
                 "Apply a network derivation request in the selected substrate's state context."}
@@ -2447,199 +2441,212 @@ export default function Home() {
               </div>
             )}
 
+            {tab === "derive" && (
+              <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+                <div>
+                  <h3 className="text-xs font-semibold">
+                    Submission key & address derivation
+                  </h3>
+
+                  <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                    Posts to /wallets/:name/activations/:activation/submissions/:submission/networks/:network/derive
+                    with explicit activation, submission, and network identity,
+                    then retrieves the derived values from the network-scoped endpoints.
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                  <p className="text-xs font-medium">Selected substrate</p>
+                  <p className="mt-1 break-all font-mono text-xs">
+                    {selectedSubstrate || "No substrate selected"}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <NumberField
+                    label="Activation"
+                    value={deriveActivation}
+                    onChange={(val) => {
+                      setDeriveActivation(val);
+                      setResult(null);
+                      setError("");
+                    }}
+                    min={1}
+                  />
+
+                  <NumberField
+                    label="Submission"
+                    value={deriveSubmission}
+                    onChange={(val) => {
+                      setDeriveSubmission(val);
+                      setResult(null);
+                      setError("");
+                    }}
+                    min={1}
+                  />
+                </div>
+
+                <label className="flex min-w-0 flex-col gap-1">
+                  <span className="text-xs font-medium">
+                    Network identity
+                  </span>
+
+                  <select
+                    value={deriveNetwork}
+                    onChange={(event) => {
+                      setDeriveNetwork(event.target.value);
+                      setResult(null);
+                      setError("");
+                    }}
+                    disabled={networkLoading || !networks.length}
+                    className="h-9 min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                  >
+                    {!networks.length && (
+                      <option value="">
+                        {networkLoading ? "Loading…" : "No networks"}
+                      </option>
+                    )}
+
+                    {networks.map((network) => (
+                      <option key={network.id} value={network.id}>
+                        {network.name} — {network.id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                {networkError && (
+                  <p
+                    role="alert"
+                    className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
+                  >
+                    Networks could not be loaded: {networkError}{" "}
+                    <button
+                      type="button"
+                      onClick={loadNetworks}
+                      className="font-semibold underline"
+                    >
+                      Retry
+                    </button>
+                  </p>
+                )}
+              </div>
+            )}
+
             {tab === "receive" && (
-              <div className="space-y-6">
-                {/* -------------------------------------------------------
-                    Section 1: Independent Submission Derivation
-                    Network is scoped only to this operation.
-                ------------------------------------------------------- */}
-                <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
-                  <div>
-                    <h3 className="text-xs font-semibold">
-                      Submission key & address derivation
-                    </h3>
+              <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+                <div>
+                  <h3 className="text-xs font-semibold">
+                    Activation-scoped Receive
+                  </h3>
 
-                    <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                      Posts to /wallets/:name/activations/:activation/submissions/:submission/derive
-                      with the chosen network in the request body, then retrieves
-                      the derived values from the network-scoped endpoints.
-                      Independent of Receive execution.
-                    </p>
-                  </div>
+                  <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                    Executes POST /wallets/:name/receive at a chosen ordinal
+                    coordinate. Independent of submission derivation.
+                  </p>
+                </div>
 
-                  <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-                    <p className="text-xs font-medium">Selected substrate</p>
-                    <p className="mt-1 break-all font-mono text-xs">
-                      {selectedSubstrate || "No substrate selected"}
-                    </p>
-                  </div>
+                <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                  <p className="text-xs font-medium">Selected substrate</p>
+                  <p className="mt-1 break-all font-mono text-xs">
+                    {selectedSubstrate || "No substrate selected"}
+                  </p>
+                </div>
 
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <NumberField
-                      label="Activation"
-                      value={deriveActivation}
-                      onChange={(val) => {
-                        setDeriveActivation(val);
-                        setDeriveResult(null);
-                        setDeriveError("");
-                      }}
-                      min={1}
-                    />
+                <label className="flex min-w-0 flex-col gap-1">
+                  <span className="text-xs font-medium">
+                    Coordination network
+                  </span>
 
-                    <NumberField
-                      label="Submission"
-                      value={deriveSubmission}
-                      onChange={(val) => {
-                        setDeriveSubmission(val);
-                        setDeriveResult(null);
-                        setDeriveError("");
-                      }}
-                      min={1}
-                    />
-                  </div>
+                  <select
+                    value={selectedNetwork}
+                    onChange={(event) =>
+                      handleNetworkChange(event.target.value)
+                    }
+                    disabled={networkLoading || !networks.length}
+                    className="h-9 min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                  >
+                    {!networks.length && (
+                      <option value="">
+                        {networkLoading ? "Loading…" : "No networks"}
+                      </option>
+                    )}
 
-                  <label className="flex min-w-0 flex-col gap-1">
+                    {networks.map((network) => (
+                      <option key={network.id} value={network.id}>
+                        {network.name} — {network.id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                {networkError && (
+                  <p
+                    role="alert"
+                    className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
+                  >
+                    Networks could not be loaded: {networkError}{" "}
+                    <button
+                      type="button"
+                      onClick={loadNetworks}
+                      className="font-semibold underline"
+                    >
+                      Retry
+                    </button>
+                  </p>
+                )}
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <NumberField
+                    label="Transaction amount (N)"
+                    value={receiveAmount}
+                    onChange={handleReceiveAmountChange}
+                    min={1}
+                  />
+
+                  <label className="flex flex-col gap-1">
                     <span className="text-xs font-medium">
-                      Network identity
+                      Receive flow
                     </span>
 
                     <select
-                      value={deriveNetwork}
-                      onChange={(event) => {
-                        setDeriveNetwork(event.target.value);
-                        setDeriveResult(null);
-                        setDeriveError("");
-                      }}
-                      disabled={networkLoading || !networks.length}
-                      className="h-9 min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                      value={receiveFlow}
+                      onChange={(event) =>
+                        setReceiveFlow(event.target.value)
+                      }
+                      className="h-9 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
                     >
-                      {!networks.length && (
-                        <option value="">
-                          {networkLoading ? "Loading…" : "No networks"}
-                        </option>
-                      )}
-
-                      {networks.map((network) => (
-                        <option key={network.id} value={network.id}>
-                          {network.name} — {network.id}
-                        </option>
-                      ))}
+                      <option value="receive">Receive</option>
+                      <option value="change">Change</option>
                     </select>
                   </label>
-
-                  {networkError && (
-                    <p
-                      role="alert"
-                      className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
-                    >
-                      Networks could not be loaded: {networkError}{" "}
-                      <button
-                        type="button"
-                        onClick={loadNetworks}
-                        className="font-semibold underline"
-                      >
-                        Retry
-                      </button>
-                    </p>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={handleDerive}
-                    disabled={
-                      deriveLoading ||
-                      !selectedSubstrate ||
-                      networkLoading ||
-                      !deriveNetwork
-                    }
-                    className="inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-300 bg-white px-4 py-2 text-xs font-semibold hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
-                  >
-                    {deriveLoading ? "Deriving…" : "Derive Submission"}
-                  </button>
-
-                  {deriveError && (
-                    <p
-                      role="alert"
-                      className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
-                    >
-                      {deriveError}
-                    </p>
-                  )}
-
-                  {deriveResult && (
-                    <div className="mt-3">
-                      <DeriveResults result={deriveResult} />
-                    </div>
-                  )}
                 </div>
 
-                {/* -------------------------------------------------------
-                    Section 2: Activation-scoped Receive
-                    Network is not part of this request.
-                ------------------------------------------------------- */}
-                <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
-                  <div>
-                    <h3 className="text-xs font-semibold">
-                      Activation-scoped Receive
-                    </h3>
-
-                    <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                      Executes POST /wallets/:name/receive at a chosen ordinal
-                      coordinate. Independent of submission derivation.
-                    </p>
-                  </div>
-
-                  <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-                    <p className="text-xs font-medium">Selected substrate</p>
-                    <p className="mt-1 break-all font-mono text-xs">
-                      {selectedSubstrate || "No substrate selected"}
-                    </p>
-                  </div>
-
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <NumberField
-                      label="Transaction amount (N)"
-                      value={receiveAmount}
-                      onChange={handleReceiveAmountChange}
-                      min={1}
+                {Number.isSafeInteger(Number(receiveAmount)) &&
+                  Number(receiveAmount) > 0 && (
+                    <ReceiveOrdinalSelector
+                      amount={receiveAmount}
+                      ordinal={receiveOrdinal}
+                      persistedOrdinals={receiveEvents.map((record) =>
+                        Number(record.activation)
+                      )}
+                      persistedLoading={receiveEventsLoading}
+                      persistedError={receiveEventsError}
+                      onChange={(n) => {
+                        setReceiveOrdinal(String(n));
+                        setResult(null);
+                        setError("");
+                      }}
                     />
+                  )}
 
-                    <label className="flex flex-col gap-1">
-                      <span className="text-xs font-medium">
-                        Receive flow
-                      </span>
-
-                      <select
-                        value={receiveFlow}
-                        onChange={(event) =>
-                          setReceiveFlow(event.target.value)
-                        }
-                        className="h-9 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
-                      >
-                        <option value="receive">Receive</option>
-                        <option value="change">Change</option>
-                      </select>
-                    </label>
-                  </div>
-
-                  {Number.isSafeInteger(Number(receiveAmount)) &&
-                    Number(receiveAmount) > 0 && (
-                      <ReceiveOrdinalSelector
-                        amount={receiveAmount}
-                        ordinal={receiveOrdinal}
-                        persistedOrdinals={receiveEvents.map((record) =>
-                          Number(record.activation)
-                        )}
-                        persistedLoading={receiveEventsLoading}
-                        persistedError={receiveEventsError}
-                        onChange={(n) => {
-                          setReceiveOrdinal(String(n));
-                          setResult(null);
-                          setError("");
-                        }}
-                      />
-                    )}
-                </div>
+                {currentNetwork && (
+                  <ResultSection
+                    title="Selected coordination network"
+                    description="Network parameter passed in the receive request."
+                    value={currentNetwork}
+                  />
+                )}
               </div>
             )}
 
@@ -2850,27 +2857,24 @@ export default function Home() {
               </section>
             )}
 
-            {/* Submit button — only shown for operations that use the form */}
-            {(tab === "create" ||
-              tab === "open" ||
-              tab === "receive" ||
-              tab === "transit" ||
-              tab === "exile") && (
-              <button
-                type="submit"
-                aria-busy={loading}
-                disabled={
-                  loading ||
-                  (substrateRequired && (listLoading || !selectedSubstrate)) ||
-                  (tab === "transit" &&
-                    (networkLoading || !selectedNetwork))
-                }
-                className="mt-1 inline-flex min-h-10 items-center justify-center rounded-lg bg-zinc-950 px-5 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
-              >
-                {loading
-                  ? "Processing…"
-                  : tab === "open"
-                    ? "Recover Persisted Ordinal"
+            <button
+              type="submit"
+              aria-busy={loading}
+              disabled={
+                loading ||
+                (substrateRequired && (listLoading || !selectedSubstrate)) ||
+                ((tab === "transit" || tab === "receive") &&
+                  (networkLoading || !selectedNetwork)) ||
+                (tab === "derive" && (networkLoading || !deriveNetwork))
+              }
+              className="mt-1 inline-flex min-h-10 items-center justify-center rounded-lg bg-zinc-950 px-5 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
+            >
+              {loading
+                ? "Processing…"
+                : tab === "open"
+                  ? "Recover Persisted Ordinal"
+                  : tab === "derive"
+                    ? "Derive Submission"
                     : tab === "receive"
                       ? "Execute Receive"
                       : tab === "transit"
@@ -2878,8 +2882,7 @@ export default function Home() {
                         : tab === "exile"
                           ? "Exile Selected Substrate"
                           : "Create Substrate"}
-              </button>
-            )}
+            </button>
           </form>
         </section>
 
