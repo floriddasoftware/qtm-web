@@ -1245,6 +1245,10 @@ export default function Home() {
   const [deriveActivation, setDeriveActivation] = useState("1");
   const [deriveSubmission, setDeriveSubmission] = useState("1");
   const [deriveNetwork, setDeriveNetwork] = useState("");
+  
+  const [deriveResult, setDeriveResult] = useState(null);
+  const [deriveError, setDeriveError] = useState("");
+  const [deriveLoading, setDeriveLoading] = useState(false);
 
   // Activation-scoped Receive state
   const [receiveAmount, setReceiveAmount] = useState("1");
@@ -1649,71 +1653,77 @@ export default function Home() {
   //    POST /wallets/:name/activations/:activation/submissions/:submission/networks/:network/derive
   //    with body { "network": deriveNetwork }
   // -------------------------------------------------------------------------
-  async function handleIndependentDerivation() {
-    const activationNumber = Number(deriveActivation);
-    const submissionNumber = Number(deriveSubmission);
+    async function handleIndependentDerivation() {
+    setDeriveError("");
+    setDeriveResult(null);
+    setDeriveLoading(true);
 
-    if (!Number.isSafeInteger(activationNumber) || activationNumber < 1) {
-      throw new Error("Activation must be a positive safe integer.");
-    }
+    try {
+      const activationNumber = Number(deriveActivation);
+      const submissionNumber = Number(deriveSubmission);
 
-    if (!Number.isSafeInteger(submissionNumber) || submissionNumber < 1) {
-      throw new Error("Submission must be a positive safe integer.");
-    }
+      if (!Number.isSafeInteger(activationNumber) || activationNumber < 1) {
+        throw new Error("Activation must be a positive safe integer.");
+      }
 
-    if (!deriveNetwork) {
-      throw new Error("Select a network identity for submission derivation.");
-    }
+      if (!Number.isSafeInteger(submissionNumber) || submissionNumber < 1) {
+        throw new Error("Submission must be a positive safe integer.");
+      }
 
-    const derivation = await callRuntime("deriveSubmission", {
-      name: selectedSubstrate,
-      activation: activationNumber,
-      submission: submissionNumber,
-      network: deriveNetwork,
-      request: {
-        network: deriveNetwork,
-      },
-    });
+      if (!deriveNetwork) {
+        throw new Error("Select a network identity for submission derivation.");
+      }
 
-    const readValue = (field) =>
-      callRuntime("submissionValue", {
+      const derivation = await callRuntime("deriveSubmission", {
         name: selectedSubstrate,
         activation: activationNumber,
         submission: submissionNumber,
         network: deriveNetwork,
-        field,
+        request: {
+          network: deriveNetwork,
+        },
       });
 
-    const [
-      fingerprint,
-      scriptpubkey,
-      xpub,
-      zpub,
-      address,
-    ] = await Promise.all([
-      readValue("fingerprint"),
-      readValue("scriptpubkey"),
-      readValue("xpub"),
-      readValue("zpub"),
-      readValue("address"),
-    ]);
+      const readValue = (field) =>
+        callRuntime("submissionValue", {
+          name: selectedSubstrate,
+          activation: activationNumber,
+          submission: submissionNumber,
+          network: deriveNetwork,
+          field,
+        });
 
-    setResult({
-      derivation,
-      derivations: {
-        fingerprint,
-        scriptpubkey,
-        xpub,
-        zpub,
-        address,
-      },
-      substrate: selectedSubstrate,
-      activation: activationNumber,
-      submission: submissionNumber,
-      network: deriveNetwork,
-    });
+      const [fingerprint, scriptpubkey, xpub, zpub, address] =
+        await Promise.all([
+          readValue("fingerprint"),
+          readValue("scriptpubkey"),
+          readValue("xpub"),
+          readValue("zpub"),
+          readValue("address"),
+        ]);
+
+      setDeriveResult({
+        derivation,
+        derivations: {
+          fingerprint,
+          scriptpubkey,
+          xpub,
+          zpub,
+          address,
+        },
+        substrate: selectedSubstrate,
+        activation: activationNumber,
+        submission: submissionNumber,
+        network: deriveNetwork,
+      });
+    } catch (err) {
+      setDeriveError(
+        err instanceof Error ? err.message : "Submission derivation failed."
+      );
+    } finally {
+      setDeriveLoading(false);
+    }
   }
-
   // -------------------------------------------------------------------------
   // 3. Activation-Scoped Receive Handler (POST /wallets/:name/receive)
   // -------------------------------------------------------------------------
