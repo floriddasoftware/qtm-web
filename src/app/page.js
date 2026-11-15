@@ -754,63 +754,6 @@ function Blurred({ revealed, children }) {
 }
 
 // ---------------------------------------------------------------------------
-// Operation 1: Recovery-Only Open Results
-// ---------------------------------------------------------------------------
-function OpenRecoveryResults({ result }) {
-  const substrate = objectAt(result?.opened, ["substrate"]);
-  const event = objectAt(result?.opened, ["event"]);
-  const heritage = objectAt(event, ["heritage"]);
-  const depth = objectAt(event, ["depth"]);
-
-  return (
-    <div className="space-y-3">
-      <section className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-        <h3 className="text-xs font-semibold">Recovered ordinal event</h3>
-        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-          Read-only recovery of persisted activation state without derivation or Receive execution.
-        </p>
-        <div className="mt-3">
-          <KeyValueList
-            value={{
-              substrate: result?.substrate,
-              activation: result?.activation,
-              record: valueAt(event, ["record"]),
-              scale: valueAt(event, ["scale"]),
-            }}
-          />
-        </div>
-      </section>
-
-      <ResultSection
-        title="Substrate state"
-        value={substrate}
-        defaultOpen
-      />
-
-      {event && (
-        <>
-          {heritage && (
-            <ResultSection
-              title="Recovered heritage"
-              value={heritage}
-              defaultOpen
-            />
-          )}
-          {depth && (
-            <ResultSection
-              title="Recovered depth"
-              value={depth}
-              defaultOpen
-            />
-          )}
-          <ResultSection title="Complete event payload" value={event} />
-        </>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Operation 2: Independent Submission Derivation Results
 // ---------------------------------------------------------------------------
 function DeriveResults({ result }) {
@@ -1236,9 +1179,6 @@ function ResultCard({ result, tab, network, path, substrate }) {
 
   return (
     <div className="mt-4 space-y-3">
-      {tab === "open" && <OpenRecoveryResults result={result} />}
-
-      {tab === "derive" && <DeriveResults result={result} />}
 
       {tab === "receive" && <ReceiveResults result={result} />}
 
@@ -1301,9 +1241,6 @@ export default function Home() {
   const [change, setChange] = useState("0");
   const [external, setExternal] = useState("0");
   const [activation, setActivation] = useState("1");
-
-  // Recovery-only Open state
-  const [openActivation, setOpenActivation] = useState("1");
 
   // Independent Derivation state
   const [deriveActivation, setDeriveActivation] = useState("1");
@@ -1706,36 +1643,6 @@ export default function Home() {
     } else if (ordinal > amount) {
       setReceiveOrdinal(String(amount));
     }
-  }
-
-  // -------------------------------------------------------------------------
-  // 1. Recovery-Only Open Handler (GET /wallets/:name/activations/:activation/open)
-  // -------------------------------------------------------------------------
-  async function handleOpenRecovery() {
-    const activationNumber = Number(openActivation);
-
-    if (!Number.isSafeInteger(activationNumber) || activationNumber < 1) {
-      throw new Error(
-        "Activation ordinal must be a positive safe integer."
-      );
-    }
-
-    const opened = await callRuntime("openSubstrate", {
-      name: selectedSubstrate,
-      activation: activationNumber,
-    });
-
-    if (!opened || !opened.event) {
-      throw new Error(
-        `Open did not return a persisted event at activation ${activationNumber}.`
-      );
-    }
-
-    setResult({
-      opened,
-      substrate: selectedSubstrate,
-      activation: activationNumber,
-    });
   }
 
   // -------------------------------------------------------------------------
@@ -2226,7 +2133,7 @@ export default function Home() {
 
         <nav
           aria-label="Substrate operations"
-          className="mb-3 grid grid-cols-3 gap-1 rounded-lg border border-zinc-200 bg-zinc-100/80 p-1 sm:grid-cols-6 dark:border-zinc-800 dark:bg-zinc-900"
+        className="mb-3 grid grid-cols-2 gap-1 rounded-lg border border-zinc-200 bg-zinc-100/80 p-1 sm:grid-cols-4 dark:border-zinc-800 dark:bg-zinc-900"
         >
           {TABS.map((item) => (
             <button
