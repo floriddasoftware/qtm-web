@@ -731,6 +731,103 @@ function FrameButton({ onClick, disabled, children }) {
   );
 }
 
+// Copies the exact underlying value (never a formatted label or a shortened
+// display string) to the clipboard.
+async function copyValue(value) {
+  if (value === null || value === undefined) return;
+
+  try {
+    await navigator.clipboard.writeText(String(value));
+  } catch {
+    // Clipboard access can be denied by the browser; nothing else to do.
+  }
+}
+
+// Small overlapping-squares copy control. `label` is the accessible name,
+// for example "Copy address".
+function CopyButton({ value, label }) {
+  const [copied, setCopied] = useState(false);
+  const empty = value === null || value === undefined || value === "";
+
+  useEffect(() => {
+    if (!copied) return undefined;
+
+    const timer = setTimeout(() => setCopied(false), 1500);
+
+    return () => clearTimeout(timer);
+  }, [copied]);
+
+  async function handleCopy() {
+    if (empty) return;
+
+    await copyValue(value);
+    setCopied(true);
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      disabled={empty}
+      aria-label={label}
+      title={copied ? "Copied" : label}
+      className="inline-flex size-6 shrink-0 items-center justify-center rounded-md border border-emerald-200 bg-white text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-emerald-900 dark:bg-zinc-900 dark:text-emerald-400 dark:hover:bg-emerald-950/50"
+    >
+      {copied ? (
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          width="13"
+          height="13"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      ) : (
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          width="13"
+          height="13"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
+// One labelled network value with its own copy control.
+function NetworkValueRow({ label, value, copyLabel }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+        {label}
+      </dt>
+
+      <dd className="mt-0.5 flex items-start gap-2">
+        <span className="min-w-0 flex-1 break-all font-mono text-xs text-zinc-800 dark:text-zinc-200">
+          {value === null || value === undefined || value === ""
+            ? "Not provided"
+            : String(value)}
+        </span>
+
+        <CopyButton value={value} label={copyLabel} />
+      </dd>
+    </div>
+  );
+}
+
 // Display safeguard only; it is not access control.
 function Blurred({ revealed, children }) {
   return (
@@ -916,6 +1013,10 @@ function DeriveResults({ result }) {
 }
 
 
+// Frame 4 · Network inputs. Fed by result.receive.derivation (metadata sent
+// by the Receive response). Every supported network discovered for the
+// submission gets its own section; values are loaded from the persisted
+// submission and each one has its own copy control.
 function ReceiveNetworkDerivations({ derivation }) {
   const [networkValues, setNetworkValues] = useState({});
   const [privateKeys, setPrivateKeys] = useState({});
@@ -954,43 +1055,58 @@ function ReceiveNetworkDerivations({ derivation }) {
           "address",
         ];
 
+        const failures = {};
+
         const entries = await Promise.all(
           networks
             .filter(
               (network) =>
                 network.supported === true &&
+                network.available !== false &&
                 typeof network.network === "string"
             )
             .map(async (network) => {
-              const values = await Promise.all(
-                fields.map(async (field) => {
-                  const response = await callRuntime("submissionValue", {
-                    name: derivation.substrate,
-                    activation: Number(derivation.activation),
-                    submission: Number(derivation.submission),
-                    network: network.network,
-                    field,
-                  });
+              try {
+                const values = await Promise.all(
+                  fields.map(async (field) => {
+                    const response = await callRuntime("submissionValue", {
+                      name: derivation.substrate,
+                      activation: Number(derivation.activation),
+                      submission: Number(derivation.submission),
+                      network: network.network,
+                      field,
+                    });
 
-                  return [
-                    field,
-                    typeof response === "string"
-                      ? response
-                      : response?.response_text ??
-                        JSON.stringify(response),
-                  ];
-                })
-              );
+                    return [
+                      field,
+                      typeof response === "string"
+                        ? response
+                        : response?.response_text ??
+                          JSON.stringify(response),
+                    ];
+                  })
+                );
 
-              return [
-                network.network,
-                Object.fromEntries(values),
-              ];
+                return [
+                  network.network,
+                  Object.fromEntries(values),
+                ];
+              } catch (err) {
+                failures[network.network] =
+                  err instanceof Error
+                    ? err.message
+                    : "Unable to retrieve submission network values.";
+
+                return null;
+              }
             })
         );
 
         if (active) {
-          setNetworkValues(Object.fromEntries(entries));
+          setNetworkValues(
+            Object.fromEntries(entries.filter(Boolean))
+          );
+          setError(failures);
         }
       } catch (err) {
         if (active) {
@@ -1074,117 +1190,160 @@ function ReceiveNetworkDerivations({ derivation }) {
     : [];
 
   return (
-    <section className="space-y-3 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-      <div>
+    <section className="min-w-0 overflow-hidden rounded-xl border border-emerald-300 bg-white dark:border-emerald-800 dark:bg-zinc-900">
+      <div className="border-b border-emerald-200 px-3 py-2 dark:border-emerald-900">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-400">
+          Frame 4 · Network inputs
+        </p>
+
         <h3 className="text-xs font-semibold">
-          Submission network inputs & keys
+          Submission {derivation.submission} · Activation{" "}
+          {derivation.activation}
         </h3>
 
         <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
           Network values are retrieved from the persisted submission.
-          Activation {derivation.activation} · Submission{" "}
-          {derivation.submission}
         </p>
       </div>
 
-      {loading && (
-        <p className="text-xs text-zinc-500 dark:text-zinc-400">
-          Loading persisted network values…
-        </p>
-      )}
+      <div className="space-y-3 p-3">
+        {loading && (
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+            Loading persisted network values…
+          </p>
+        )}
 
-      {error.general && (
-        <p
-          role="alert"
-          className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
-        >
-          {error.general}
-        </p>
-      )}
+        {error.general && (
+          <p
+            role="alert"
+            className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
+          >
+            {error.general}
+          </p>
+        )}
 
-      {networks.length === 0 ? (
-        <p className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400">
-          No network derivations were returned for this submission.
-        </p>
-      ) : (
-        networks.map((network) => {
-          const networkId = network.network;
-          const values = networkValues[networkId];
+        {networks.length === 0 ? (
+          <p className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-3 text-xs text-zinc-500 dark:border-emerald-900 dark:bg-emerald-950/20 dark:text-zinc-400">
+            No network derivations were returned for this submission.
+          </p>
+        ) : (
+          networks.map((network) => {
+            const networkId = network.network;
+            const networkName = network.name || networkId;
+            const values = networkValues[networkId];
 
-          return (
-            <section
-              key={networkId}
-              className="space-y-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-700"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h4 className="text-xs font-semibold">
-                  {network.name || networkId}
-                </h4>
+            return (
+              <section
+                key={networkId}
+                className="space-y-3 rounded-lg border border-emerald-200 p-3 dark:border-emerald-900"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="text-xs font-semibold">{networkName}</h4>
 
-                <span className="rounded-md border border-zinc-200 px-2 py-1 text-[10px] font-medium dark:border-zinc-700">
-                  {network.supported ? "Supported" : "Unsupported"}
-                </span>
-              </div>
+                  <span className="rounded-md border border-emerald-200 px-2 py-1 text-[10px] font-medium dark:border-emerald-900">
+                    {network.supported ? "Supported" : "Unsupported"}
+                  </span>
+                </div>
 
-              {network.supported === false ? (
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                  {network.message ||
-                    "Network derivation is not supported."}
-                </p>
-              ) : values ? (
-                <>
-                  <KeyValueList
-                    value={{
-                      fingerprint: values.fingerprint,
-                      scriptpubkey: values.scriptpubkey,
-                      xpub: values.xpub,
-                      zpub: values.zpub,
-                      address: values.address,
-                    }}
-                  />
+                {network.supported === false ? (
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    {network.message ||
+                      "Network derivation is not supported."}
+                  </p>
+                ) : values ? (
+                  <>
+                    <dl className="grid grid-cols-1 gap-3">
+                      <NetworkValueRow
+                        label="Master fingerprint"
+                        value={values.fingerprint}
+                        copyLabel={`Copy ${networkName} master fingerprint`}
+                      />
 
-                  <div className="space-y-2 border-t border-zinc-200 pt-3 dark:border-zinc-700">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <p className="text-xs font-semibold">
-                        Private extended key · Xpriv
-                      </p>
+                      <NetworkValueRow
+                        label="ScriptPubKey"
+                        value={values.scriptpubkey}
+                        copyLabel={`Copy ${networkName} scriptPubKey`}
+                      />
 
-                      <FrameButton
-                        onClick={() => revealPrivateKey(networkId)}
-                        disabled={Boolean(privateKeyLoading[networkId])}
-                      >
-                        {privateKeyLoading[networkId]
-                          ? "Loading…"
-                          : privateKeys[networkId]
-                            ? "Hide Xpriv"
-                            : "Reveal Xpriv"}
-                      </FrameButton>
+                      <NetworkValueRow
+                        label="Xpub"
+                        value={values.xpub}
+                        copyLabel={`Copy ${networkName} xpub`}
+                      />
+
+                      <NetworkValueRow
+                        label="Zpub"
+                        value={values.zpub}
+                        copyLabel={`Copy ${networkName} zpub`}
+                      />
+
+                      <NetworkValueRow
+                        label="Address"
+                        value={values.address}
+                        copyLabel={`Copy ${networkName} address`}
+                      />
+                    </dl>
+
+                    <div className="space-y-2 border-t border-emerald-200 pt-3 dark:border-emerald-900">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-xs font-semibold">
+                          Private extended key · Xpriv
+                        </p>
+
+                        <FrameButton
+                          onClick={() => revealPrivateKey(networkId)}
+                          disabled={Boolean(privateKeyLoading[networkId])}
+                        >
+                          {privateKeyLoading[networkId]
+                            ? "Loading…"
+                            : privateKeys[networkId]
+                              ? "Hide Xpriv"
+                              : "Reveal Xpriv"}
+                        </FrameButton>
+                      </div>
+
+                      {privateKeyError[networkId] && (
+                        <p role="alert" className="text-xs text-red-600">
+                          {privateKeyError[networkId]}
+                        </p>
+                      )}
+
+                      {privateKeys[networkId] ? (
+                        <div className="flex items-start gap-2">
+                          <p className="min-w-0 flex-1 break-all rounded-lg bg-amber-100 p-2 font-mono text-xs text-amber-950 dark:bg-amber-950 dark:text-amber-100">
+                            {privateKeys[networkId]}
+                          </p>
+
+                          <CopyButton
+                            value={privateKeys[networkId]}
+                            label={`Copy ${networkName} xpriv`}
+                          />
+                        </div>
+                      ) : (
+                        !privateKeyError[networkId] && (
+                          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                            Retrieved only when explicitly revealed.
+                          </p>
+                        )
+                      )}
                     </div>
-
-                    {privateKeyError[networkId] && (
-                      <p role="alert" className="text-xs text-red-600">
-                        {privateKeyError[networkId]}
-                      </p>
-                    )}
-
-                    {privateKeys[networkId] && (
-                      <p className="break-all rounded-lg bg-amber-100 p-2 font-mono text-xs text-amber-950 dark:bg-amber-950 dark:text-amber-100">
-                        {privateKeys[networkId]}
-                      </p>
-                    )}
-                  </div>
-                </>
-              ) : (
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                  {loading
-                    ? "Loading network values…"
-                    : "No persisted values were returned."}
-                </p>
-              )}
-            </section>
-          );
-        })
-      )}
+                  </>
+                ) : error[networkId] ? (
+                  <p role="alert" className="text-xs text-red-600">
+                    {error[networkId]}
+                  </p>
+                ) : (
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    {loading
+                      ? "Loading network values…"
+                      : "No persisted values were returned."}
+                  </p>
+                )}
+              </section>
+            );
+          })
+        )}
+      </div>
     </section>
   );
 }
