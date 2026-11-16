@@ -920,6 +920,280 @@ function DeriveResults({ result }) {
   );
 }
 
+
+function ReceiveNetworkDerivations({ derivation }) {
+  const [networkValues, setNetworkValues] = useState({});
+  const [privateKeys, setPrivateKeys] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [privateKeyLoading, setPrivateKeyLoading] = useState({});
+  const [error, setError] = useState({});
+  const [privateKeyError, setPrivateKeyError] = useState({});
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadNetworkValues() {
+      const networks = Array.isArray(derivation?.networks)
+        ? derivation.networks
+        : [];
+
+      if (
+        !derivation?.substrate ||
+        !Number.isSafeInteger(Number(derivation.activation)) ||
+        !Number.isSafeInteger(Number(derivation.submission)) ||
+        !networks.length
+      ) {
+        setNetworkValues({});
+        return;
+      }
+
+      setLoading(true);
+      setError({});
+
+      try {
+        const fields = [
+          "fingerprint",
+          "scriptpubkey",
+          "xpub",
+          "zpub",
+          "address",
+        ];
+
+        const entries = await Promise.all(
+          networks
+            .filter(
+              (network) =>
+                network.supported === true &&
+                typeof network.network === "string"
+            )
+            .map(async (network) => {
+              const values = await Promise.all(
+                fields.map(async (field) => {
+                  const response = await callRuntime("submissionValue", {
+                    name: derivation.substrate,
+                    activation: Number(derivation.activation),
+                    submission: Number(derivation.submission),
+                    network: network.network,
+                    field,
+                  });
+
+                  return [
+                    field,
+                    typeof response === "string"
+                      ? response
+                      : response?.response_text ??
+                        JSON.stringify(response),
+                  ];
+                })
+              );
+
+              return [
+                network.network,
+                Object.fromEntries(values),
+              ];
+            })
+        );
+
+        if (active) {
+          setNetworkValues(Object.fromEntries(entries));
+        }
+      } catch (err) {
+        if (active) {
+          setError({
+            general:
+              err instanceof Error
+                ? err.message
+                : "Unable to retrieve submission network values.",
+          });
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    loadNetworkValues();
+
+    return () => {
+      active = false;
+    };
+  }, [derivation]);
+
+  async function revealPrivateKey(networkId) {
+    if (privateKeys[networkId]) {
+      setPrivateKeys((current) => {
+        const next = { ...current };
+        delete next[networkId];
+        return next;
+      });
+      return;
+    }
+
+    setPrivateKeyLoading((current) => ({
+      ...current,
+      [networkId]: true,
+    }));
+
+    setPrivateKeyError((current) => ({
+      ...current,
+      [networkId]: "",
+    }));
+
+    try {
+      const response = await callRuntime("submissionValue", {
+        name: derivation.substrate,
+        activation: Number(derivation.activation),
+        submission: Number(derivation.submission),
+        network: networkId,
+        field: "xpriv",
+      });
+
+      const value =
+        typeof response === "string"
+          ? response
+          : response?.response_text ?? JSON.stringify(response);
+
+      setPrivateKeys((current) => ({
+        ...current,
+        [networkId]: value,
+      }));
+    } catch (err) {
+      setPrivateKeyError((current) => ({
+        ...current,
+        [networkId]:
+          err instanceof Error
+            ? err.message
+            : "Unable to retrieve the private extended key.",
+      }));
+    } finally {
+      setPrivateKeyLoading((current) => ({
+        ...current,
+        [networkId]: false,
+      }));
+    }
+  }
+
+  if (!derivation) return null;
+
+  const networks = Array.isArray(derivation.networks)
+    ? derivation.networks
+    : [];
+
+  return (
+    <section className="space-y-3 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+      <div>
+        <h3 className="text-xs font-semibold">
+          Submission network inputs & keys
+        </h3>
+
+        <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+          Network values are retrieved from the persisted submission.
+          Activation {derivation.activation} · Submission{" "}
+          {derivation.submission}
+        </p>
+      </div>
+
+      {loading && (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          Loading persisted network values…
+        </p>
+      )}
+
+      {error.general && (
+        <p
+          role="alert"
+          className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
+        >
+          {error.general}
+        </p>
+      )}
+
+      {networks.length === 0 ? (
+        <p className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400">
+          No network derivations were returned for this submission.
+        </p>
+      ) : (
+        networks.map((network) => {
+          const networkId = network.network;
+          const values = networkValues[networkId];
+
+          return (
+            <section
+              key={networkId}
+              className="space-y-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-700"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h4 className="text-xs font-semibold">
+                  {network.name || networkId}
+                </h4>
+
+                <span className="rounded-md border border-zinc-200 px-2 py-1 text-[10px] font-medium dark:border-zinc-700">
+                  {network.supported ? "Supported" : "Unsupported"}
+                </span>
+              </div>
+
+              {network.supported === false ? (
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                  {network.message ||
+                    "Network derivation is not supported."}
+                </p>
+              ) : values ? (
+                <>
+                  <KeyValueList
+                    value={{
+                      fingerprint: values.fingerprint,
+                      scriptpubkey: values.scriptpubkey,
+                      xpub: values.xpub,
+                      zpub: values.zpub,
+                      address: values.address,
+                    }}
+                  />
+
+                  <div className="space-y-2 border-t border-zinc-200 pt-3 dark:border-zinc-700">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs font-semibold">
+                        Private extended key · Xpriv
+                      </p>
+
+                      <FrameButton
+                        onClick={() => revealPrivateKey(networkId)}
+                        disabled={Boolean(privateKeyLoading[networkId])}
+                      >
+                        {privateKeyLoading[networkId]
+                          ? "Loading…"
+                          : privateKeys[networkId]
+                            ? "Hide Xpriv"
+                            : "Reveal Xpriv"}
+                      </FrameButton>
+                    </div>
+
+                    {privateKeyError[networkId] && (
+                      <p role="alert" className="text-xs text-red-600">
+                        {privateKeyError[networkId]}
+                      </p>
+                    )}
+
+                    {privateKeys[networkId] && (
+                      <p className="break-all rounded-lg bg-amber-100 p-2 font-mono text-xs text-amber-950 dark:bg-amber-950 dark:text-amber-100">
+                        {privateKeys[networkId]}
+                      </p>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                  {loading
+                    ? "Loading network values…"
+                    : "No persisted values were returned."}
+                </p>
+              )}
+            </section>
+          );
+        })
+      )}
+    </section>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Operation 3: Activation-Scoped Receive Results
 // ---------------------------------------------------------------------------
@@ -963,7 +1237,8 @@ function ReceiveResults({ result }) {
       <section className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
         <h3 className="text-xs font-semibold">Receive event identity</h3>
         <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-          Executed independently via POST /wallets/:name/receive without implicit derivation.
+          Receive executes the selected submission and derives its
+          available network inputs and keys from the received event state.
         </p>
         <div className="mt-3">
           <KeyValueList value={identity} />
@@ -1040,6 +1315,9 @@ function ReceiveResults({ result }) {
           )}
         </div>
       </Frame>
+            <ReceiveNetworkDerivations
+        derivation={result?.receive?.derivation}
+      />
     </div>
   );
 }
@@ -1241,13 +1519,6 @@ export default function Home() {
   const [external, setExternal] = useState("0");
   const [activation, setActivation] = useState("1");
 
-    // Independent Derivation state
-  const [deriveActivation, setDeriveActivation] = useState("1");
-  const [deriveSubmission, setDeriveSubmission] = useState("1");
-
-  const [deriveResult, setDeriveResult] = useState(null);
-  const [deriveError, setDeriveError] = useState("");
-  const [deriveLoading, setDeriveLoading] = useState(false);
   
   // Activation-scoped Receive state
   const [receiveAmount, setReceiveAmount] = useState("1");
@@ -1391,11 +1662,6 @@ export default function Home() {
           : valid[0]?.id || ""
       );
 
-      setDeriveNetwork((current) =>
-        valid.some((network) => network.id === current)
-          ? current
-          : valid[0]?.id || ""
-      );
 
       const first = valid[0];
 
@@ -1647,42 +1913,7 @@ export default function Home() {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // 2. Independent Submission Derivation Handler
-  //    POST /wallets/:name/activations/:activation/submissions/:submission/derive
-  // -------------------------------------------------------------------------
-  async function handleIndependentDerivation() {
-    setDeriveError("");
-    setDeriveResult(null);
-    setDeriveLoading(true);
 
-    try {
-      const activationNumber = Number(deriveActivation);
-      const submissionNumber = Number(deriveSubmission);
-
-      if (!Number.isSafeInteger(activationNumber) || activationNumber < 1) {
-        throw new Error("Activation must be a positive safe integer.");
-      }
-
-      if (!Number.isSafeInteger(submissionNumber) || submissionNumber < 1) {
-        throw new Error("Submission must be a positive safe integer.");
-      }
-
-      const derivation = await callRuntime("deriveSubmission", {
-        name: selectedSubstrate,
-        activation: activationNumber,
-        submission: submissionNumber,
-      });
-
-      setDeriveResult(derivation);
-    } catch (err) {
-      setDeriveError(
-        err instanceof Error ? err.message : "Submission derivation failed."
-      );
-    } finally {
-      setDeriveLoading(false);
-    }
-  }
   // -------------------------------------------------------------------------
   // 3. Activation-Scoped Receive Handler (POST /wallets/:name/receive)
   // -------------------------------------------------------------------------
@@ -1822,10 +2053,6 @@ export default function Home() {
       }
 
       
-      if (tab === "derive") {
-        await handleIndependentDerivation();
-        return;
-      }
 
       if (tab === "receive") {
         await handleReceiveExecution();
@@ -2268,142 +2495,19 @@ return (
             </>
           )}
 
-          {tab === "receive" && (
+                   {tab === "receive" && (
             <div className="space-y-3">
               <section className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
                 <div>
                   <h3 className="text-xs font-semibold">
-                    Submission key & address derivation
+                    Receive submission
                   </h3>
 
                   <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                    Discover and derive all available network keys and
-                    addresses for an explicit activation and submission.
-                    This operation is independent of Receive and does not
-                    submit a Receive request.
-                  </p>
-                </div>
-
-                <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-                  <p className="text-xs font-medium">Selected substrate</p>
-                  <p className="mt-1 break-all font-mono text-xs">
-                    {selectedSubstrate || "No substrate selected"}
-                  </p>
-                </div>
-
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <NumberField
-                    label="Activation"
-                    value={deriveActivation}
-                    onChange={(val) => {
-                      setDeriveActivation(val);
-                      setDeriveResult(null);
-                      setDeriveError("");
-                    }}
-                    min={1}
-                  />
-
-                  <NumberField
-                    label="Submission"
-                    value={deriveSubmission}
-                    onChange={(val) => {
-                      setDeriveSubmission(val);
-                      setDeriveResult(null);
-                      setDeriveError("");
-                    }}
-                    min={1}
-                  />
-                </div>
-
-                <button
-                  type="button"
-                  onClick={handleIndependentDerivation}
-                  disabled={
-                    deriveLoading ||
-                    loading ||
-                    !selectedSubstrate ||
-                    !Number.isSafeInteger(Number(deriveActivation)) ||
-                    Number(deriveActivation) < 1 ||
-                    !Number.isSafeInteger(Number(deriveSubmission)) ||
-                    Number(deriveSubmission) < 1
-                  }
-                  className="inline-flex min-h-10 w-full items-center justify-center rounded-lg border border-zinc-300 bg-white px-4 py-2.5 text-xs font-semibold transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
-                >
-                  {deriveLoading
-                    ? "Deriving…"
-                    : "Derive Submission"}
-                </button>
-
-                {deriveError && (
-                  <p
-                    role="alert"
-                    className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
-                  >
-                    {deriveError}
-                  </p>
-                )}
-
-                {deriveResult && (
-                  <div className="space-y-3 rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-                    <div>
-                      <p className="text-xs font-semibold">
-                        Derivation results
-                      </p>
-
-                      <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                        {deriveResult.substrate} · Activation{" "}
-                        {deriveResult.activation} · Submission{" "}
-                        {deriveResult.submission}
-                      </p>
-                    </div>
-
-                    {deriveResult.networks?.length > 0 ? (
-                      deriveResult.networks.map((network) => (
-                        <section
-                          key={network.network}
-                          className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950"
-                        >
-                          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                            <h4 className="text-xs font-semibold">
-                              {network.network}
-                            </h4>
-
-                            {network.supported === false && (
-                              <span className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
-                                Unsupported
-                              </span>
-                            )}
-
-                            {network.supported === true && (
-                              <span className="rounded-md border border-zinc-200 px-2 py-1 text-[10px] font-medium dark:border-zinc-700">
-                                Supported
-                              </span>
-                            )}
-                          </div>
-
-                          <KeyValueList value={network} />
-                        </section>
-                      ))
-                    ) : (
-                      <p className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400">
-                        The API returned no available network derivations
-                        for this submission.
-                      </p>
-                    )}
-                  </div>
-                )}
-              </section>
-
-              <section className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
-                <div>
-                  <h3 className="text-xs font-semibold">
-                    Activation-scoped Receive
-                  </h3>
-
-                  <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                    Executes POST /wallets/:name/receive at a chosen ordinal
-                    coordinate. Receive does not select or submit a
-                    coordination network.
+                    Execute the selected persisted submission. Receive
+                    derives the available networks from the received
+                    event and retrieves their persisted input and key
+                    values automatically.
                   </p>
                 </div>
 
