@@ -180,11 +180,6 @@ const API_ROUTES = {
     `/wallets/${encodeURIComponent(name)}/events`,
   ],
 
-    deriveSubmission: ({ name, activation, submission }) => [
-    "POST",
-    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/submissions/${encodeURIComponent(submission)}/derive`,
-  ],
-
   submissionValue: ({ name, activation, submission, network, field }) => [
     "GET",
     `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/submissions/${encodeURIComponent(submission)}/networks/${encodeURIComponent(network)}/${encodeURIComponent(field)}`,
@@ -2331,8 +2326,6 @@ return (
               setTab(item.id);
               setResult(null);
               setError("");
-              setDeriveResult(null);
-              setDeriveError("");
             }}
             className={`rounded-lg px-1.5 py-2 text-xs font-medium transition-colors sm:px-2 ${
               tab === item.id
