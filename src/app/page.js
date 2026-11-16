@@ -1249,10 +1249,6 @@ export default function Home() {
   const [deriveError, setDeriveError] = useState("");
   const [deriveLoading, setDeriveLoading] = useState(false);
   
-  const [deriveResult, setDeriveResult] = useState(null);
-  const [deriveError, setDeriveError] = useState("");
-  const [deriveLoading, setDeriveLoading] = useState(false);
-
   // Activation-scoped Receive state
   const [receiveAmount, setReceiveAmount] = useState("1");
   const [receiveOrdinal, setReceiveOrdinal] = useState("1");
