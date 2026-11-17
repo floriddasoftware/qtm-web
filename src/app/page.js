@@ -180,10 +180,10 @@ const API_ROUTES = {
     `/wallets/${encodeURIComponent(name)}/events`,
   ],
 
-  submissionValue: ({ name, activation, submission, network, field }) => [
-    "GET",
-    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/submissions/${encodeURIComponent(submission)}/networks/${encodeURIComponent(network)}/${encodeURIComponent(field)}`,
-  ],
+  submissionValue: ({ name, activation, network, field }) => [
+  "GET",
+  `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/${encodeURIComponent(field)}`,
+],
 };
 
 function directMessage(cause) {
@@ -1013,8 +1013,8 @@ function DeriveResults({ result }) {
 
 // Frame 4 · Network inputs. Fed by result.receive.derivation (metadata sent
 // by the Receive response). Every supported network discovered for the
-// submission gets its own section; values are loaded from the persisted
-// submission and each one has its own copy control.
+// activation gets its own section; values are loaded from the persisted
+// activation.
 function ReceiveNetworkDerivations({ derivation }) {
   const [networkValues, setNetworkValues] = useState({});
   const [privateKeys, setPrivateKeys] = useState({});
@@ -1034,7 +1034,6 @@ function ReceiveNetworkDerivations({ derivation }) {
       if (
         !derivation?.substrate ||
         !Number.isSafeInteger(Number(derivation.activation)) ||
-        !Number.isSafeInteger(Number(derivation.submission)) ||
         !networks.length
       ) {
         setNetworkValues({});
@@ -1070,7 +1069,6 @@ function ReceiveNetworkDerivations({ derivation }) {
                     const response = await callRuntime("submissionValue", {
                       name: derivation.substrate,
                       activation: Number(derivation.activation),
-                      submission: Number(derivation.submission),
                       network: network.network,
                       field,
                     });
@@ -1093,7 +1091,7 @@ function ReceiveNetworkDerivations({ derivation }) {
                 failures[network.network] =
                   err instanceof Error
                     ? err.message
-                    : "Unable to retrieve submission network values.";
+                    : "Unable to retrieve activation network values.";
 
                 return null;
               }
@@ -1112,7 +1110,7 @@ function ReceiveNetworkDerivations({ derivation }) {
             general:
               err instanceof Error
                 ? err.message
-                : "Unable to retrieve submission network values.",
+                : "Unable to retrieve activation network values.",
           });
         }
       } finally {
@@ -1151,7 +1149,6 @@ function ReceiveNetworkDerivations({ derivation }) {
       const response = await callRuntime("submissionValue", {
         name: derivation.substrate,
         activation: Number(derivation.activation),
-        submission: Number(derivation.submission),
         network: networkId,
         field: "xpriv",
       });
@@ -1195,12 +1192,11 @@ function ReceiveNetworkDerivations({ derivation }) {
         </p>
 
         <h3 className="text-xs font-semibold">
-          Submission {derivation.submission} · Activation{" "}
-          {derivation.activation}
+          Activation {derivation.activation}
         </h3>
 
         <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-          Network values are retrieved from the persisted submission.
+          Network values are retrieved from the persisted activation.
         </p>
       </div>
 
@@ -1222,7 +1218,7 @@ function ReceiveNetworkDerivations({ derivation }) {
 
         {networks.length === 0 ? (
           <p className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-3 text-xs text-zinc-500 dark:border-emerald-900 dark:bg-emerald-950/20 dark:text-zinc-400">
-            No network derivations were returned for this submission.
+            No network derivations were returned for this activation.
           </p>
         ) : (
           networks.map((network) => {
