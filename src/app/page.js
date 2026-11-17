@@ -1388,7 +1388,7 @@ defaultOpen
 <p className="mt-2 break-all font-mono text-xs text-zinc-500 dark:text-zinc-400">
 {depth.path || "Depth path not returned"}
 </p>
-<p class="mt-2 text-xs text-zinc-600 dark:text-zinc-300">
+<p className="mt-2 text-xs text-zinc-600 dark:text-zinc-300">
 {objects.length} retained{" "}
 {objects.length === 1 ? "object" : "objects"} returned by the API.
 </p>
