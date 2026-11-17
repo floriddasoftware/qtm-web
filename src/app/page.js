@@ -1,9 +1,3 @@
-Produce the complete corrected fronted page.js in a text file that opens in this chat. 
-
-Leave unaffected areas unchanged. 
-
-https://github.com/floriddasoftware/qtm-web/blob/main/src/app/page.js
-
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
