@@ -16,26 +16,33 @@ const TABS = [
 { id: "exile", label: "Exile" },
 ];
 const API_BASE = (
-process.env.NEXT_PUBLIC_QTM_API_BASE ||
-"https://qtm-api.onrender.com"
-).replace(//+$/, "");
+  process.env.NEXT_PUBLIC_QTM_API_BASE ||
+  "https://qtm-api.onrender.com"
+).replace(/\/+$/, "");
+
 const isRecord = (value) =>
-value !== null && typeof value === "object" && !Array.isArray(value);
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
 const objectAt = (source, keys) => {
-if (!isRecord(source)) return undefined;
-for (const key of keys) {
-if (isRecord(source[key])) return source[key];
-}
-return undefined;
+  if (!isRecord(source)) return undefined;
+
+  for (const key of keys) {
+    if (isRecord(source[key])) return source[key];
+  }
+
+  return undefined;
 };
+
 const valueAt = (source, keys) => {
-if (!isRecord(source)) return undefined;
-for (const key of keys) {
-if (source[key] !== null && source[key] !== undefined) {
-return source[key];
-}
-}
-return undefined;
+  if (!isRecord(source)) return undefined;
+
+  for (const key of keys) {
+    if (source[key] !== null && source[key] !== undefined) {
+      return source[key];
+    }
+  }
+
+  return undefined;
 };
 const formatKey = (key) =>
 String(key)
