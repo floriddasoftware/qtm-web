@@ -1351,35 +1351,36 @@ function ReceiveNetworkDerivations({ derivation }) {
 // ---------------------------------------------------------------------------
 // Operation 3: Activation-Scoped Receive Results
 // ---------------------------------------------------------------------------
+
 function ReceiveResults({ result }) {
   const [revealReceive, setRevealReceive] = useState(false);
 
-  const frame = objectAt(result?.receive, ["frame"]);
+  const receive = result?.receive;
+  const frame = objectAt(receive, ["frame"]);
   const transaction = objectAt(frame, ["quantum_transaction"]);
   const event = objectAt(frame, ["event"]);
 
   const openedQtm = objectAt(transaction, ["qtm"]);
-  const qtmValues = objectAt(openedQtm, ["qtm"]);
-
   const heritage = objectAt(event, ["heritage"]);
   const depth = objectAt(event, ["depth"]);
   const runtime = objectAt(event, ["runtime"]);
 
-  const activation = result?.ordinal ?? valueAt(transaction, ["amount"]);
-  const commitment = valueAt(qtmValues, ["commitment"]);
+  const networks = Array.isArray(receive?.networks)
+    ? receive.networks
+    : [];
 
   const identity = {
-    substrate: result?.substrate,
-    network: result?.network,
+    substrate: receive?.substrate ?? result?.substrate,
+    post_activation: receive?.post_activation,
     ordinal: result?.ordinal,
     flow: result?.flow,
-    commitment,
+    networks,
   };
 
   const receiveValues = transaction
     ? {
         receive_amount: result?.requested_amount,
-        activation,
+        ordinal: result?.ordinal,
         flow: result?.flow,
         constant: valueAt(transaction, ["constant"]),
         constant_delta: valueAt(transaction, ["constant_delta"]),
@@ -1389,49 +1390,51 @@ function ReceiveResults({ result }) {
   return (
     <div className="space-y-3">
       <section className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-        <h3 className="text-xs font-semibold">Receive event identity</h3>
+        <h3 className="text-xs font-semibold">
+          Receive event identity
+        </h3>
+
         <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-          Receive executes the selected submission and derives its
-          available network inputs and keys from the received event state.
+          Networks are taken from the observation pipelines associated
+          with the received post-state activation.
         </p>
+
         <div className="mt-3">
           <KeyValueList value={identity} />
         </div>
       </section>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <Frame eyebrow="Frame 1" title="Transaction QTM">
-          {hasContent(openedQtm) ? (
-            <KeyValueList value={openedQtm} />
-          ) : (
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              The receive response did not include frame.quantum_transaction.qtm.
-            </p>
-          )}
-        </Frame>
+      <Frame eyebrow="Frame 1" title="Transaction QTM">
+        {hasContent(openedQtm) ? (
+          <KeyValueList value={openedQtm} />
+        ) : (
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+            Transaction QTM was not returned.
+          </p>
+        )}
+      </Frame>
 
-        <Frame
-          eyebrow="Frame 2"
-          title="Receive values"
-          actions={
-            <FrameButton
-              onClick={() => setRevealReceive((current) => !current)}
-            >
-              {revealReceive ? "Clear" : "Reveal"}
-            </FrameButton>
-          }
-        >
-          {receiveValues ? (
-            <Blurred revealed={revealReceive}>
-              <KeyValueList value={receiveValues} />
-            </Blurred>
-          ) : (
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              The response did not contain the expected QuantumTransaction.
-            </p>
-          )}
-        </Frame>
-      </div>
+      <Frame
+        eyebrow="Frame 2"
+        title="Receive values"
+        actions={
+          <FrameButton
+            onClick={() => setRevealReceive((current) => !current)}
+          >
+            {revealReceive ? "Clear" : "Reveal"}
+          </FrameButton>
+        }
+      >
+        {receiveValues ? (
+          <Blurred revealed={revealReceive}>
+            <KeyValueList value={receiveValues} />
+          </Blurred>
+        ) : (
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+            The response did not contain the expected transaction.
+          </p>
+        )}
+      </Frame>
 
       <Frame eyebrow="Frame 3" title="Immediate heritage">
         <div className="space-y-3">
@@ -1444,37 +1447,45 @@ function ReceiveResults({ result }) {
             }}
           />
 
-          {hasContent(heritage) ? (
-            <div className="space-y-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+          {hasContent(heritage) && (
+            <div className="border-t border-zinc-200 pt-3 dark:border-zinc-800">
+              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                 Heritage
               </p>
-
               <KeyValueList value={heritage} />
             </div>
-          ) : (
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              The receive event did not include heritage.
-            </p>
           )}
 
           {hasContent(depth) && (
-            <div className="space-y-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+            <div className="border-t border-zinc-200 pt-3 dark:border-zinc-800">
+              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                 Depth
               </p>
-
               <KeyValueList value={depth} />
             </div>
           )}
         </div>
       </Frame>
-            <ReceiveNetworkDerivations
-        derivation={result?.receive?.derivation}
+
+      <Frame eyebrow="Frame 4" title="Receive networks">
+        {networks.length > 0 ? (
+          <KeyValueList value={networks} />
+        ) : (
+          <p className="text-xs text-amber-700 dark:text-amber-400">
+            No running observation pipeline networks were returned for
+            post-activation {receive?.post_activation ?? "not provided"}.
+          </p>
+        )}
+      </Frame>
+
+      <ResultSection
+        title="Complete Receive API response"
+        value={receive}
       />
     </div>
   );
 }
+
 
 function EventMapSections({ event, prefix = "" }) {
   const depth = objectAt(event, ["depth"]);
