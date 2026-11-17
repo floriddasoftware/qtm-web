@@ -180,9 +180,9 @@ const API_ROUTES = {
     `/wallets/${encodeURIComponent(name)}/events`,
   ],
 
-  submissionValue: ({ name, activation, network, field }) => [
+  submissionValue: ({ name, activation, submission, network, field }) => [
     "GET",
-    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/${encodeURIComponent(field)}`,
+    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/submissions/${encodeURIComponent(submission)}/networks/${encodeURIComponent(network)}/${encodeURIComponent(field)}`,
   ],
 };
 
@@ -1034,6 +1034,7 @@ function ReceiveNetworkDerivations({ derivation }) {
       if (
         !derivation?.substrate ||
         !Number.isSafeInteger(Number(derivation.activation)) ||
+        !Number.isSafeInteger(Number(derivation.submission)) ||
         !networks.length
       ) {
         setNetworkValues({});
@@ -1069,6 +1070,7 @@ function ReceiveNetworkDerivations({ derivation }) {
                     const response = await callRuntime("submissionValue", {
                       name: derivation.substrate,
                       activation: Number(derivation.activation),
+                      submission: Number(derivation.submission),
                       network: network.network,
                       field,
                     });
@@ -1149,6 +1151,7 @@ function ReceiveNetworkDerivations({ derivation }) {
       const response = await callRuntime("submissionValue", {
         name: derivation.substrate,
         activation: Number(derivation.activation),
+        submission: Number(derivation.submission),
         network: networkId,
         field: "xpriv",
       });
@@ -1192,7 +1195,8 @@ function ReceiveNetworkDerivations({ derivation }) {
         </p>
 
         <h3 className="text-xs font-semibold">
-          Activation {derivation.activation}
+          Submission {derivation.submission} · Activation{" "}
+          {derivation.activation}
         </h3>
 
         <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
@@ -1359,8 +1363,6 @@ function ReceiveResults({ result }) {
   const depth = objectAt(event, ["depth"]);
   const runtime = objectAt(event, ["runtime"]);
 
-  const derivation = objectAt(receive, ["derivation"]);
-
   const networks = Array.isArray(receive?.networks)
     ? receive.networks
     : [];
@@ -1391,8 +1393,8 @@ function ReceiveResults({ result }) {
         </h3>
 
         <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-          Networks are resolved by matching the persisted transit depth
-          against registered derivation paths.
+          Networks are taken from the observation pipelines associated
+          with the received post-state activation.
         </p>
 
         <div className="mt-3">
@@ -1468,29 +1470,11 @@ function ReceiveResults({ result }) {
           <KeyValueList value={networks} />
         ) : (
           <p className="text-xs text-amber-700 dark:text-amber-400">
-            No registered networks matched the persisted transit depth.
+            No running observation pipeline networks were returned for
+            post-activation {receive?.post_activation ?? "not provided"}.
           </p>
         )}
       </Frame>
-
-      {derivation && (
-        <>
-          <ReceiveNetworkDerivations derivation={derivation} />
-
-          <ResultSection
-            title="Complete derivation metadata"
-            value={{
-              substrate: derivation.substrate,
-              activation: derivation.activation,
-              commitment: derivation.commitment,
-              qtm_activation: derivation.qtm_activation,
-              post_activation: derivation.post_activation,
-              depth: derivation.depth,
-              directory: derivation.directory,
-            }}
-          />
-        </>
-      )}
 
       <ResultSection
         title="Complete Receive API response"
