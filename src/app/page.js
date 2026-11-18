@@ -275,53 +275,29 @@ async function apiRequest(path, options = {}) {
 }
 
 async function callRuntime(operation, args = {}) {
-  const payload = args || {};
   const invoke = nativeInvoke();
-  const nativeCommand = NATIVE_COMMANDS[operation];
+  const command = NATIVE_COMMANDS[operation];
 
-  // Native runtime: invoke directly. Never retry a failed mutation over HTTP.
-  if (invoke && nativeCommand) {
-    try {
-      return await invoke(nativeCommand, payload);
-    } catch (cause) {
-      throw new RuntimeError(directMessage(cause));
-    }
-  }
-
-  // Browser runtime: call qtm-api directly.
-  const route = API_ROUTES[operation];
-
-  if (typeof route !== "function") {
+  if (!invoke) {
     throw new RuntimeError(
-      `Unsupported QP runtime operation: ${String(operation)}`
+      "The local QTM native runtime is unavailable."
     );
   }
 
-  let method;
-  let path;
+  if (!command) {
+    throw new RuntimeError(
+      `Native command is not registered: ${operation}`
+    );
+  }
 
   try {
-    [method, path] = route(payload);
+    return await invoke(command, args || {});
   } catch (cause) {
-    throw new RuntimeError(
-      `Invalid arguments for ${operation}: ${directMessage(cause)}`
-    );
+    throw new RuntimeError(directMessage(cause));
   }
-
-  if (
-    !["GET", "POST"].includes(method) ||
-    typeof path !== "string" ||
-    !path.startsWith("/") ||
-    path.startsWith("//")
-  ) {
-    throw new RuntimeError(`Invalid API route for ${operation}.`);
-  }
-
-  return apiRequest(path, {
-    method,
-    body: method === "POST" ? payload.request : undefined,
-  });
 }
+
+
 
 function eventMapOf(source) {
   const direct = objectAt(source, ["event", "event_map", "eventMap"]);
