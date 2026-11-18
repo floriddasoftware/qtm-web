@@ -2112,177 +2112,179 @@ export default function Home() {
     });
   }
 
-  async function handleSubmit(event) {
-    event.preventDefault();
-    setError("");
-    setResult(null);
+  
+async function handleSubmit(event) {
+  event.preventDefault();
+  setError("");
+  setResult(null);
 
-    if (tab !== "create" && !selectedSubstrate) {
-      setError("Select a substrate before performing this operation.");
+  if (tab !== "create" && !selectedSubstrate) {
+    setError("Select a substrate before performing this operation.");
+    return;
+  }
+
+  setLoading(true);
+
+  try {
+    if (tab === "create") {
+      const substrateName = name.trim();
+
+      if (!substrateName) {
+        throw new Error("Enter a substrate name.");
+      }
+
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(substrateName)) {
+        throw new Error(
+          "Substrate name must be 1-64 ASCII letters, digits, hyphens, or underscores."
+        );
+      }
+
+      let payload;
+
+      if (seedSource === "bip39") {
+        const mnemonic = phrase.trim();
+
+        if (!mnemonic) {
+          throw new Error("Enter a BIP39 mnemonic phrase.");
+        }
+
+        if (!language) {
+          throw new Error("Select a BIP39 language.");
+        }
+
+        payload = {
+          name: substrateName,
+          seed_source: "bip39",
+          phrase: mnemonic,
+          language,
+          passphrase,
+        };
+      } else if (seedSource === "persistent") {
+        const parsed = indices.split(",").map((item) => item.trim());
+
+        if (
+          parsed.length !== 12 ||
+          parsed.some(
+            (item) =>
+              item === "" ||
+              !/^\d+$/.test(item) ||
+              !Number.isSafeInteger(Number(item)) ||
+              Number(item) < 0 ||
+              Number(item) > 2047
+          )
+        ) {
+          throw new Error(
+            "Enter exactly 12 indices, each an integer from 0 to 2047."
+          );
+        }
+
+        payload = {
+          name: substrateName,
+          seed_source: "persistent",
+          indices: parsed.map(Number).join(","),
+          entropy: entropy.trim() || substrateName,
+        };
+      } else {
+        throw new Error("Select a valid substrate seed source.");
+      }
+
+      if (!nativeInvoke()) {
+        const confirmed = window.confirm(
+          `You are creating "${substrateName}" in browser mode.\n\n` +
+            "The seed material will be sent to the configured QTM API:\n" +
+            `${API_BASE}\n\n` +
+            "Continue only if you trust this server."
+        );
+
+        if (!confirmed) {
+          return;
+        }
+      }
+
+      const data = await callRuntime("createSubstrate", {
+        request: payload,
+      });
+
+      setResult(data);
+      setName("");
+      setEntropy("");
+      setPhrase("");
+      setPassphrase("");
+
+      void loadSubstrates(substrateName);
       return;
     }
 
-    setLoading(true);
-
-    try {
-      if (tab === "create") {
-        const substrateName = name.trim();
-
-        if (!substrateName) {
-          throw new Error("Enter a substrate name.");
-        }
-
-        if (!/^[A-Za-z0-9_-]{1,64}$/.test(substrateName)) {
-          throw new Error(
-            "Substrate name must be 1-64 ASCII letters, digits, hyphens, or underscores."
-          );
-        }
-
-        let payload;
-
-        
-        if (seedSource === "bip39") {
-          const mnemonic = phrase.trim();
-
-          if (!mnemonic) {
-            throw new Error("Enter a BIP39 mnemonic phrase.");
-          }
-
-          if (!language) {
-            throw new Error("Select a BIP39 language.");
-          }
-
-          payload = {
-            name: substrateName,
-            seed_source: "bip39",
-            phrase: mnemonic,
-            language,
-            passphrase,
-          };
-        } else if (seedSource === "persistent") {
-          const parsed = indices.split(",").map((item) => item.trim());
-
-          if (
-            parsed.length !== 12 ||
-            parsed.some(
-              (item) =>
-                item === "" ||
-                !/^\d+$/.test(item) ||
-                !Number.isSafeInteger(Number(item)) ||
-                Number(item) < 0 ||
-                Number(item) > 2047
-            )
-          ) {
-            throw new Error(
-              "Enter exactly 12 indices, each an integer from 0 to 2047."
-            );
-          }
-
-          payload = {
-            name: substrateName,
-            seed_source: "persistent",
-            indices: parsed.map(Number).join(","),
-            entropy: entropy.trim() || substrateName,
-          };
-        } else {
-          throw new Error("Select a valid substrate seed source.");
-        }
-        
-         
-        if (!nativeInvoke()) {
-          const confirmed = window.confirm(
-            `You are creating "${substrateName}" in browser mode.\n\n` +
-              "The seed material will be sent to the configured QTM API:\n" +
-              `${API_BASE}\n\n` +
-              "Continue only if you trust this server."
-          );
-
-          if (!confirmed) {
-            return;
-          }
-        }
-
-
-        setResult(data);
-        setName("");
-        setEntropy("");
-        setPhrase("");
-        setPassphrase("");
-
-        void loadSubstrates(substrateName);
-        return;
-      }
-
-      
-
-      if (tab === "receive") {
-        await handleReceiveExecution();
-        return;
-      }
-
-      if (tab === "transit") {
-        if (!selectedNetwork) {
-          throw new Error("Select a network before transit.");
-        }
-
-        const numeric = {
-          purpose: Number(purpose),
-          coin: Number(coin),
-          account: Number(account),
-          change: Number(change),
-          external: Number(external),
-          activation: Number(activation),
-        };
-
-        for (const [key, value] of Object.entries(numeric)) {
-          if (!Number.isSafeInteger(value) || value < 0) {
-            throw new Error(
-              `${key} must be a non-negative safe integer.`
-            );
-          }
-        }
-
-        const data = await callRuntime("transit", {
-          name: selectedSubstrate,
-          request: {
-            network: selectedNetwork,
-            path: path.trim() || undefined,
-            ...numeric,
-          },
-        });
-        setResult(data);
-
-        return;
-      }
-
-      if (tab === "exile") {
-        const data = await callRuntime("exile", {
-          name: selectedSubstrate,
-        });
-        setResult(data);
-
-        await loadExileRecords();
-      }
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Something went wrong."
-      );
-    } finally {
-      setLoading(false);
+    if (tab === "receive") {
+      await handleReceiveExecution();
+      return;
     }
+
+    if (tab === "transit") {
+      if (!selectedNetwork) {
+        throw new Error("Select a network before transit.");
+      }
+
+      const numeric = {
+        purpose: Number(purpose),
+        coin: Number(coin),
+        account: Number(account),
+        change: Number(change),
+        external: Number(external),
+        activation: Number(activation),
+      };
+
+      for (const [key, value] of Object.entries(numeric)) {
+        if (!Number.isSafeInteger(value) || value < 0) {
+          throw new Error(
+            `${key} must be a non-negative safe integer.`
+          );
+        }
+      }
+
+      const data = await callRuntime("transit", {
+        name: selectedSubstrate,
+        request: {
+          network: selectedNetwork,
+          path: path.trim() || undefined,
+          ...numeric,
+        },
+      });
+
+      setResult(data);
+      return;
+    }
+
+    if (tab === "exile") {
+      const data = await callRuntime("exile", {
+        name: selectedSubstrate,
+      });
+
+      setResult(data);
+
+      await loadExileRecords();
+    }
+  } catch (err) {
+    setError(
+      err instanceof Error ? err.message : "Something went wrong."
+    );
+  } finally {
+    setLoading(false);
   }
+}
 
-  const substrateRequired = tab !== "create";
+const substrateRequired = tab !== "create";
 
-  const linkWithSubstrate = (href) => {
-    if (!selectedSubstrate) return href;
+const linkWithSubstrate = (href) => {
+  if (!selectedSubstrate) return href;
 
-    const separator = href.includes("?") ? "&" : "?";
+  const separator = href.includes("?") ? "&" : "?";
 
-    return `${href}${separator}substrate=${encodeURIComponent(
-      selectedSubstrate
-    )}`;
-  };
+  return `${href}${separator}substrate=${encodeURIComponent(
+    selectedSubstrate
+  )}`;
+};
+
 
   
     
