@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 // Substrate state lives in the machine-local ~/.qp/substrates and is operated
 // on by the QP runtime. Inside a native shell (for example Tauri) the console
