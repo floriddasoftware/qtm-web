@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 
 // Substrate state lives in the machine-local ~/.qp/substrates and is operated
 // on by the QP runtime. Inside a native shell (for example Tauri) the console
@@ -132,13 +132,8 @@ class RuntimeError extends Error {
 
 // Native IPC entry point, present only inside a native shell.
 function nativeInvoke() {
-  if (typeof window === "undefined") return null;
-
-  return (
-    window.__TAURI__?.core?.invoke ??
-    window.__TAURI_INTERNALS__?.invoke ??
-    null
-  );
+  if (typeof window === "undefined" || !isTauri()) return null;
+  return invoke;
 }
 
 const NATIVE_COMMANDS = {
@@ -149,6 +144,7 @@ const NATIVE_COMMANDS = {
   transit: "qtm_transit",
   exile: "qtm_exile",
   listEvents: "qtm_events",
+  submissionValue: "qtm_submission_value",
 };
 
 const API_ROUTES = {
@@ -276,26 +272,42 @@ async function apiRequest(path, options = {}) {
 }
 
 async function callRuntime(operation, args = {}) {
-  const invoke = nativeInvoke();
-  const command = NATIVE_COMMANDS[operation];
+  const native = nativeInvoke();
 
-  if (!invoke) {
+  if (native) {
+    const command = NATIVE_COMMANDS[operation];
+
+    if (!command) {
+      throw new RuntimeError(
+        `Native command is not registered: ${operation}`
+      );
+    }
+
+    try {
+      return await native(command, args || {});
+    } catch (cause) {
+      throw new RuntimeError(directMessage(cause));
+    }
+  }
+
+  const route = API_ROUTES[operation];
+
+  if (!route) {
     throw new RuntimeError(
-      "The local QTM native runtime is unavailable."
+      `Browser API route is not registered: ${operation}`
     );
   }
 
-  if (!command) {
-    throw new RuntimeError(
-      `Native command is not registered: ${operation}`
-    );
-  }
+  const [method, path] = route(args || {});
+  const body =
+    ["createSubstrate", "receive", "transit"].includes(operation)
+      ? args?.request
+      : undefined;
 
-  try {
-    return await invoke(command, args || {});
-  } catch (cause) {
-    throw new RuntimeError(directMessage(cause));
-  }
+  return apiRequest(path, {
+    method,
+    ...(body !== undefined ? { body } : {}),
+  });
 }
 
 
