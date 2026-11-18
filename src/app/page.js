@@ -2140,8 +2140,11 @@ export default function Home() {
 
         let payload;
 
+        
         if (seedSource === "bip39") {
-          if (!phrase.trim()) {
+          const mnemonic = phrase.trim();
+
+          if (!mnemonic) {
             throw new Error("Enter a BIP39 mnemonic phrase.");
           }
 
@@ -2152,11 +2155,11 @@ export default function Home() {
           payload = {
             name: substrateName,
             seed_source: "bip39",
-            phrase: phrase.trim(),
+            phrase: mnemonic,
             language,
             passphrase,
           };
-        } else {
+        } else if (seedSource === "persistent") {
           const parsed = indices.split(",").map((item) => item.trim());
 
           if (
@@ -2181,11 +2184,24 @@ export default function Home() {
             indices: parsed.map(Number).join(","),
             entropy: entropy.trim() || substrateName,
           };
+        } else {
+          throw new Error("Select a valid substrate seed source.");
+        }
+        
+         
+        if (!nativeInvoke()) {
+          const confirmed = window.confirm(
+            `You are creating "${substrateName}" in browser mode.\n\n` +
+              "The seed material will be sent to the configured QTM API:\n" +
+              `${API_BASE}\n\n` +
+              "Continue only if you trust this server."
+          );
+
+          if (!confirmed) {
+            return;
+          }
         }
 
-        const data = await callRuntime("createSubstrate", {
-          request: payload,
-        });
 
         setResult(data);
         setName("");
