@@ -877,7 +877,7 @@ function NetworkCard({
 
 /* ───────────────────────── Page ───────────────────────── */
 
-function EventStorePage() {
+function EventStoreContent() {
   const searchParams = useSearchParams();
   const requestedSubstrate = (searchParams.get("substrate") || "").trim();
 
@@ -1847,15 +1847,14 @@ function EventStorePage() {
     </main>
   );
 }
+
 export default function EventStorePage() {
   return (
     <Suspense
       fallback={
         <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
           <div className="mx-auto w-full max-w-7xl">
-            <p className="text-sm text-zinc-500">
-              Loading QTM Event Store…
-            </p>
+            <p className="text-sm text-zinc-500">Loading QTM Event Store…</p>
           </div>
         </main>
       }
@@ -1864,4 +1863,3 @@ export default function EventStorePage() {
     </Suspense>
   );
 }
-
