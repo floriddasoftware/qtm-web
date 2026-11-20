@@ -904,10 +904,11 @@ export default function EventStorePage() {
   const [store, setStore] = useState(null);
   const [logViewer, setLogViewer] = useState(null);
 
-  const selectedSubstrateRef = useRef("");
-  const selectedActivationRef = useRef("");
-  const payloadRequestRef = useRef(0);
-  const scopeRequestRef = useRef(0);
+const selectedSubstrateRef = useRef("");
+const selectedActivationRef = useRef("");
+const payloadRequestRef = useRef(0);
+const scopeRequestRef = useRef(0);
+const eventsRequestRef = useRef(0);
 
   const selectedEvents = useMemo(
     () => events.filter((event) => activationFromEvent(event) === String(activation)),
@@ -1020,28 +1021,50 @@ export default function EventStorePage() {
   }, []);
 
   const loadEvents = useCallback(async (name, activationValue) => {
-    if (!name) return;
-    const selected = String(activationValue);
-    const requestId = ++scopeRequestRef.current;
-    setLoadingEvents(true);
-    setError("");
-    try {
-      const eventBody = await apiRequest(`/wallets/${enc(name)}/events`);
-      if (requestId !== scopeRequestRef.current || selectedSubstrateRef.current !== name) return;
-      const nextEvents = Array.isArray(eventBody?.events) ? eventBody.events : [];
-      setEvents(nextEvents);
-      setStore(eventBody);
-      await loadPayloadsForEvents(name, nextEvents, selected);
-    } catch (err) {
-      if (requestId === scopeRequestRef.current) {
-        setEvents([]);
-        setPayloads([]);
-        setError(err instanceof Error ? err.message : "Unable to load events.");
-      }
-    } finally {
-      if (requestId === scopeRequestRef.current) setLoadingEvents(false);
+  if (!name) return;
+  const selected = String(activationValue);
+  const requestId = ++eventsRequestRef.current;
+  setLoadingEvents(true);
+  setError("");
+  try {
+    const eventBody = await apiRequest(
+      `/wallets/${enc(name)}/events`
+    );
+    if (
+      requestId !== eventsRequestRef.current ||
+      selectedSubstrateRef.current !== name
+    ) {
+      return;
     }
-  }, [loadPayloadsForEvents]);
+    const nextEvents = Array.isArray(eventBody?.events)
+      ? eventBody.events
+      : [];
+    setEvents(nextEvents);
+    setStore(eventBody);
+    await loadPayloadsForEvents(
+      name,
+      nextEvents,
+      selected
+    );
+  } catch (err) {
+    if (
+      requestId === eventsRequestRef.current &&
+      selectedSubstrateRef.current === name
+    ) {
+      setEvents([]);
+      setPayloads([]);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load events."
+      );
+    }
+  } finally {
+    if (requestId === eventsRequestRef.current) {
+      setLoadingEvents(false);
+    }
+  }
+}, [loadPayloadsForEvents]);
 
   const loadBudgets = useCallback(async (name, activationValue) => {
     if (!name || !/^\d+$/.test(String(activationValue))) return;
@@ -1253,10 +1276,14 @@ export default function EventStorePage() {
   }, [substrate, activation, runningBitcoinNetworkIds]);
 
   const chooseSubstrate = async (name) => {
-    selectedSubstrateRef.current = name;
-    selectedActivationRef.current = "";
-    scopeRequestRef.current += 1;
-    payloadRequestRef.current += 1;
+  selectedSubstrateRef.current = name;
+  selectedActivationRef.current = "";
+
+  eventsRequestRef.current += 1;
+  scopeRequestRef.current += 1;
+  payloadRequestRef.current += 1;
+
+  setLoadingEvents(false);
     setSubstrate(name);
     setActivation("");
     setEvents([]);
