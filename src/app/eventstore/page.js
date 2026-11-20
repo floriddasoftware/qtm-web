@@ -1131,30 +1131,68 @@ export default function EventStorePage() {
   }, [loadBudgets, loadNetworkData, loadObservationStatuses]);
 
   const loadInitial = useCallback(async () => {
-    setLoadingList(true);
-    try {
-      const [walletBody, networkBody] = await Promise.all([apiRequest("/wallets"), apiRequest("/networks")]);
-      const walletRows = Array.isArray(walletBody?.substrates) ? walletBody.substrates : [];
-      const networkRows = (Array.isArray(networkBody?.networks) ? networkBody.networks : []).map(normalizeNetwork).filter(Boolean);
-      setSubstrates(walletRows);
-      setNetworks(networkRows);
-      const initialName = walletRows[0]?.name || "";
-      if (initialName) {
-        setSubstrate(initialName);
-        selectedSubstrateRef.current = initialName;
-        const initialActivation = String(walletRows[0]?.activations ?? "0");
-        const safeActivation = /^\d+$/.test(initialActivation) ? initialActivation : "0";
-        setActivation(safeActivation);
-        selectedActivationRef.current = safeActivation;
-        await loadEvents(initialName, safeActivation);
-        await loadAll(initialName, safeActivation, networkRows);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to initialize Event Store.");
-    } finally {
+  setLoadingList(true);
+  setError("");
+
+  try {
+    const [walletBody, networkBody] = await Promise.all([
+      apiRequest("/wallets"),
+      apiRequest("/networks"),
+    ]);
+
+    const walletRows = Array.isArray(walletBody?.substrates)
+      ? walletBody.substrates
+      : [];
+
+    const networkRows = (
+      Array.isArray(networkBody?.networks)
+        ? networkBody.networks
+        : []
+    )
+      .map(normalizeNetwork)
+      .filter(Boolean);
+
+    setSubstrates(walletRows);
+    setNetworks(networkRows);
+
+    const initialName = walletRows[0]?.name || "";
+
+    if (!initialName) {
+      setSubstrate("");
+      setActivation("");
+      setEvents([]);
       setLoadingList(false);
+      return;
     }
-  }, [loadAll, loadEvents]);
+
+    const rawActivation = String(walletRows[0]?.activations ?? "0");
+    const initialActivation = /^\d+$/.test(rawActivation)
+      ? rawActivation
+      : "0";
+
+    setSubstrate(initialName);
+    setActivation(initialActivation);
+
+    selectedSubstrateRef.current = initialName;
+    selectedActivationRef.current = initialActivation;
+
+    // Substrate selection is ready. Do not keep it in a
+    // loading state while Event Store requests are running.
+    setLoadingList(false);
+
+    // Load the rest of the Event Store independently.
+    void loadEvents(initialName, initialActivation);
+    void loadAll(initialName, initialActivation, networkRows);
+  } catch (err) {
+    setError(
+      err instanceof Error
+        ? err.message
+        : "Unable to initialize Event Store."
+    );
+  } finally {
+    setLoadingList(false);
+  }
+}, [loadAll, loadEvents]);
 
   useEffect(() => { loadInitial(); }, [loadInitial]);
 
