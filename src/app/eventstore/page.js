@@ -1084,45 +1084,88 @@ const eventsRequestRef = useRef(0);
     }
   }, []);
 
-  const loadNetworkData = useCallback(async (name, activationValue, networkRows) => {
-    if (!name || !/^\d+$/.test(String(activationValue))) return;
-    const selected = String(activationValue);
-    const requestId = ++scopeRequestRef.current;
-    const activeNetworks = (networkRows || []).map(normalizeNetwork).filter(Boolean);
-    setLoadingBoards(true);
-    setLoadingWire(true);
+  
+const loadNetworkData = useCallback(async (name, activationValue, networkRows) => {
+  if (!name || !/^\d+$/.test(String(activationValue))) return;
 
-    const boardResults = await Promise.allSettled(activeNetworks.map((network) =>
-      apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/payload-board`),
-    ));
-    if (requestId !== scopeRequestRef.current || selectedSubstrateRef.current !== name || selectedActivationRef.current !== selected) return;
+  const selected = String(activationValue);
+  const requestId = ++scopeRequestRef.current;
+  const activeNetworks = (networkRows || [])
+    .map(normalizeNetwork)
+    .filter(Boolean);
+
+  const isCurrent = () =>
+    requestId === scopeRequestRef.current &&
+    selectedSubstrateRef.current === name &&
+    selectedActivationRef.current === selected;
+
+  setLoadingBoards(true);
+  setLoadingWire(true);
+
+  try {
+    const boardResults = await Promise.allSettled(
+      activeNetworks.map((network) =>
+        apiRequest(
+          `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/payload-board`
+        )
+      )
+    );
+
+    if (!isCurrent()) return;
 
     const nextBoards = {};
+
     boardResults.forEach((result, index) => {
       if (result.status !== "fulfilled") return;
+
       const body = result.value;
-      if (body?.activation != null && String(body.activation) !== selected) return;
+
+      if (
+        body?.activation != null &&
+        String(body.activation) !== selected
+      ) return;
+
       nextBoards[activeNetworks[index].id] = body;
     });
+
     setBoards(nextBoards);
-    setLoadingBoards(false);
 
     const btcNetworks = activeNetworks.filter(bitcoinNetwork);
-    const wireResults = await Promise.allSettled(btcNetworks.map((network) =>
-      apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/wirepackets`),
-    ));
-    if (requestId !== scopeRequestRef.current || selectedSubstrateRef.current !== name || selectedActivationRef.current !== selected) return;
+
+    const wireResults = await Promise.allSettled(
+      btcNetworks.map((network) =>
+        apiRequest(
+          `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/wirepackets`
+        )
+      )
+    );
+
+    if (!isCurrent()) return;
 
     const nextWire = {};
+
     wireResults.forEach((result, index) => {
       if (result.status !== "fulfilled") return;
+
       const metadata = result.value;
-      if (metadata?.activation != null && String(metadata.activation) !== selected) return;
+
+      if (
+        metadata?.activation != null &&
+        String(metadata.activation) !== selected
+      ) return;
+
       nextWire[btcNetworks[index].id] = metadata;
     });
+
     setWirePackets(nextWire);
-    setLoadingWire(false);
-  }, []);
+  } finally {
+    if (requestId === scopeRequestRef.current) {
+      setLoadingBoards(false);
+      setLoadingWire(false);
+    }
+  }
+}, []);
+
 
   const loadObservationStatuses = useCallback(async (name, activationValue, networkRows) => {
     if (!name || !/^\d+$/.test(String(activationValue))) return;
