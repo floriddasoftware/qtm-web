@@ -207,68 +207,103 @@ function parseApiResponse(raw) {
 }
 
 async function apiRequest(path, options = {}) {
-  const method = options.method || "GET";
-  const url = `${API_BASE}${path}`;
+const method = options.method || “GET”;
+const url = ${API_BASE}${path};
+const startedAt = performance.now();
 
-  let response;
+let response;
 
-  try {
-    response = await fetch(url, {
-      method,
-      headers: {
-        Accept: "application/json",
-        ...(options.body !== undefined
-          ? { "Content-Type": "application/json" }
-          : {}),
-        ...options.headers,
-      },
-      ...(options.body !== undefined
-        ? { body: JSON.stringify(options.body) }
-        : {}),
-      cache: "no-store",
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
-  } catch (cause) {
-    throw new RuntimeError(
-      `Could not reach the QTM API at ${API_BASE} while calling ${method} ${path}: ${directMessage(cause)}`,
-      { status: 0, url }
-    );
+console.info([QTM API] START ${method} ${path});
+
+try {
+response = await fetch(url, {
+method,
+headers: {
+Accept: “application/json”,
+…(options.body !== undefined
+? { “Content-Type”: “application/json” }
+: {}),
+…options.headers,
+},
+…(options.body !== undefined
+? { body: JSON.stringify(options.body) }
+: {}),
+cache: “no-store”,
+…(options.signal ? { signal: options.signal } : {}),
+});
+
+console.info(
+  `[QTM API] HEADERS ${method} ${path} ` +
+  `status=${response.status} ` +
+  `elapsed=${Math.round(performance.now() - startedAt)}ms`
+);
+
+} catch (cause) {
+console.error(
+[QTM API] FETCH FAILED ${method} ${path},
+cause
+);
+
+throw new RuntimeError(
+  `Could not reach the QTM API at ${API_BASE} while calling ${method} ${path}: ${directMessage(cause)}`,
+  { status: 0, url }
+);
+
+}
+
+let raw;
+
+try {
+raw = await response.text();
+
+console.info(
+  `[QTM API] BODY COMPLETE ${method} ${path} ` +
+  `bytes=${raw.length} ` +
+  `elapsed=${Math.round(performance.now() - startedAt)}ms`
+);
+
+} catch (cause) {
+console.error(
+[QTM API] BODY FAILED ${method} ${path},
+cause
+);
+
+throw new RuntimeError(
+  `The QTM API connection closed before the response was read (${method} ${path}): ${directMessage(cause)}`,
+  {
+    status: response.status,
+    statusText: response.statusText,
+    url: response.url || url,
   }
+);
 
-  let raw;
+}
 
-  try {
-    raw = await response.text();
-  } catch (cause) {
-    throw new RuntimeError(
-      `The QTM API connection closed before the response was read (${method} ${path}): ${directMessage(cause)}`,
-      {
-        status: response.status,
-        statusText: response.statusText,
-        url: response.url || url,
-      }
-    );
+const data = parseApiResponse(raw);
+
+if (!response.ok) {
+const message = valueAt(data, [“error”, “message”, “detail”]);
+
+throw new RuntimeError(
+  typeof message === "string" && message.trim()
+    ? message.trim()
+    : `Request failed with HTTP ${response.status}: ${method} ${path}`,
+  {
+    status: response.status,
+    statusText: response.statusText,
+    url: response.url || url,
+    body: data,
   }
+);
 
-  const data = parseApiResponse(raw);
+}
 
-  if (!response.ok) {
-    const message = valueAt(data, ["error", "message", "detail"]);
+console.info(
+[QTM API] SUCCESS ${method} ${path}  +
+elapsed=${Math.round(performance.now() - startedAt)}ms
+);
 
-    throw new RuntimeError(
-      typeof message === "string" && message.trim()
-        ? message.trim()
-        : `Request failed with HTTP ${response.status}: ${method} ${path}`,
-      {
-        status: response.status,
-        statusText: response.statusText,
-        url: response.url || url,
-        body: data,
-      }
-    );
-  }
-
-  return data;
+return data;
 }
 
 async function callRuntime(operation, args = {}) {
