@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 const API_BASE = (
@@ -877,7 +877,7 @@ function NetworkCard({
 
 /* ───────────────────────── Page ───────────────────────── */
 
-export default function EventStorePage() {
+function EventStorePage() {
   const searchParams = useSearchParams();
   const requestedSubstrate = (searchParams.get("substrate") || "").trim();
 
@@ -1847,3 +1847,21 @@ export default function EventStorePage() {
     </main>
   );
 }
+export default function EventStorePage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
+          <div className="mx-auto w-full max-w-7xl">
+            <p className="text-sm text-zinc-500">
+              Loading QTM Event Store…
+            </p>
+          </div>
+        </main>
+      }
+    >
+      <EventStoreContent />
+    </Suspense>
+  );
+}
+
