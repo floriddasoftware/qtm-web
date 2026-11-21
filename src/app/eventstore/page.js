@@ -1944,6 +1944,7 @@ function EventStoreContent() {
       ? logViewer
       : null;
 
+
   const openBitMinerLogs = (network) => {
     if (!substrate || !network?.id || !/^\d+$/.test(String(activation))) return;
     setLogViewer({ substrate, activation: String(activation), network: network.id });
@@ -1962,32 +1963,52 @@ function EventStoreContent() {
   return (
     <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
       <style>{QTM_STYLES}</style>
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4" inert={activeLogViewer ? true : undefined} aria-hidden={activeLogViewer ? true : undefined}>
+
+      <div
+        className="mx-auto flex w-full max-w-7xl flex-col gap-4"
+        inert={activeLogViewer ? true : undefined}
+        aria-hidden={activeLogViewer ? true : undefined}
+      >
         <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div className="min-w-0">
-            <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">QTM Event Store</h1>
+            <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
+              QTM Event Store
+            </h1>
             <p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 sm:text-sm dark:text-zinc-400">
-              Persisted substrate events, activation-scoped payloads, network budgets, payload boards, Bitcoin observation and API-owned wirepackets.
+              Persisted substrate events, activation-scoped payloads, network budgets,
+              payload boards, Bitcoin observation and API-owned wirepackets.
             </p>
           </div>
+
           <div className="grid grid-cols-3 gap-2 sm:flex">
-            <a href="/network" className={BUTTON}>Network</a>
-            <a href="/" className={BUTTON}>QTM</a>
-            <button type="button" className={BUTTON} disabled={!substrate || anyLoading} onClick={refreshAll}>{anyLoading ? "Syncing…" : "Refresh"}</button>
+            <a href="/network" className={BUTTON}>
+              Network
+            </a>
+
+            <a href="/" className={BUTTON}>
+              QTM
+            </a>
+
+            <button
+              type="button"
+              className={BUTTON}
+              disabled={!substrate || loadingList}
+              onClick={refreshAll}
+            >
+              {loadingList ? "Refreshing…" : "Refresh"}
+            </button>
           </div>
         </header>
 
         {handoffWarning && <Notice type="error">{handoffWarning}</Notice>}
+
         {error && <Notice>{error}</Notice>}
+
         {budgetLoadError && budgetLoadError !== error && (
           <Notice>{budgetLoadError}</Notice>
         )}
+
         {notice && <Notice type="success">{notice}</Notice>}
-        {activationSelected && requiredScopeLoading && (
-          <Notice type="success">
-            Synchronizing activation {activation} for substrate {substrate}…
-          </Notice>
-        )}
 
         <Card
           defaultOpen
@@ -2004,7 +2025,10 @@ function EventStoreContent() {
         >
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block min-w-0">
-              <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">Persistent substrate</span>
+              <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                Persistent substrate
+              </span>
+
               <select
                 className={INPUT}
                 value={substrate}
@@ -2018,6 +2042,7 @@ function EventStoreContent() {
                       ? "No substrates available"
                       : "Select substrate"}
                 </option>
+
                 {substrates.map((entry) => (
                   <option key={entry.name} value={entry.name}>
                     {entry.name}
@@ -2025,8 +2050,12 @@ function EventStoreContent() {
                 ))}
               </select>
             </label>
+
             <label className="block min-w-0">
-              <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">Activation</span>
+              <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                Activation
+              </span>
+
               <select
                 className={INPUT}
                 value={activation}
@@ -2041,6 +2070,7 @@ function EventStoreContent() {
               </select>
             </label>
           </div>
+
           <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
             <Stat label="Events" value={selectedEvents.length} />
             <Stat label="All events" value={events.length} />
@@ -2048,7 +2078,11 @@ function EventStoreContent() {
             <Stat label="Budgets set" value={`${configuredCount} / ${networks.length}`} />
             <Stat label="Retained mass" value={retainedMass.toString()} />
             <Stat label="API base" value={API_BASE} wide />
-            {store?.directory && <Stat label="Substrate directory" value={store.directory} wide />}
+
+            {store?.directory && (
+              <Stat label="Substrate directory" value={store.directory} wide />
+            )}
+
             {requestedSubstrate && (
               <Stat label="Outer-frame substrate" value={requestedSubstrate} wide />
             )}
@@ -2058,10 +2092,17 @@ function EventStoreContent() {
         <SectionHeading title="Bitcoin" meta={`coin type ${COIN_TYPES[0].type}`}>
           Legacy and SegWit share the single Bitcoin payload kind.
         </SectionHeading>
-        {loadingPayloads && <p className="px-1 text-xs text-zinc-500">Rendering payload records…</p>}
+
+        {loadingPayloads && (
+          <p className="px-1 text-xs text-zinc-500">
+            Rendering payload records…
+          </p>
+        )}
+
         <div className="grid grid-cols-1 items-start gap-3 xl:grid-cols-2">
           {bitcoinSlots.map((slot, index) => {
             const id = slot.network?.id;
+
             return (
               <NetworkCard
                 key={id || `placeholder-${slot.kind}`}
@@ -2094,9 +2135,13 @@ function EventStoreContent() {
         <SectionHeading title="Other chains" meta="not yet implemented">
           One payload kind each, from the paths registry. Placeholders until wired up.
         </SectionHeading>
+
         <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {COIN_TYPES.filter((coin) => coin.key !== "bitcoin").map((coin, index) => {
-            const registered = networks.filter((network) => coinKey(network) === coin.key).length;
+            const registered = networks.filter(
+              (network) => coinKey(network) === coin.key,
+            ).length;
+
             return (
               <Card
                 key={coin.key}
@@ -2107,8 +2152,11 @@ function EventStoreContent() {
               >
                 <Fields min="7rem">
                   <Field label="Registry path">
-                    <span className="break-all font-mono text-xs">{coin.path}</span>
+                    <span className="break-all font-mono text-xs">
+                      {coin.path}
+                    </span>
                   </Field>
+
                   <Field label="API networks">{registered}</Field>
                 </Fields>
               </Card>
@@ -2117,6 +2165,7 @@ function EventStoreContent() {
         </div>
 
         <SectionHeading title="Diagnostics" />
+
         <Card
           scroll
           title="Persisted event records"
@@ -2128,31 +2177,64 @@ function EventStoreContent() {
             <table className="w-full min-w-[850px] border-collapse text-left text-sm">
               <thead className="bg-zinc-100 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
                 <tr>
-                  {["Activation", "Event type", "Record reference", "Dimension", "Structural value (Σ)", "Depth objects", "Retained mass"].map((heading) => (
+                  {[
+                    "Activation",
+                    "Event type",
+                    "Record reference",
+                    "Dimension",
+                    "Structural value (Σ)",
+                    "Depth objects",
+                    "Retained mass",
+                  ].map((heading) => (
                     <th key={heading} className="px-4 py-3 font-semibold">
                       {heading}
                     </th>
                   ))}
                 </tr>
               </thead>
+
               <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
                 {events.map((event, index) => {
                   const state = event?.heritage?.state;
+
                   return (
-                    <tr key={`${event.record}-${index}`} className="align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
-                      <td className="whitespace-nowrap px-4 py-3 font-mono">{activationFromEvent(event) ?? money(event.activation)}</td>
+                    <tr
+                      key={`${event.record}-${index}`}
+                      className="align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                    >
+                      <td className="whitespace-nowrap px-4 py-3 font-mono">
+                        {activationFromEvent(event) ?? money(event.activation)}
+                      </td>
+
                       <td className="px-4 py-3">{money(event.kind)}</td>
-                      <td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">{money(event.record)}</td>
-                      <td className="break-all px-4 py-3 font-mono">{money(event.dimension ?? state?.dimension)}</td>
-                      <td className="break-all px-4 py-3 font-mono">{money(event.structural_value ?? state?.structural_value)}</td>
+
+                      <td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">
+                        {money(event.record)}
+                      </td>
+
+                      <td className="break-all px-4 py-3 font-mono">
+                        {money(event.dimension ?? state?.dimension)}
+                      </td>
+
+                      <td className="break-all px-4 py-3 font-mono">
+                        {money(event.structural_value ?? state?.structural_value)}
+                      </td>
+
                       <td className="px-4 py-3">{money(event.depth_objects)}</td>
-                      <td className="break-all px-4 py-3 font-mono">{money(event.retained_mass ?? state?.retained_mass)}</td>
+
+                      <td className="break-all px-4 py-3 font-mono">
+                        {money(event.retained_mass ?? state?.retained_mass)}
+                      </td>
                     </tr>
                   );
                 })}
+
                 {events.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="px-4 py-10 text-center text-sm text-zinc-500">
+                    <td
+                      colSpan={7}
+                      className="px-4 py-10 text-center text-sm text-zinc-500"
+                    >
                       {eventsEmptyText}
                     </td>
                   </tr>
@@ -2164,24 +2246,49 @@ function EventStoreContent() {
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:hidden">
             {events.map((event, index) => {
               const state = event?.heritage?.state;
+
               return (
-                <article key={`${event.record}-card-${index}`} className={`${INNER} p-3`}>
+                <article
+                  key={`${event.record}-card-${index}`}
+                  className={`${INNER} p-3`}
+                >
                   <div className="flex items-start justify-between gap-2">
-                    <h4 className="min-w-0 break-all text-sm font-semibold">{money(event.kind)}</h4>
-                    <Pill>Act. {activationFromEvent(event) ?? money(event.activation)}</Pill>
+                    <h4 className="min-w-0 break-all text-sm font-semibold">
+                      {money(event.kind)}
+                    </h4>
+
+                    <Pill>
+                      Act. {activationFromEvent(event) ?? money(event.activation)}
+                    </Pill>
                   </div>
-                  <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">{money(event.record)}</p>
+
+                  <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">
+                    {money(event.record)}
+                  </p>
+
                   <div className="mt-3">
                     <Fields min="7rem">
-                      <Field label="Dimension">{money(event.dimension ?? state?.dimension)}</Field>
-                      <Field label="Structural value (Σ)">{money(event.structural_value ?? state?.structural_value)}</Field>
-                      <Field label="Depth objects">{money(event.depth_objects)}</Field>
-                      <Field label="Retained mass">{money(event.retained_mass ?? state?.retained_mass)}</Field>
+                      <Field label="Dimension">
+                        {money(event.dimension ?? state?.dimension)}
+                      </Field>
+
+                      <Field label="Structural value (Σ)">
+                        {money(event.structural_value ?? state?.structural_value)}
+                      </Field>
+
+                      <Field label="Depth objects">
+                        {money(event.depth_objects)}
+                      </Field>
+
+                      <Field label="Retained mass">
+                        {money(event.retained_mass ?? state?.retained_mass)}
+                      </Field>
                     </Fields>
                   </div>
                 </article>
               );
             })}
+
             {events.length === 0 && (
               <p className="col-span-full rounded-xl border border-zinc-200 p-4 text-sm text-zinc-500 dark:border-zinc-800 lg:hidden">
                 {eventsEmptyText}
