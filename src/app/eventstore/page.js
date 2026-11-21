@@ -1770,142 +1770,47 @@ function EventStoreContent() {
     await loadAll(substrate, selected, networks);
   }
 
-  /**
-   * Refresh lifecycle.
-   * - The loaded substrate and the selected activation are retained; neither
-   *   is re-resolved from GET /wallets or from the event list.
-   * - GET /events (persistent event index) and GET /networks refresh
-   *   independently.
-   * - Payloads are reloaded explicitly for the CURRENT selected activation
-   *   (read from the ref, so an activation change during refresh is honoured).
-   * - Budgets → boards/observation → WirePackets run for that activation.
-   * - If the substrate/activation changes mid-refresh, the old chain stops and
-   *   leaves loading flags to chooseSubstrate / chooseActivation.
-   */
-  const refreshAll = async () => {
-    const requestId = ++bootRequestRef.current;
-    const previousSubstrate = selectedSubstrateRef.current;
-    const previousActivation = selectedActivationRef.current;
+const refreshAll = async () => {
+  const requestId = ++bootRequestRef.current;
+  const name = selectedSubstrateRef.current;
+  const activation = selectedActivationRef.current;
+
+  if (!name) return;
+
+  setLoadingList(true);
+  setError("");
+  setNotice("");
+  setHandoffWarning("");
+
+  try {
+    await Promise.all([
+      listSubstrates(),
+      loadEvents(name, activation, { payloads: false }),
+    ]);
 
     if (
-      !previousSubstrate ||
-      !/^\d+$/.test(String(previousActivation))
+      requestId !== bootRequestRef.current ||
+      selectedSubstrateRef.current !== name
     ) {
       return;
     }
 
-    setLoadingList(true);
-    setError("");
+    setNotice("Event Store refreshed.");
+  } catch (err) {
+    if (requestId !== bootRequestRef.current) return;
+
+    setError(
+      err instanceof Error
+        ? `Refresh failed: ${err.message}`
+        : "Refresh failed.",
+    );
     setNotice("");
-    setHandoffWarning("");
-
-    try {
-      // Refresh the persistent event index for the loaded substrate.
-      // Refresh the network registry independently.
-      const [eventsResult, networksResult] = await Promise.allSettled([
-        loadEvents(previousSubstrate, previousActivation, {
-          payloads: false,
-        }),
-        listNetworks(),
-      ]);
-
-      if (
-        requestId !== bootRequestRef.current ||
-        selectedSubstrateRef.current !== previousSubstrate
-      ) {
-        return;
-      }
-
-      const eventRows =
-        eventsResult.status === "fulfilled"
-          ? eventsResult.value
-          : null;
-
-      let networkRows = networks;
-
-      if (networksResult.status === "fulfilled") {
-        networkRows = networksResult.value;
-        setNetworks(networkRows);
-      } else {
-        setError(
-          networksResult.reason instanceof Error
-            ? `Unable to load network registry: ${networksResult.reason.message}`
-            : "Unable to load network registry.",
-        );
-      }
-
-      if (eventRows === null) {
-        return;
-      }
-
-      // Keep the caller's activation; the event list is not an
-      // auto-selection mechanism during refresh. Read it from the ref so a
-      // change made while the index/registry were loading is not lost.
-      const currentActivation = selectedActivationRef.current;
-
-      const isStale = () =>
-        requestId !== bootRequestRef.current ||
-        selectedSubstrateRef.current !== previousSubstrate ||
-        selectedActivationRef.current !== currentActivation;
-
-      if (!/^\d+$/.test(String(currentActivation))) return;
-
-      // Explicit payload reload for the current activation, using the fresh
-      // event index. Runs alongside the activation-scoped chain below.
-      const payloadsPromise = loadPayloadsForEvents(
-        previousSubstrate,
-        eventRows,
-        currentActivation,
-      );
-
-      const budgetRows = await loadBudgets(
-        previousSubstrate,
-        currentActivation,
-      );
-
-      if (isStale()) return;
-
-      if (budgetRows === null) {
-        setLoadingBoards(false);
-        setLoadingWire(false);
-        await payloadsPromise;
-        return;
-      }
-
-      await Promise.all([
-        loadPayloadBoards(previousSubstrate, currentActivation, networkRows),
-        loadObservationStatuses(previousSubstrate, currentActivation, networkRows),
-      ]);
-
-      if (isStale()) return;
-
-      await loadWirePackets(
-        previousSubstrate,
-        currentActivation,
-        networkRows,
-      );
-
-      if (isStale()) return;
-
-      await payloadsPromise;
-      if (isStale()) return;
-
-      setNotice("Event Store refreshed.");
-    } catch (err) {
-      if (requestId !== bootRequestRef.current) return;
-
-      setError(
-        err instanceof Error
-          ? `Refresh failed: ${err.message}`
-          : "Refresh failed.",
-      );
-      setNotice("");
-    } finally {
-      if (requestId === bootRequestRef.current) {
-        setLoadingList(false);
-      }
+  } finally {
+    if (requestId === bootRequestRef.current) {
+      setLoadingList(false);
     }
-  };
+  }
+};
 
   const appendStreamResult = (networkId, label, body) => {
     setStreamResults((current) => ({
