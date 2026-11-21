@@ -99,31 +99,6 @@ function enc(value) {
   return encodeURIComponent(String(value));
 }
 
-/**
- * GET /wallets — substrate discovery ONLY.
- * Response shape: { substrates: [{ name, dimension }] }
- * Activations are never read from this response; they come from the
- * persistent event index (GET /wallets/:name/events).
- */
-async function listSubstrates() {
-  const body = await apiRequest("/wallets");
-  const rows = Array.isArray(body?.substrates) ? body.substrates : [];
-
-  return rows
-    .filter(
-      (entry) =>
-        entry &&
-        typeof entry.name === "string" &&
-        entry.name.length > 0,
-    )
-    .map((entry) => ({
-      name: entry.name,
-      dimension:
-        entry.dimension != null
-          ? String(entry.dimension)
-          : "",
-    }));
-}
 
 function activationFromEvent(event) {
   const value =
@@ -1423,47 +1398,6 @@ const loadObservationStatuses = useCallback(async (name, activationValue, networ
   }
 }, []);
 
-
-/**
- * Resolve the substrate requested through ?substrate=.
- */
-const resolveSubstrate = useCallback((walletRows, requested) => {
-  const names = walletRows
-    .map((row) => row?.name)
-    .filter(Boolean);
-
-  if (!names.length) {
-    return {
-      name: "",
-      warning: requested
-        ? `Requested substrate "${requested}", but GET /wallets returned no substrates.`
-        : "No substrates were returned by the API.",
-    };
-  }
-
-  if (requested) {
-    const match = walletRows.find(
-      (row) => row?.name === requested,
-    );
-
-    if (match) {
-      return {
-        name: match.name,
-        warning: "",
-      };
-    }
-
-    return {
-      name: "",
-      warning: `Requested substrate "${requested}" (not resolved). Available: ${names.join(", ") || "(none)"}.`,
-    };
-  }
-
-  return {
-    name: walletRows[0].name,
-    warning: "",
-  };
-}, []);
 
 
 /**
