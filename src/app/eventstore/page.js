@@ -1114,58 +1114,66 @@ function EventStoreContent() {
   }, [isCurrentScope]);
 
   const loadEvents = useCallback(async (name, activationValue) => {
-    if (!name) {
+  if (!name) {
+    eventsRequestRef.current += 1;
+    setLoadingEvents(false);
+    setEvents([]);
+    setStore(null);
+    return null;
+  }
+
+  const selected = String(activationValue);
+  const requestId = ++eventsRequestRef.current;
+
+  setLoadingEvents(true);
+  setError("");
+
+  try {
+    const eventBody = await apiRequest(
+      `/wallets/${enc(name)}/events`,
+    );
+
+    if (
+      requestId !== eventsRequestRef.current ||
+      selectedSubstrateRef.current !== name
+    ) {
+      return null;
+    }
+
+    const nextEvents = Array.isArray(eventBody?.events)
+      ? eventBody.events
+      : [];
+
+    setEvents(nextEvents);
+    setStore(eventBody);
+
+    // Payload retrieval is independent from persisted event chronology.
+    // Do not await it; its own request lifecycle manages loading/errors.
+    void loadPayloadsForEvents(name, nextEvents, selected);
+
+    return nextEvents;
+  } catch (err) {
+    if (
+      requestId === eventsRequestRef.current &&
+      selectedSubstrateRef.current === name
+    ) {
+      setEvents([]);
+      setPayloads([]);
+      setStore(null);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load events.",
+      );
+    }
+
+    return null;
+  } finally {
+    if (requestId === eventsRequestRef.current) {
       setLoadingEvents(false);
-      return null;
     }
-
-    const selected = String(activationValue);
-    const requestId = ++eventsRequestRef.current;
-
-    setLoadingEvents(true);
-    setError("");
-
-    try {
-      const eventBody = await apiRequest(`/wallets/${enc(name)}/events`);
-
-      if (
-        requestId !== eventsRequestRef.current ||
-        selectedSubstrateRef.current !== name
-      ) {
-        return null;
-      }
-
-      const nextEvents = Array.isArray(eventBody?.events)
-        ? eventBody.events
-        : [];
-
-      setEvents(nextEvents);
-      setStore(eventBody);
-
-      await loadPayloadsForEvents(name, nextEvents, selected);
-
-      return nextEvents;
-    } catch (err) {
-      if (
-        requestId === eventsRequestRef.current &&
-        selectedSubstrateRef.current === name
-      ) {
-        setEvents([]);
-        setPayloads([]);
-        setError(
-          err instanceof Error
-            ? err.message
-            : "Unable to load events.",
-        );
-      }
-
-      return null;
-    } finally {
-      if (requestId === eventsRequestRef.current) {
-        setLoadingEvents(false);
-      }
-    }
-  }, [loadPayloadsForEvents]);
+  }
+}, [loadPayloadsForEvents]);
 
   /**
    * Step 6 — Network budget
