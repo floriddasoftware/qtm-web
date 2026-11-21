@@ -99,6 +99,26 @@ function enc(value) {
   return encodeURIComponent(String(value));
 }
 
+/**
+ * Frontend dependency on qtm-api list_substrates() via GET /wallets.
+ * Establishes the persisted substrate list before any activation scope is selected.
+ * Response shape: { substrates: [{ name, dimension, activations }] }
+ */
+async function listSubstrates() {
+  const body = await apiRequest("/wallets");
+  const rows = Array.isArray(body?.substrates) ? body.substrates : [];
+  return rows
+    .filter((entry) => entry && typeof entry.name === "string" && entry.name.length > 0)
+    .map((entry) => ({
+      name: entry.name,
+      dimension: entry.dimension != null ? String(entry.dimension) : "",
+      activations:
+        entry.activations != null && /^\d+$/.test(String(entry.activations))
+          ? String(entry.activations)
+          : "0",
+    }));
+}
+
 function activationFromEvent(event) {
   const value =
     event?.activation ??
@@ -119,6 +139,16 @@ function normalizeNetwork(network) {
     path: network.path,
     registered: network.registered,
   };
+}
+
+/**
+ * Frontend dependency on GET /networks (registered path registry).
+ * Response shape: { networks: [{ id, name, coin, purpose, path }] }
+ */
+async function listNetworks() {
+  const body = await apiRequest("/networks");
+  const rows = Array.isArray(body?.networks) ? body.networks : [];
+  return rows.map(normalizeNetwork).filter(Boolean);
 }
 
 function normalizePayload(entry, fallbackRecord) {
@@ -903,6 +933,7 @@ function EventStoreContent() {
   const [notice, setNotice] = useState("");
   const [budgetErrors, setBudgetErrors] = useState({});
   const [budgetNotices, setBudgetNotices] = useState({});
+  const [budgetLoadError, setBudgetLoadError] = useState("");
   const [store, setStore] = useState(null);
   const [logViewer, setLogViewer] = useState(null);
   const [handoffWarning, setHandoffWarning] = useState("");
@@ -912,6 +943,7 @@ function EventStoreContent() {
   const payloadRequestRef = useRef(0);
   const scopeRequestRef = useRef(0);
   const eventsRequestRef = useRef(0);
+  const budgetRequestRef = useRef(0);
   const bootRequestRef = useRef(0);
 
   const selectedEvents = useMemo(
@@ -976,7 +1008,24 @@ function EventStoreContent() {
   }, [renderedNetworks]);
 
   const configuredCount = budgets.filter((row) => row.configured && row.budget).length;
-  const anyLoading = loadingEvents || loadingBudgets || loadingPayloads || loadingBoards || loadingWire;
+  // Activation is the synchronization boundary for a selected substrate.
+  // Required loaders for a synchronized activation: events, budgets, boards, wire.
+  // Payloads are derived from events and may lag briefly; they do not block scope readiness alone.
+  const activationSelected = Boolean(substrate) && /^\d+$/.test(String(activation));
+  const requiredScopeLoading =
+    loadingEvents || loadingBudgets || loadingBoards || loadingWire;
+  const anyLoading = requiredScopeLoading || loadingPayloads;
+  // Fully synchronized only when activation is selected and all required loaders finished.
+  const scopeSynchronized = activationSelected && !requiredScopeLoading;
+  const overviewBadge = (() => {
+    if (loadingList) return <Pill>Loading</Pill>;
+    if (!substrate) return <Pill tone="warn">No substrate</Pill>;
+    if (!activationSelected) return <Pill tone="warn">No activation</Pill>;
+    if (requiredScopeLoading) return <Pill>Syncing</Pill>;
+    if (budgetLoadError) return <Pill tone="warn">Budget error</Pill>;
+    if (error) return <Pill tone="warn">Partial</Pill>;
+    return <Pill tone="ok">Ready</Pill>;
+  })();
 
   const isCurrentScope = useCallback((name, activationValue, requestId, requestRef) => {
     return (
@@ -998,6 +1047,7 @@ function EventStoreContent() {
     setStore(null);
     setBudgetErrors({});
     setBudgetNotices({});
+    setBudgetLoadError("");
   }, []);
 
   const loadPayloadsForEvents = useCallback(async (name, eventRows, activationValue) => {
@@ -1096,22 +1146,39 @@ function EventStoreContent() {
 
   const loadBudgets = useCallback(async (name, activationValue) => {
     if (!name || !/^\d+$/.test(String(activationValue))) {
+      budgetRequestRef.current += 1;
       setLoadingBudgets(false);
+      setBudgetLoadError("");
       return;
     }
     const selected = String(activationValue);
+    const requestId = ++budgetRequestRef.current;
+    setLoadingBudgets(true);
+    setBudgetLoadError("");
     try {
       const body = await apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/budgets`);
-      if (selectedSubstrateRef.current !== name || selectedActivationRef.current !== selected) return;
+      if (
+        requestId !== budgetRequestRef.current ||
+        selectedSubstrateRef.current !== name ||
+        selectedActivationRef.current !== selected
+      ) {
+        return;
+      }
       const rows = Array.isArray(body?.budgets) ? body.budgets : [];
       setBudgets(rows.filter((row) => row?.activation == null || String(row.activation) === selected));
     } catch (err) {
-      if (selectedSubstrateRef.current === name && selectedActivationRef.current === selected) {
+      if (
+        requestId === budgetRequestRef.current &&
+        selectedSubstrateRef.current === name &&
+        selectedActivationRef.current === selected
+      ) {
         setBudgets([]);
-        setError(`Unable to load network budgets: ${err instanceof Error ? err.message : "API error"}`);
+        const message = err instanceof Error ? err.message : "API error";
+        setBudgetLoadError(`Unable to load network budgets: ${message}`);
+        setError(`Unable to load network budgets: ${message}`);
       }
     } finally {
-      if (selectedSubstrateRef.current === name && selectedActivationRef.current === selected) {
+      if (requestId === budgetRequestRef.current) {
         setLoadingBudgets(false);
       }
     }
@@ -1204,16 +1271,20 @@ function EventStoreContent() {
 
   const loadAll = useCallback(async (name, activationValue, networkRows = []) => {
     if (!name || !/^\d+$/.test(String(activationValue))) {
+      budgetRequestRef.current += 1;
+      scopeRequestRef.current += 1;
       setLoadingBudgets(false);
       setLoadingBoards(false);
       setLoadingWire(false);
+      setBudgetLoadError("");
       return;
     }
     const selected = String(activationValue);
+    // Establish the synchronized substrate state at this activation.
     selectedSubstrateRef.current = name;
     selectedActivationRef.current = selected;
-    setLoadingBudgets(true);
     setError("");
+    // Each loader owns its own loading flag and request guard.
     await Promise.all([
       loadBudgets(name, selected),
       loadNetworkData(name, selected, networkRows),
@@ -1272,25 +1343,16 @@ function EventStoreContent() {
     setNotice("");
 
     try {
-      const [walletBody, networkBody] = await Promise.all([
-        apiRequest("/wallets"),
-        apiRequest("/networks"),
-      ]);
-
+      // 1) Substrate list dependency: qtm-api list_substrates() via GET /wallets.
+      //    This must succeed (or return an empty list) before any substrate/activation
+      //    scope is established. Do not invent substrates client-side.
+      const walletRows = await listSubstrates();
       if (bootId !== bootRequestRef.current) return;
 
-      const walletRows = Array.isArray(walletBody?.substrates) ? walletBody.substrates : [];
-      const networkRows = (
-        Array.isArray(networkBody?.networks) ? networkBody.networks : []
-      )
-        .map(normalizeNetwork)
-        .filter(Boolean);
-
       setSubstrates(walletRows);
-      setNetworks(networkRows);
 
+      // 2) Resolve the selected substrate from the API list (outer-frame ?substrate= or first entry).
       const resolved = resolveSubstrate(walletRows, requestedSubstrate);
-
       if (resolved.warning) {
         setHandoffWarning(resolved.warning);
       }
@@ -1301,7 +1363,13 @@ function EventStoreContent() {
         clearScopeData();
         selectedSubstrateRef.current = "";
         selectedActivationRef.current = "";
-        setLoadingList(false);
+        // Still attempt to load the path registry so the UI can show planned chains.
+        try {
+          const networkRows = await listNetworks();
+          if (bootId === bootRequestRef.current) setNetworks(networkRows);
+        } catch {
+          // Network registry is secondary; substrate discovery failure is the primary error.
+        }
         return;
       }
 
@@ -1310,15 +1378,44 @@ function EventStoreContent() {
       selectedSubstrateRef.current = resolved.name;
       selectedActivationRef.current = resolved.activation;
 
-      // Substrate selection is ready; do not keep the list in a loading state
-      // while Event Store requests continue.
+      // 3) Path registry (independent of substrate filesystem discovery).
+      let networkRows = [];
+      try {
+        networkRows = await listNetworks();
+        if (bootId !== bootRequestRef.current) return;
+        setNetworks(networkRows);
+      } catch (netErr) {
+        if (bootId === bootRequestRef.current) {
+          setNetworks([]);
+          setError(
+            netErr instanceof Error
+              ? `Unable to load network registry: ${netErr.message}`
+              : "Unable to load network registry.",
+          );
+        }
+      }
+
+      if (bootId !== bootRequestRef.current) return;
+
+      // Substrate selection is established. Release the list-loading flag before
+      // activation-scoped synchronization continues.
       setLoadingList(false);
 
+      // 4) Activation is the synchronization boundary for the selected substrate.
+      //    Load events, budgets, payload boards, wire packets, and observation status
+      //    for this exact activation scope.
       void loadEvents(resolved.name, resolved.activation);
       void loadAll(resolved.name, resolved.activation, networkRows);
     } catch (err) {
       if (bootId === bootRequestRef.current) {
-        setError(err instanceof Error ? err.message : "Unable to initialize Event Store.");
+        // Failure here is substrate-list discovery (GET /wallets / list_substrates),
+        // not activation synchronization.
+        setError(
+          err instanceof Error
+            ? `Unable to list substrates (GET /wallets): ${err.message}`
+            : "Unable to list substrates (GET /wallets).",
+        );
+        setSubstrates([]);
         setSubstrate("");
         setActivation("");
         clearScopeData();
@@ -1398,6 +1495,7 @@ function EventStoreContent() {
     eventsRequestRef.current += 1;
     scopeRequestRef.current += 1;
     payloadRequestRef.current += 1;
+    budgetRequestRef.current += 1;
 
     selectedSubstrateRef.current = name;
     selectedActivationRef.current = "";
@@ -1407,6 +1505,7 @@ function EventStoreContent() {
     setLoadingBudgets(false);
     setLoadingBoards(false);
     setLoadingWire(false);
+    setBudgetLoadError("");
 
     setSubstrate(name);
     setActivation("");
@@ -1434,8 +1533,10 @@ function EventStoreContent() {
     if (!/^\d+$/.test(String(value))) return;
     const selected = String(value);
 
+    // Activation selection is the synchronization boundary for this substrate.
     scopeRequestRef.current += 1;
     payloadRequestRef.current += 1;
+    budgetRequestRef.current += 1;
 
     selectedActivationRef.current = selected;
     setActivation(selected);
@@ -1450,10 +1551,12 @@ function EventStoreContent() {
     setNotice("");
     setBudgetErrors({});
     setBudgetNotices({});
+    setBudgetLoadError("");
     setLoadingBudgets(true);
     setLoadingBoards(true);
     setLoadingWire(true);
 
+    // Resolve all activation-scoped data against this exact activation.
     loadPayloadsForEvents(substrate, events, selected);
     loadAll(substrate, selected, networks);
   }
@@ -1625,7 +1728,15 @@ function EventStoreContent() {
 
         {handoffWarning && <Notice type="error">{handoffWarning}</Notice>}
         {error && <Notice>{error}</Notice>}
+        {budgetLoadError && budgetLoadError !== error && (
+          <Notice>{budgetLoadError}</Notice>
+        )}
         {notice && <Notice type="success">{notice}</Notice>}
+        {activationSelected && requiredScopeLoading && (
+          <Notice type="success">
+            Synchronizing activation {activation} for substrate {substrate}…
+          </Notice>
+        )}
 
         <Card
           defaultOpen
@@ -1637,7 +1748,7 @@ function EventStoreContent() {
                 ? `Requested: ${requestedSubstrate} (not resolved)`
                 : "No substrate selected"
           }
-          badge={anyLoading ? <Pill>Syncing</Pill> : <Pill tone="ok">Ready</Pill>}
+          badge={overviewBadge}
           className="w-full"
         >
           <div className="grid gap-3 sm:grid-cols-2">
