@@ -370,7 +370,7 @@ function BudgetSummary({ budget }) {
 
 function BudgetEditor({ budget, disabled, onSave }) {
   const toDraft = () => ({
-    min_events: String(budget?.min_events ?? 12),
+    min_events: String(budget?.min_events ?? 0),
     max_events: String(budget?.max_events ?? 1024),
   });
 
@@ -905,7 +905,22 @@ function NetworkCard({
   );
 }
 
-/* ───────────────────────── Page ───────────────────────── */
+/* ───────────────────────── Page ─────────────────────────
+ *
+ * Event Store chronology (persisted hierarchy):
+ *   1. Substrates          GET /wallets
+ *   2. Selected substrate  resolve from list / ?substrate=
+ *   3–4. Events / Activations
+ *                          GET /wallets/:substrate/events
+ *                          Each activation is an independent event scope
+ *   5. Network             GET /networks (path registry)
+ *   6. Network budget      GET /wallets/:substrate/activations/:activation/budgets
+ *   7. WirePackets         GET …/networks/:id/wirepackets
+ *                          Only after budgets; submissions = 1 … max_events
+ *
+ * WirePackets must never load before its parent event, network, and budget
+ * have been resolved. loadAll enforces steps 6 → 7 strictly.
+ */
 
 function EventStoreContent() {
   const searchParams = useSearchParams();
@@ -1009,7 +1024,9 @@ function EventStoreContent() {
 
   const configuredCount = budgets.filter((row) => row.configured && row.budget).length;
   // Activation is the synchronization boundary for a selected substrate.
+  // Hierarchy: Substrate → Activation/Event → Network → Budget → Submission/WirePackets.
   // Required loaders for a synchronized activation: events, budgets, boards, wire.
+  // WirePackets loading is gated behind budgets (see loadAll).
   // Payloads are derived from events and may lag briefly; they do not block scope readiness alone.
   const activationSelected = Boolean(substrate) && /^\d+$/.test(String(activation));
   const requiredScopeLoading =
@@ -1144,87 +1161,71 @@ function EventStoreContent() {
     }
   }, [loadPayloadsForEvents]);
 
-const loadBudgets = useCallback(async (name, activationValue) => {
-  if (!name || !/^\d+$/.test(String(activationValue))) {
-    budgetRequestRef.current += 1;
-    setLoadingBudgets(false);
-    setBudgetLoadError("");
-    setBudgets([]);
-    return [];
-  }
-
-  const selected = String(activationValue);
-  const requestId = ++budgetRequestRef.current;
-
-  setLoadingBudgets(true);
-  setBudgetLoadError("");
-
-  try {
-    const body = await apiRequest(
-      `/wallets/${enc(name)}/activations/${enc(selected)}/budgets`,
-    );
-
-    if (
-      requestId !== budgetRequestRef.current ||
-      selectedSubstrateRef.current !== name ||
-      selectedActivationRef.current !== selected
-    ) {
-      return [];
-    }
-
-    const rows = Array.isArray(body?.budgets)
-      ? body.budgets.filter(
-          (row) =>
-            row?.activation == null ||
-            String(row.activation) === selected,
-        )
-      : [];
-
-    setBudgets(rows);
-    return rows;
-  } catch (err) {
-    if (
-      requestId === budgetRequestRef.current &&
-      selectedSubstrateRef.current === name &&
-      selectedActivationRef.current === selected
-    ) {
-      setBudgets([]);
-
-      const message =
-        err instanceof Error ? err.message : "API error";
-
-      setBudgetLoadError(
-        `Unable to load network budgets: ${message}`,
-      );
-      setError(
-        `Unable to load network budgets: ${message}`,
-      );
-    }
-
-    return [];
-  } finally {
-    if (requestId === budgetRequestRef.current) {
+  /**
+   * Step 6 — Network budget
+   * GET /wallets/:substrate/activations/:activation/budgets
+   * Must complete before WirePackets so the submission range
+   * (1 … budget.max_events) is known to the API handlers.
+   * Returns the resolved budget rows (or null on stale/abort).
+   */
+  const loadBudgets = useCallback(async (name, activationValue) => {
+    if (!name || !/^\d+$/.test(String(activationValue))) {
+      budgetRequestRef.current += 1;
       setLoadingBudgets(false);
+      setBudgetLoadError("");
+      return null;
     }
-  }
-}, []);
+    const selected = String(activationValue);
+    const requestId = ++budgetRequestRef.current;
+    setLoadingBudgets(true);
+    setBudgetLoadError("");
+    try {
+      const body = await apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/budgets`);
+      if (
+        requestId !== budgetRequestRef.current ||
+        selectedSubstrateRef.current !== name ||
+        selectedActivationRef.current !== selected
+      ) {
+        return null;
+      }
+      const rows = Array.isArray(body?.budgets) ? body.budgets : [];
+      const filtered = rows.filter((row) => row?.activation == null || String(row.activation) === selected);
+      setBudgets(filtered);
+      return filtered;
+    } catch (err) {
+      if (
+        requestId === budgetRequestRef.current &&
+        selectedSubstrateRef.current === name &&
+        selectedActivationRef.current === selected
+      ) {
+        setBudgets([]);
+        const message = err instanceof Error ? err.message : "API error";
+        setBudgetLoadError(`Unable to load network budgets: ${message}`);
+        setError(`Unable to load network budgets: ${message}`);
+      }
+      return null;
+    } finally {
+      if (requestId === budgetRequestRef.current) {
+        setLoadingBudgets(false);
+      }
+    }
+  }, []);
 
-const loadNetworkData = useCallback(
-  async (name, activationValue, networkRows, budgetRows) => {
+  /**
+   * Step 5 continuation — Payload boards for each network under the activation.
+   * Independent of budget; may run in parallel with observation status.
+   */
+  const loadPayloadBoards = useCallback(async (name, activationValue, networkRows) => {
     if (!name || !/^\d+$/.test(String(activationValue))) {
       setLoadingBoards(false);
-      setLoadingWire(false);
       return;
     }
 
     const selected = String(activationValue);
     const requestId = ++scopeRequestRef.current;
-
     const activeNetworks = (networkRows || [])
       .map(normalizeNetwork)
       .filter(Boolean);
-
-    const budgets = Array.isArray(budgetRows) ? budgetRows : [];
 
     const isCurrent = () =>
       requestId === scopeRequestRef.current &&
@@ -1232,10 +1233,8 @@ const loadNetworkData = useCallback(
       selectedActivationRef.current === selected;
 
     setLoadingBoards(true);
-    setLoadingWire(true);
 
     try {
-      // 1. Load activation-scoped payload boards.
       const boardResults = await Promise.allSettled(
         activeNetworks.map((network) =>
           apiRequest(
@@ -1247,50 +1246,55 @@ const loadNetworkData = useCallback(
       if (!isCurrent()) return;
 
       const nextBoards = {};
-
       boardResults.forEach((result, index) => {
         if (result.status !== "fulfilled") return;
-
         const body = result.value;
-
-        if (
-          body?.activation != null &&
-          String(body.activation) !== selected
-        ) {
-          return;
-        }
-
+        if (body?.activation != null && String(body.activation) !== selected) return;
         nextBoards[activeNetworks[index].id] = body;
       });
-
       setBoards(nextBoards);
+    } finally {
+      if (requestId === scopeRequestRef.current) {
+        setLoadingBoards(false);
+      }
+    }
+  }, []);
 
-      // 2. Budget is already resolved. Determine which Bitcoin
-      //    networks have a configured submission range.
-      const btcNetworks = activeNetworks.filter(bitcoinNetwork);
+  /**
+   * Step 7 — WirePackets
+   * GET /wallets/:substrate/activations/:activation/networks/:id/wirepackets
+   * Only invoked after budgets have resolved so submissions map to
+   * 1 … budget.max_events. Never starts before the parent event, network,
+   * and budget hierarchy is in place.
+   */
+  const loadWirePackets = useCallback(async (name, activationValue, networkRows) => {
+    if (!name || !/^\d+$/.test(String(activationValue))) {
+      setLoadingWire(false);
+      return;
+    }
 
-      const budgetByNetwork = new Map(
-        budgets.map((row) => [
-          row?.network?.id,
-          row,
-        ]),
-      );
+    const selected = String(activationValue);
+    const requestId = ++scopeRequestRef.current;
+    const activeNetworks = (networkRows || [])
+      .map(normalizeNetwork)
+      .filter(Boolean);
+    const btcNetworks = activeNetworks.filter(bitcoinNetwork);
 
-      const configuredBitcoinNetworks = btcNetworks.filter(
-        (network) => {
-          const budget = budgetByNetwork.get(network.id);
-          return (
-            budget?.configured === true &&
-            Number(budget?.budget?.max_events) >= 1
-          );
-        },
-      );
+    const isCurrent = () =>
+      requestId === scopeRequestRef.current &&
+      selectedSubstrateRef.current === name &&
+      selectedActivationRef.current === selected;
 
-      // 3. Request WirePackets only for networks with a budget.
-      //    qtm-api resolves submissions 1..=max_events from this
-      //    activation/network budget.
+    setLoadingWire(true);
+
+    try {
+      if (btcNetworks.length === 0) {
+        if (isCurrent()) setWirePackets({});
+        return;
+      }
+
       const wireResults = await Promise.allSettled(
-        configuredBitcoinNetworks.map((network) =>
+        btcNetworks.map((network) =>
           apiRequest(
             `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/wirepackets`,
           ),
@@ -1300,33 +1304,19 @@ const loadNetworkData = useCallback(
       if (!isCurrent()) return;
 
       const nextWire = {};
-
       wireResults.forEach((result, index) => {
         if (result.status !== "fulfilled") return;
-
         const metadata = result.value;
-        const network = configuredBitcoinNetworks[index];
-
-        if (
-          metadata?.activation != null &&
-          String(metadata.activation) !== selected
-        ) {
-          return;
-        }
-
-        nextWire[network.id] = metadata;
+        if (metadata?.activation != null && String(metadata.activation) !== selected) return;
+        nextWire[btcNetworks[index].id] = metadata;
       });
-
       setWirePackets(nextWire);
     } finally {
       if (requestId === scopeRequestRef.current) {
-        setLoadingBoards(false);
         setLoadingWire(false);
       }
     }
-  },
-  [],
-);
+  }, []);
 
   const loadObservationStatuses = useCallback(async (name, activationValue, networkRows) => {
     if (!name || !/^\d+$/.test(String(activationValue))) return;
@@ -1345,28 +1335,45 @@ const loadNetworkData = useCallback(
     setObservations(next);
   }, []);
 
-const loadAll = useCallback(
-  async (name, activationValue, networkRows = []) => {
+  /**
+   * Activation-scoped synchronization (steps 5–7).
+   * Chronology is strict:
+   *   5. Networks already resolved (path registry)
+   *   6. Budgets for each network under this activation
+   *   7. WirePackets only after budgets succeed (submission range known)
+   * Payload boards and observation status may run after budgets but
+   * before or alongside WirePackets; WirePackets never precede budgets.
+   */
+  const loadAll = useCallback(async (name, activationValue, networkRows = []) => {
     if (!name || !/^\d+$/.test(String(activationValue))) {
       budgetRequestRef.current += 1;
       scopeRequestRef.current += 1;
-
       setLoadingBudgets(false);
       setLoadingBoards(false);
       setLoadingWire(false);
       setBudgetLoadError("");
       return;
     }
-
     const selected = String(activationValue);
-
+    // Establish the synchronized substrate state at this activation.
     selectedSubstrateRef.current = name;
     selectedActivationRef.current = selected;
-
     setError("");
 
-    // 1. Budget is the prerequisite for WirePackets.
+    // Step 6 — budgets first. WirePackets must not start until this returns.
     const budgetRows = await loadBudgets(name, selected);
+    if (
+      selectedSubstrateRef.current !== name ||
+      selectedActivationRef.current !== selected
+    ) {
+      return;
+    }
+
+    // Boards + observation status after budgets (parallel, independent of wire).
+    await Promise.all([
+      loadPayloadBoards(name, selected, networkRows),
+      loadObservationStatuses(name, selected, networkRows),
+    ]);
 
     if (
       selectedSubstrateRef.current !== name ||
@@ -1375,18 +1382,58 @@ const loadAll = useCallback(
       return;
     }
 
-    // 2. After the budget resolves, load activation-scoped data.
-    await Promise.all([
-      loadNetworkData(name, selected, networkRows, budgetRows),
-      loadObservationStatuses(name, selected, networkRows),
-    ]);
-  },
-  [
-    loadBudgets,
-    loadNetworkData,
-    loadObservationStatuses,
-  ],
-);
+    // Step 7 — WirePackets only after the budget hierarchy is resolved.
+    // API handlers use 1 … budget.max_events for submissions; loading
+    // earlier would race an incomplete range.
+    if (budgetRows !== null) {
+      await loadWirePackets(name, selected, networkRows);
+    } else {
+      setLoadingWire(false);
+    }
+  }, [loadBudgets, loadPayloadBoards, loadObservationStatuses, loadWirePackets]);
+
+  /**
+   * Resolve the substrate the outer frame requested via ?substrate=.
+   * Never silently substitute walletRows[0].
+   */
+  const resolveSubstrate = useCallback((walletRows, requested) => {
+    const names = walletRows.map((row) => row?.name).filter(Boolean);
+    if (!names.length) {
+      return {
+        name: "",
+        activation: "0",
+        warning: requested
+          ? `Outer frame requested substrate "${requested}", but the API returned no substrates (GET /wallets → {"substrates":[]}).`
+          : "The API returned no substrates. Event Store cannot open a substrate until discovery succeeds.",
+      };
+    }
+
+    if (requested) {
+      const match = walletRows.find((row) => row?.name === requested);
+      if (match) {
+        const raw = String(match.activations ?? "0");
+        return {
+          name: match.name,
+          activation: /^\d+$/.test(raw) ? raw : "0",
+          warning: "",
+        };
+      }
+      return {
+        name: "",
+        activation: "0",
+        warning: `Outer frame requested substrate "${requested}", but it is not present in GET /wallets. Available: ${names.join(", ") || "(none)"}.`,
+      };
+    }
+
+    // No outer-frame substrate: open the first available substrate deliberately.
+    const first = walletRows[0];
+    const raw = String(first?.activations ?? "0");
+    return {
+      name: first.name,
+      activation: /^\d+$/.test(raw) ? raw : "0",
+      warning: "",
+    };
+  }, []);
 
   const loadInitial = useCallback(async () => {
     const bootId = ++bootRequestRef.current;
@@ -1484,7 +1531,9 @@ const loadAll = useCallback(
     loadInitial();
   }, [loadInitial]);
 
-  // Poll WirePackets only for Bitcoin observation scopes that report running=true.
+  // Poll WirePackets only after budgets have resolved (step 6 complete) and
+  // only for Bitcoin observation scopes that report running=true.
+  // WirePackets must never poll before the parent event → network → budget chain.
   const runningBitcoinNetworkIds = useMemo(
     () =>
       JSON.stringify(
@@ -1496,101 +1545,55 @@ const loadAll = useCallback(
     [networks, observations],
   );
 
-useEffect(() => {
-  if (!substrate || !/^\d+$/.test(String(activation))) {
-    return;
-  }
+  useEffect(() => {
+    if (!substrate || !/^\d+$/.test(String(activation))) return;
+    // Gate: do not poll WirePackets while budgets are still loading.
+    if (loadingBudgets) return;
+    const networkIds = JSON.parse(runningBitcoinNetworkIds);
+    if (!networkIds.length) return;
 
-  const selectedSubstrate = substrate;
-  const selectedActivation = String(activation);
+    const selectedSubstrate = substrate;
+    const selectedActivation = String(activation);
+    let cancelled = false;
+    let timeoutId = null;
 
-  const budgetByNetwork = new Map(
-    budgets.map((row) => [
-      row?.network?.id,
-      row,
-    ]),
-  );
-
-  const networkIds = networks
-    .filter(bitcoinNetwork)
-    .filter((network) => {
-      const budget = budgetByNetwork.get(network.id);
-
-      return (
-        observations[network.id]?.running === true &&
-        budget?.configured === true &&
-        Number(budget?.budget?.max_events) >= 1
-      );
-    })
-    .map((network) => network.id);
-
-  if (!networkIds.length) return;
-
-  let cancelled = false;
-  let timeoutId = null;
-
-  const pollWirePackets = async () => {
-    const results = await Promise.allSettled(
-      networkIds.map((networkId) =>
-        apiRequest(
-          `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(networkId)}/wirepackets`,
+    const pollWirePackets = async () => {
+      const results = await Promise.allSettled(
+        networkIds.map((networkId) =>
+          apiRequest(
+            `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(networkId)}/wirepackets`,
+          ),
         ),
-      ),
-    );
+      );
 
-    if (
-      cancelled ||
-      selectedSubstrateRef.current !== selectedSubstrate ||
-      selectedActivationRef.current !== selectedActivation
-    ) {
-      return;
-    }
+      if (
+        cancelled ||
+        selectedSubstrateRef.current !== selectedSubstrate ||
+        selectedActivationRef.current !== selectedActivation
+      ) {
+        return;
+      }
 
-    setWirePackets((current) => {
-      const next = { ...current };
-
-      results.forEach((result, index) => {
-        if (result.status !== "fulfilled") return;
-
-        const metadata = result.value;
-
-        if (
-          metadata?.activation != null &&
-          String(metadata.activation) !== selectedActivation
-        ) {
-          return;
-        }
-
-        next[networkIds[index]] = metadata;
+      setWirePackets((current) => {
+        const next = { ...current };
+        results.forEach((result, index) => {
+          if (result.status !== "fulfilled") return;
+          const metadata = result.value;
+          if (metadata?.activation != null && String(metadata.activation) !== selectedActivation) return;
+          next[networkIds[index]] = metadata;
+        });
+        return next;
       });
 
-      return next;
-    });
+      if (!cancelled) timeoutId = window.setTimeout(pollWirePackets, WIREPACKETS_POLL_MS);
+    };
 
-    if (!cancelled) {
-      timeoutId = window.setTimeout(
-        pollWirePackets,
-        WIREPACKETS_POLL_MS,
-      );
-    }
-  };
-
-  timeoutId = window.setTimeout(pollWirePackets, 0);
-
-  return () => {
-    cancelled = true;
-
-    if (timeoutId !== null) {
-      window.clearTimeout(timeoutId);
-    }
-  };
-}, [
-  substrate,
-  activation,
-  budgets,
-  networks,
-  observations,
-]);
+    timeoutId = window.setTimeout(pollWirePackets, 0);
+    return () => {
+      cancelled = true;
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    };
+  }, [substrate, activation, runningBitcoinNetworkIds, loadingBudgets]);
 
   const chooseSubstrate = async (name) => {
     eventsRequestRef.current += 1;
@@ -1665,8 +1668,9 @@ useEffect(() => {
   const refreshAll = async () => {
     if (!substrate || !/^\d+$/.test(String(activation))) return;
     const selected = String(activation);
-    // loadEvents and loadNetworkData share scope guards; run sequentially
-    // so one cannot invalidate the other.
+    // Re-run the full hierarchy: budgets first, then boards/observation,
+    // then WirePackets. Events are refreshed after scope data so payload
+    // records stay consistent with the selected activation.
     await loadAll(substrate, selected, networks);
     await loadEvents(substrate, selected);
     setNotice("Event Store refreshed.");
