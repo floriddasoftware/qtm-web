@@ -925,7 +925,7 @@ function NetworkCard({
 function EventStoreContent() {
   const searchParams = useSearchParams();
   const requestedSubstrate = (searchParams.get("substrate") || "").trim();
-
+  const [loadingObservations, setLoadingObservations] = useState(false);
   const [substrates, setSubstrates] = useState([]);
   const [substrate, setSubstrate] = useState("");
   const [activation, setActivation] = useState("");
@@ -1349,439 +1349,550 @@ function EventStoreContent() {
     }
   }, []);
 
-  const loadObservationStatuses = useCallback(async (name, activationValue, networkRows) => {
-    if (!name || !/^\d+$/.test(String(activationValue))) return;
-    const selected = String(activationValue);
-    const btcNetworks = (networkRows || []).map(normalizeNetwork).filter(bitcoinNetwork);
+
+const loadObservationStatuses = useCallback(async (name, activationValue, networkRows) => {
+  if (!name || !/^\d+$/.test(String(activationValue))) {
+    setLoadingObservations(false);
+    return null;
+  }
+
+  const selected = String(activationValue);
+  const btcNetworks = (networkRows || [])
+    .map(normalizeNetwork)
+    .filter(bitcoinNetwork);
+
+  const isCurrent = () =>
+    selectedSubstrateRef.current === name &&
+    selectedActivationRef.current === selected;
+
+  setLoadingObservations(true);
+
+  try {
     const results = await Promise.allSettled(
       btcNetworks.map((network) =>
-        apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/observation`),
+        apiRequest(
+          `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/observation`,
+        ),
       ),
     );
-    if (selectedSubstrateRef.current !== name || selectedActivationRef.current !== selected) return;
+
+    if (!isCurrent()) return null;
+
     const next = {};
+
     results.forEach((result, index) => {
-      if (result.status === "fulfilled") next[btcNetworks[index].id] = result.value;
-    });
-    setObservations(next);
-  }, []);
+      if (result.status !== "fulfilled") return;
 
-
-  /**
-   * Resolve the substrate the outer frame requested via ?substrate=.
-   * Returns a substrate name only — never an activation.
-   * Never silently substitutes another substrate for a requested one.
-   */
-  const resolveSubstrate = useCallback((walletRows, requested) => {
-    const names = walletRows
-      .map((row) => row?.name)
-      .filter(Boolean);
-
-    if (!names.length) {
-      return {
-        name: "",
-        warning: requested
-          ? `Requested substrate "${requested}", but GET /wallets returned no substrates.`
-          : "No substrates were returned by the API.",
-      };
-    }
-
-    if (requested) {
-      const match = walletRows.find(
-        (row) => row?.name === requested,
-      );
-
-      if (match) {
-        return {
-          name: match.name,
-          warning: "",
-        };
-      }
-
-      return {
-        name: "",
-        warning: `Requested substrate "${requested}" (not resolved). Available: ${names.join(", ") || "(none)"}.`,
-      };
-    }
-
-    return {
-      name: walletRows[0].name,
-      warning: "",
-    };
-  }, []);
-
-  
-  const loadInitial = useCallback(async () => {
-    const bootId = ++bootRequestRef.current;
-
-    setLoadingList(true);
-    setError("");
-    setHandoffWarning("");
-    setNotice("");
-
-    try {
-      const walletRows = await listSubstrates();
-
-      if (bootId !== bootRequestRef.current) return;
-
-      setSubstrates(walletRows);
-
-      const resolved = resolveSubstrate(
-        walletRows,
-        requestedSubstrate,
-      );
-
-      if (resolved.warning) {
-        setHandoffWarning(resolved.warning);
-      }
-
-      if (!resolved.name) {
-        setSubstrate("");
-        setActivation("");
-        clearScopeData();
-
-        selectedSubstrateRef.current = "";
-        selectedActivationRef.current = "";
-
-        listNetworks()
-          .then((networkRows) => {
-            if (bootId !== bootRequestRef.current) return;
-            setNetworks(networkRows);
-          })
-          .catch(() => {
-            if (bootId === bootRequestRef.current) {
-              setNetworks([]);
-            }
-          });
-
-        return;
-      }
-
-      const selectedSubstrate = resolved.name;
-
-      setSubstrate(selectedSubstrate);
-      setActivation("");
-      selectedSubstrateRef.current = selectedSubstrate;
-      selectedActivationRef.current = "";
-
-      clearScopeData();
-
-      const eventRows = await loadEvents(
-        selectedSubstrate,
-        "",
-        { payloads: false },
-      );
-
-      if (bootId !== bootRequestRef.current) return;
-      if (eventRows === null) return;
-
-      const availableActivations = Array.from(
-        new Set(
-          eventRows
-            .map(activationFromEvent)
-            .filter(Boolean),
-        ),
-      ).sort((a, b) => Number(b) - Number(a));
-
-      const selectedActivation =
-        availableActivations[0] ?? "0";
-
-      setActivation(selectedActivation);
-      selectedActivationRef.current = selectedActivation;
-
-      listNetworks()
-        .then((networkRows) => {
-          if (
-            bootId !== bootRequestRef.current ||
-            selectedSubstrateRef.current !== selectedSubstrate ||
-            selectedActivationRef.current !== selectedActivation
-          ) {
-            return;
-          }
-
-          setNetworks(networkRows);
-
-          // Independent activation-scoped requests.
-          void loadPayloadsForEvents(
-            selectedSubstrate,
-            eventRows,
-            selectedActivation,
-          );
-
-          void loadBudgets(
-            selectedSubstrate,
-            selectedActivation,
-          );
-
-          void loadPayloadBoards(
-            selectedSubstrate,
-            selectedActivation,
-            networkRows,
-          );
-
-          void loadObservationStatuses(
-            selectedSubstrate,
-            selectedActivation,
-            networkRows,
-          );
-
-          void loadWirePackets(
-            selectedSubstrate,
-            selectedActivation,
-            networkRows,
-          );
-        })
-        .catch((netErr) => {
-          if (bootId !== bootRequestRef.current) return;
-          setNetworks([]);
-          setError(
-            netErr instanceof Error
-              ? `Unable to load network registry: ${netErr.message}`
-              : "Unable to load network registry.",
-          );
-        });
-    } catch (err) {
-      if (bootId !== bootRequestRef.current) return;
-
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to load Event Store.",
-      );
-    } finally {
-      if (bootId === bootRequestRef.current) {
-        setLoadingList(false);
-      }
-    }
-  }, [
-    requestedSubstrate,
-    resolveSubstrate,
-    clearScopeData,
-    loadEvents,
-    loadPayloadsForEvents,
-    loadBudgets,
-    loadPayloadBoards,
-    loadObservationStatuses,
-    loadWirePackets,
-  ]);
-
-  useEffect(() => {
-    loadInitial();
-  }, [loadInitial]);
-
-
-  const runningBitcoinNetworkIds = useMemo(
-    () =>
-      JSON.stringify(
-        networks
-          .filter(bitcoinNetwork)
-          .filter((network) => observations[network.id]?.running === true)
-          .map((network) => network.id),
-      ),
-    [networks, observations],
-  );
-
-  useEffect(() => {
-    if (!substrate || !/^\d+$/.test(String(activation))) return;
-
-    const networkIds = JSON.parse(runningBitcoinNetworkIds);
-    if (!networkIds.length) return;
-
-    const selectedSubstrate = substrate;
-    const selectedActivation = String(activation);
-    let cancelled = false;
-    let timeoutId = null;
-
-    const pollWirePackets = async () => {
-      const results = await Promise.allSettled(
-        networkIds.map((networkId) =>
-          apiRequest(
-            `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(networkId)}/wirepackets`,
-          ),
-        ),
-      );
+      const status = result.value;
 
       if (
-        cancelled ||
-        selectedSubstrateRef.current !== selectedSubstrate ||
-        selectedActivationRef.current !== selectedActivation
+        status?.activation != null &&
+        String(status.activation) !== selected
       ) {
         return;
       }
 
-      setWirePackets((current) => {
-        const next = { ...current };
+      next[btcNetworks[index].id] = status;
+    });
 
-        results.forEach((result, index) => {
-          if (result.status !== "fulfilled") return;
-
-          const metadata = result.value;
-
-          if (
-            metadata?.activation != null &&
-            String(metadata.activation) !== selectedActivation
-          ) {
-            return;
-          }
-
-          next[networkIds[index]] = metadata;
-        });
-
-        return next;
-      });
-
-      if (!cancelled) {
-        timeoutId = window.setTimeout(
-          pollWirePackets,
-          WIREPACKETS_POLL_MS,
-        );
-      }
-    };
-
-    timeoutId = window.setTimeout(pollWirePackets, 0);
-
-    return () => {
-      cancelled = true;
-
-      if (timeoutId !== null) {
-        window.clearTimeout(timeoutId);
-      }
-    };
-  }, [substrate, activation, runningBitcoinNetworkIds]);
-  
-  const chooseSubstrate = async (name) => {
-    eventsRequestRef.current += 1;
-    boardRequestRef.current += 1;
-    wireRequestRef.current += 1;
-    payloadRequestRef.current += 1;
-    budgetRequestRef.current += 1;
-
-    selectedSubstrateRef.current = name;
-    selectedActivationRef.current = "";
-
-    setLoadingEvents(false);
-    setLoadingPayloads(false);
-    setLoadingBudgets(false);
-    setLoadingBoards(false);
-    setLoadingWire(false);
-    setBudgetLoadError("");
-
-    setSubstrate(name);
-    setActivation("");
-    clearScopeData();
-    setError("");
-    setNotice("");
-    setHandoffWarning("");
-
-    if (!name) return;
-
-    try {
-      const eventRows = await loadEvents(
-        name,
-        "",
-        { payloads: false },
-      );
-
-      if (selectedSubstrateRef.current !== name) return;
-      if (eventRows === null) return;
-
-      const availableActivations = Array.from(
-        new Set(
-          eventRows
-            .map(activationFromEvent)
-            .filter(Boolean),
-        ),
-      ).sort((a, b) => Number(b) - Number(a));
-
-      const selected = availableActivations[0] ?? "0";
-
-      setActivation(selected);
-      selectedActivationRef.current = selected;
-
-      // Activation data has independent request lifecycles.
-      void loadPayloadsForEvents(name, eventRows, selected);
-      void loadBudgets(name, selected);
-      void loadPayloadBoards(name, selected, networks);
-      void loadObservationStatuses(name, selected, networks);
-      void loadWirePackets(name, selected, networks);
-    } catch (err) {
-      if (selectedSubstrateRef.current === name) {
-        setError(
-          err instanceof Error
-            ? err.message
-            : "Unable to open substrate.",
-        );
-      }
+    setObservations(next);
+    return next;
+  } finally {
+    if (isCurrent()) {
+      setLoadingObservations(false);
     }
-  };
+  }
+}, []);
 
 
-  
-  async function chooseActivation(value) {
-    if (!/^\d+$/.test(String(value))) return;
-    if (!substrate) return;
+/**
+ * Resolve the substrate requested through ?substrate=.
+ */
+const resolveSubstrate = useCallback((walletRows, requested) => {
+  const names = walletRows
+    .map((row) => row?.name)
+    .filter(Boolean);
 
-    const selected = String(value);
-    const selectedSubstrate = substrate;
-    const selectedEvents = events;
+  if (!names.length) {
+    return {
+      name: "",
+      warning: requested
+        ? `Requested substrate "${requested}", but GET /wallets returned no substrates.`
+        : "No substrates were returned by the API.",
+    };
+  }
 
-    boardRequestRef.current += 1;
-    wireRequestRef.current += 1;
-    payloadRequestRef.current += 1;
-    budgetRequestRef.current += 1;
-
-    selectedActivationRef.current = selected;
-    setActivation(selected);
-
-    setBudgets([]);
-    setWirePackets({});
-    setBoards({});
-    setObservations({});
-    setStreamResults({});
-    setLogViewer(null);
-    setPayloads([]);
-
-    setError("");
-    setNotice("");
-    setBudgetErrors({});
-    setBudgetNotices({});
-    setBudgetLoadError("");
-
-    setLoadingBudgets(true);
-    setLoadingBoards(true);
-    setLoadingWire(true);
-
-    // Each activation-scoped request starts independently.
-    void loadPayloadsForEvents(
-      selectedSubstrate,
-      selectedEvents,
-      selected,
+  if (requested) {
+    const match = walletRows.find(
+      (row) => row?.name === requested,
     );
 
-    void loadBudgets(
-      selectedSubstrate,
+    if (match) {
+      return {
+        name: match.name,
+        warning: "",
+      };
+    }
+
+    return {
+      name: "",
+      warning: `Requested substrate "${requested}" (not resolved). Available: ${names.join(", ") || "(none)"}.`,
+    };
+  }
+
+  return {
+    name: walletRows[0].name,
+    warning: "",
+  };
+}, []);
+
+
+/**
+ * Start activation resources.
+ *
+ * Payloads, boards and observation status are independent.
+ * WirePackets must wait until budgets have resolved.
+ */
+const loadActivationResources = useCallback(
+  (name, eventRows, activationValue, networkRows, isCurrent) => {
+    const selected = String(activationValue);
+
+    void loadPayloadsForEvents(
+      name,
+      eventRows,
       selected,
     );
 
     void loadPayloadBoards(
-      selectedSubstrate,
+      name,
       selected,
-      networks,
+      networkRows,
     );
 
     void loadObservationStatuses(
-      selectedSubstrate,
+      name,
       selected,
-      networks,
+      networkRows,
     );
 
-    void loadWirePackets(
-      selectedSubstrate,
-      selected,
-      networks,
+    void (async () => {
+      try {
+        const budgetRows = await loadBudgets(
+          name,
+          selected,
+        );
+
+        if (!isCurrent()) return;
+
+        if (budgetRows !== null) {
+          await loadWirePackets(
+            name,
+            selected,
+            networkRows,
+          );
+        }
+      } catch (err) {
+        if (isCurrent()) {
+          setError(
+            err instanceof Error
+              ? `Unable to load activation resources: ${err.message}`
+              : "Unable to load activation resources.",
+          );
+        }
+      }
+    })();
+  },
+  [
+    loadPayloadsForEvents,
+    loadPayloadBoards,
+    loadObservationStatuses,
+    loadBudgets,
+    loadWirePackets,
+  ],
+);
+
+
+/**
+ * Initial page load.
+ *
+ * The page-level loading state covers substrate resolution,
+ * event loading and network registry resolution.
+ * Activation resources then have their own loading states.
+ */
+const loadInitial = useCallback(async () => {
+  const bootId = ++bootRequestRef.current;
+
+  setLoadingList(true);
+  setError("");
+  setHandoffWarning("");
+  setNotice("");
+
+  try {
+    const walletRows = await listSubstrates();
+
+    if (bootId !== bootRequestRef.current) return;
+
+    setSubstrates(walletRows);
+
+    const resolved = resolveSubstrate(
+      walletRows,
+      requestedSubstrate,
     );
+
+    if (resolved.warning) {
+      setHandoffWarning(resolved.warning);
+    }
+
+    if (!resolved.name) {
+      setSubstrate("");
+      setActivation("");
+      selectedSubstrateRef.current = "";
+      selectedActivationRef.current = "";
+
+      clearScopeData();
+
+      const networkRows = await listNetworks();
+
+      if (bootId !== bootRequestRef.current) return;
+
+      setNetworks(networkRows);
+      return;
+    }
+
+    const selectedSubstrate = resolved.name;
+
+    setSubstrate(selectedSubstrate);
+    setActivation("");
+
+    selectedSubstrateRef.current = selectedSubstrate;
+    selectedActivationRef.current = "";
+
+    clearScopeData();
+
+    const eventRows = await loadEvents(
+      selectedSubstrate,
+      "",
+      { payloads: false },
+    );
+
+    if (bootId !== bootRequestRef.current) return;
+    if (eventRows === null) return;
+
+    const availableActivations = Array.from(
+      new Set(
+        eventRows
+          .map(activationFromEvent)
+          .filter(Boolean),
+      ),
+    ).sort((a, b) => Number(b) - Number(a));
+
+    const selectedActivation =
+      availableActivations[0] ?? "0";
+
+    selectedActivationRef.current = selectedActivation;
+    setActivation(selectedActivation);
+
+    const networkRows = await listNetworks();
+
+    if (
+      bootId !== bootRequestRef.current ||
+      selectedSubstrateRef.current !== selectedSubstrate ||
+      selectedActivationRef.current !== selectedActivation
+    ) {
+      return;
+    }
+
+    setNetworks(networkRows);
+
+    loadActivationResources(
+      selectedSubstrate,
+      eventRows,
+      selectedActivation,
+      networkRows,
+      () =>
+        bootId === bootRequestRef.current &&
+        selectedSubstrateRef.current === selectedSubstrate &&
+        selectedActivationRef.current === selectedActivation,
+    );
+  } catch (err) {
+    if (bootId !== bootRequestRef.current) return;
+
+    setError(
+      err instanceof Error
+        ? err.message
+        : "Unable to load Event Store.",
+    );
+  } finally {
+    if (bootId === bootRequestRef.current) {
+      setLoadingList(false);
+    }
+  }
+}, [
+  requestedSubstrate,
+  resolveSubstrate,
+  clearScopeData,
+  loadEvents,
+  listSubstrates,
+  listNetworks,
+  loadActivationResources,
+]);
+
+
+useEffect(() => {
+  loadInitial();
+}, [loadInitial]);
+
+
+/**
+ * Running Bitcoin networks.
+ *
+ * The API's GET observation response exposes `running`.
+ * Only networks confirmed running are polled for WirePackets.
+ */
+const runningBitcoinNetworkIds = useMemo(
+  () =>
+    JSON.stringify(
+      networks
+        .filter(bitcoinNetwork)
+        .filter(
+          (network) =>
+            observations[network.id]?.running === true,
+        )
+        .map((network) => network.id),
+    ),
+  [networks, observations],
+);
+
+
+useEffect(() => {
+  if (!substrate || !/^\d+$/.test(String(activation))) return;
+
+  const networkIds = JSON.parse(runningBitcoinNetworkIds);
+
+  if (!networkIds.length) return;
+
+  const selectedSubstrate = substrate;
+  const selectedActivation = String(activation);
+
+  let cancelled = false;
+  let timeoutId = null;
+
+  const pollWirePackets = async () => {
+    const results = await Promise.allSettled(
+      networkIds.map((networkId) =>
+        apiRequest(
+          `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(networkId)}/wirepackets`,
+        ),
+      ),
+    );
+
+    if (
+      cancelled ||
+      selectedSubstrateRef.current !== selectedSubstrate ||
+      selectedActivationRef.current !== selectedActivation
+    ) {
+      return;
+    }
+
+    setWirePackets((current) => {
+      const next = { ...current };
+
+      results.forEach((result, index) => {
+        if (result.status !== "fulfilled") return;
+
+        const metadata = result.value;
+
+        if (
+          metadata?.activation != null &&
+          String(metadata.activation) !== selectedActivation
+        ) {
+          return;
+        }
+
+        next[networkIds[index]] = metadata;
+      });
+
+      return next;
+    });
+
+    if (!cancelled) {
+      timeoutId = window.setTimeout(
+        pollWirePackets,
+        WIREPACKETS_POLL_MS,
+      );
+    }
+  };
+
+  timeoutId = window.setTimeout(pollWirePackets, 0);
+
+  return () => {
+    cancelled = true;
+
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
+  };
+}, [substrate, activation, runningBitcoinNetworkIds]);
+
+
+/**
+ * Change substrate.
+ */
+const chooseSubstrate = async (name) => {
+  const requestId = ++bootRequestRef.current;
+
+  eventsRequestRef.current += 1;
+  boardRequestRef.current += 1;
+  wireRequestRef.current += 1;
+  payloadRequestRef.current += 1;
+  budgetRequestRef.current += 1;
+
+  selectedSubstrateRef.current = name;
+  selectedActivationRef.current = "";
+
+  setLoadingList(Boolean(name));
+  setLoadingEvents(false);
+  setLoadingPayloads(false);
+  setLoadingBudgets(false);
+  setLoadingBoards(false);
+  setLoadingWire(false);
+  setLoadingObservations(false);
+
+  setBudgetLoadError("");
+  setSubstrate(name);
+  setActivation("");
+
+  clearScopeData();
+
+  setError("");
+  setNotice("");
+  setHandoffWarning("");
+
+  if (!name) {
+    setLoadingList(false);
+    return;
   }
 
+  try {
+    const eventRows = await loadEvents(
+      name,
+      "",
+      { payloads: false },
+    );
+
+    if (
+      requestId !== bootRequestRef.current ||
+      selectedSubstrateRef.current !== name
+    ) {
+      return;
+    }
+
+    if (eventRows === null) return;
+
+    const availableActivations = Array.from(
+      new Set(
+        eventRows
+          .map(activationFromEvent)
+          .filter(Boolean),
+      ),
+    ).sort((a, b) => Number(b) - Number(a));
+
+    const selected = availableActivations[0] ?? "0";
+
+    selectedActivationRef.current = selected;
+    setActivation(selected);
+
+    const networkRows = await listNetworks();
+
+    if (
+      requestId !== bootRequestRef.current ||
+      selectedSubstrateRef.current !== name ||
+      selectedActivationRef.current !== selected
+    ) {
+      return;
+    }
+
+    setNetworks(networkRows);
+
+    loadActivationResources(
+      name,
+      eventRows,
+      selected,
+      networkRows,
+      () =>
+        requestId === bootRequestRef.current &&
+        selectedSubstrateRef.current === name &&
+        selectedActivationRef.current === selected,
+    );
+  } catch (err) {
+    if (
+      requestId === bootRequestRef.current &&
+      selectedSubstrateRef.current === name
+    ) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to open substrate.",
+      );
+    }
+  } finally {
+    if (requestId === bootRequestRef.current) {
+      setLoadingList(false);
+    }
+  }
+};
+
+
+/**
+ * Change activation.
+ */
+async function chooseActivation(value) {
+  if (!/^\d+$/.test(String(value))) return;
+  if (!substrate) return;
+
+  const selected = String(value);
+  const selectedSubstrate = substrate;
+  const selectedEvents = events;
+
+  boardRequestRef.current += 1;
+  wireRequestRef.current += 1;
+  payloadRequestRef.current += 1;
+  budgetRequestRef.current += 1;
+
+  selectedActivationRef.current = selected;
+  setActivation(selected);
+
+  setBudgets([]);
+  setWirePackets({});
+  setBoards({});
+  setObservations({});
+  setStreamResults({});
+  setLogViewer(null);
+  setPayloads([]);
+
+  setError("");
+  setNotice("");
+  setBudgetErrors({});
+  setBudgetNotices({});
+  setBudgetLoadError("");
+
+  setLoadingObservations(false);
+
+  loadActivationResources(
+    selectedSubstrate,
+    selectedEvents,
+    selected,
+    networks,
+    () =>
+      selectedSubstrateRef.current === selectedSubstrate &&
+      selectedActivationRef.current === selected,
+  );
+}
+
+
+/**
+ * Refresh diagnostics.
+ */
 const [refreshStage, setRefreshStage] = useState("");
 const [refreshLog, setRefreshLog] = useState([]);
 
@@ -1793,9 +1904,16 @@ const logRefresh = (stage) => {
 
   setRefreshStage(stage);
   setRefreshLog((previous) => [...previous, entry]);
+
+  console.info(
+    `[EventStore Refresh] ${entry.time} — ${stage}`,
+  );
 };
 
 
+/**
+ * Page-level refresh.
+ */
 const refreshAll = async () => {
   const requestId = ++bootRequestRef.current;
   const name = selectedSubstrateRef.current;
@@ -1806,28 +1924,18 @@ const refreshAll = async () => {
     return;
   }
 
-  setLoadingList(true);
   setRefreshLog([]);
   setRefreshStage("Starting refresh");
+  setLoadingList(true);
+
   setError("");
   setNotice("");
   setHandoffWarning("");
   setBudgetLoadError("");
 
-  const log = (stage) => {
-    setRefreshStage(stage);
-    setRefreshLog((previous) => [
-      ...previous,
-      {
-        time: new Date().toLocaleTimeString(),
-        stage,
-      },
-    ]);
-  };
+  logRefresh("Loading substrates and event records");
 
   try {
-    log("Loading substrates and events");
-
     const [walletRows, eventBody] = await Promise.all([
       listSubstrates(),
       apiRequest(`/wallets/${enc(name)}/events`),
@@ -1837,7 +1945,7 @@ const refreshAll = async () => {
       requestId !== bootRequestRef.current ||
       selectedSubstrateRef.current !== name
     ) {
-      log("Refresh superseded");
+      logRefresh("Refresh superseded");
       return;
     }
 
@@ -1850,7 +1958,7 @@ const refreshAll = async () => {
     setEvents(eventRows);
     setStore(eventBody);
 
-    log("Resolving available activations");
+    logRefresh("Resolving available activations");
 
     const availableActivations = Array.from(
       new Set(
@@ -1871,7 +1979,7 @@ const refreshAll = async () => {
     selectedActivationRef.current = selectedActivation;
     setActivation(selectedActivation);
 
-    log("Loading networks");
+    logRefresh("Loading network registry");
 
     const networkRows = await listNetworks();
 
@@ -1880,13 +1988,13 @@ const refreshAll = async () => {
       selectedSubstrateRef.current !== name ||
       selectedActivationRef.current !== selectedActivation
     ) {
-      log("Refresh superseded");
+      logRefresh("Refresh superseded");
       return;
     }
 
     setNetworks(networkRows);
 
-    log("Resetting activation resources");
+    logRefresh("Resetting activation resources");
 
     setPayloads([]);
     setBudgets([]);
@@ -1899,15 +2007,73 @@ const refreshAll = async () => {
     setBudgetLoadError("");
     setLogViewer(null);
 
-    log("Starting payload, board, and observation loaders");
+    setLoadingObservations(false);
 
-    void Promise.allSettled([
-      loadPayloadsForEvents(name, eventRows, selectedActivation),
-      loadPayloadBoards(name, selectedActivation, networkRows),
-      loadObservationStatuses(name, selectedActivation, networkRows),
-    ]);
+    logRefresh("Starting payload loader");
 
-    log("Starting budget loader");
+    void loadPayloadsForEvents(
+      name,
+      eventRows,
+      selectedActivation,
+    ).then(() => {
+      if (
+        requestId === bootRequestRef.current &&
+        selectedSubstrateRef.current === name &&
+        selectedActivationRef.current === selectedActivation
+      ) {
+        logRefresh("Payload loader completed");
+      }
+    });
+
+    logRefresh("Starting payload board loader");
+
+    void loadPayloadBoards(
+      name,
+      selectedActivation,
+      networkRows,
+    ).then(() => {
+      if (
+        requestId === bootRequestRef.current &&
+        selectedSubstrateRef.current === name &&
+        selectedActivationRef.current === selectedActivation
+      ) {
+        logRefresh("Payload board loader completed");
+      }
+    });
+
+    logRefresh("Starting observation status route");
+
+    void loadObservationStatuses(
+      name,
+      selectedActivation,
+      networkRows,
+    ).then((statuses) => {
+      if (
+        requestId !== bootRequestRef.current ||
+        selectedSubstrateRef.current !== name ||
+        selectedActivationRef.current !== selectedActivation
+      ) {
+        return;
+      }
+
+      const runningCount = Object.values(statuses || {}).filter(
+        (status) => status?.running === true,
+      ).length;
+
+      logRefresh(
+        `Observation route completed: ${runningCount} running network(s)`,
+      );
+    }).catch((err) => {
+      if (requestId === bootRequestRef.current) {
+        logRefresh(
+          `Observation route failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    });
+
+    logRefresh("Starting budget route");
 
     void (async () => {
       try {
@@ -1921,33 +2087,42 @@ const refreshAll = async () => {
           selectedSubstrateRef.current !== name ||
           selectedActivationRef.current !== selectedActivation
         ) {
-          log("Budget load superseded");
           return;
         }
 
-        if (budgetRows !== null) {
-          log("Starting WirePackets loader");
+        if (budgetRows === null) {
+          logRefresh("Budget route failed or returned stale data");
+          return;
+        }
 
-          await loadWirePackets(
-            name,
-            selectedActivation,
-            networkRows,
-          );
+        logRefresh("Budget route completed");
+        logRefresh("Starting WirePackets route");
 
-          log("WirePackets loader completed");
-        } else {
-          log("WirePackets skipped: budgets unavailable");
+        await loadWirePackets(
+          name,
+          selectedActivation,
+          networkRows,
+        );
+
+        if (
+          requestId === bootRequestRef.current &&
+          selectedSubstrateRef.current === name &&
+          selectedActivationRef.current === selectedActivation
+        ) {
+          logRefresh("WirePackets route completed");
         }
       } catch (err) {
-        log(
-          `Budget/WirePackets loader failed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
+        if (requestId === bootRequestRef.current) {
+          logRefresh(
+            `Budget/WirePackets route failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
       }
     })();
 
-    log("Page-level refresh complete");
+    logRefresh("Page-level refresh complete");
     setNotice("Event Store refreshed.");
   } catch (err) {
     if (
@@ -1957,7 +2132,7 @@ const refreshAll = async () => {
       return;
     }
 
-    log(
+    logRefresh(
       `Page-level refresh failed: ${
         err instanceof Error ? err.message : String(err)
       }`,
@@ -1973,7 +2148,7 @@ const refreshAll = async () => {
   } finally {
     if (requestId === bootRequestRef.current) {
       setLoadingList(false);
-      log("Page refresh indicator cleared");
+      logRefresh("Page refresh indicator cleared");
     }
   }
 };
