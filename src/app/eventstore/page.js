@@ -1366,54 +1366,6 @@ function EventStoreContent() {
     setObservations(next);
   }, []);
 
-  /**
-   * Activation-scoped synchronization.
-   * The selected activation is passed directly to every API call.
-   * WirePackets only load after budgets succeed (submission range known).
-   * Payload boards and observation status run after budgets, before WirePackets.
-   */
-  const loadAll = useCallback(async (name, activationValue, networkRows = []) => {
-    if (!name || !/^\d+$/.test(String(activationValue))) {
-      budgetRequestRef.current += 1;
-      boardRequestRef.current += 1;
-      wireRequestRef.current += 1;
-      setLoadingBudgets(false);
-      setLoadingBoards(false);
-      setLoadingWire(false);
-      setBudgetLoadError("");
-      return;
-    }
-    const selected = String(activationValue);
-    selectedSubstrateRef.current = name;
-    selectedActivationRef.current = selected;
-    setError("");
-
-    const budgetRows = await loadBudgets(name, selected);
-    if (
-      selectedSubstrateRef.current !== name ||
-      selectedActivationRef.current !== selected
-    ) {
-      return;
-    }
-
-    await Promise.all([
-      loadPayloadBoards(name, selected, networkRows),
-      loadObservationStatuses(name, selected, networkRows),
-    ]);
-
-    if (
-      selectedSubstrateRef.current !== name ||
-      selectedActivationRef.current !== selected
-    ) {
-      return;
-    }
-
-    if (budgetRows !== null) {
-      await loadWirePackets(name, selected, networkRows);
-    } else {
-      setLoadingWire(false);
-    }
-  }, [loadBudgets, loadPayloadBoards, loadObservationStatuses, loadWirePackets]);
 
   /**
    * Resolve the substrate the outer frame requested via ?substrate=.
@@ -1458,6 +1410,7 @@ function EventStoreContent() {
     };
   }, []);
 
+  
   const loadInitial = useCallback(async () => {
     const bootId = ++bootRequestRef.current;
 
@@ -1467,14 +1420,12 @@ function EventStoreContent() {
     setNotice("");
 
     try {
-      // 1. Entry: substrate names only.
       const walletRows = await listSubstrates();
 
       if (bootId !== bootRequestRef.current) return;
 
       setSubstrates(walletRows);
 
-      // 2. Resolve the requested substrate from the loaded list.
       const resolved = resolveSubstrate(
         walletRows,
         requestedSubstrate,
@@ -1492,15 +1443,16 @@ function EventStoreContent() {
         selectedSubstrateRef.current = "";
         selectedActivationRef.current = "";
 
-        try {
-          const networkRows = await listNetworks();
-
-          if (bootId === bootRequestRef.current) {
+        listNetworks()
+          .then((networkRows) => {
+            if (bootId !== bootRequestRef.current) return;
             setNetworks(networkRows);
-          }
-        } catch {
-          // Substrate discovery remains the primary failure.
-        }
+          })
+          .catch(() => {
+            if (bootId === bootRequestRef.current) {
+              setNetworks([]);
+            }
+          });
 
         return;
       }
@@ -1514,7 +1466,6 @@ function EventStoreContent() {
 
       clearScopeData();
 
-      // 3. Substrate resolution and persistent event discovery are separate.
       const eventRows = await loadEvents(
         selectedSubstrate,
         "",
@@ -1522,9 +1473,6 @@ function EventStoreContent() {
       );
 
       if (bootId !== bootRequestRef.current) return;
-
-      // If the event index failed, loadEvents already reported the error.
-      // Do not select an activation or run activation-scoped loads.
       if (eventRows === null) return;
 
       const availableActivations = Array.from(
@@ -1535,49 +1483,63 @@ function EventStoreContent() {
         ),
       ).sort((a, b) => Number(b) - Number(a));
 
-      // 4. Activations originate exclusively from persistent events.
       const selectedActivation =
         availableActivations[0] ?? "0";
 
       setActivation(selectedActivation);
       selectedActivationRef.current = selectedActivation;
 
-      let networkRows = [];
+      listNetworks()
+        .then((networkRows) => {
+          if (
+            bootId !== bootRequestRef.current ||
+            selectedSubstrateRef.current !== selectedSubstrate ||
+            selectedActivationRef.current !== selectedActivation
+          ) {
+            return;
+          }
 
-      try {
-        networkRows = await listNetworks();
+          setNetworks(networkRows);
 
-        if (bootId !== bootRequestRef.current) return;
+          // Independent activation-scoped requests.
+          void loadPayloadsForEvents(
+            selectedSubstrate,
+            eventRows,
+            selectedActivation,
+          );
 
-        setNetworks(networkRows);
-      } catch (netErr) {
-        if (bootId === bootRequestRef.current) {
+          void loadBudgets(
+            selectedSubstrate,
+            selectedActivation,
+          );
+
+          void loadPayloadBoards(
+            selectedSubstrate,
+            selectedActivation,
+            networkRows,
+          );
+
+          void loadObservationStatuses(
+            selectedSubstrate,
+            selectedActivation,
+            networkRows,
+          );
+
+          void loadWirePackets(
+            selectedSubstrate,
+            selectedActivation,
+            networkRows,
+          );
+        })
+        .catch((netErr) => {
+          if (bootId !== bootRequestRef.current) return;
           setNetworks([]);
           setError(
             netErr instanceof Error
               ? `Unable to load network registry: ${netErr.message}`
               : "Unable to load network registry.",
           );
-        }
-      }
-
-      if (bootId !== bootRequestRef.current) return;
-
-      // 5. Activation-scoped data. The event index is already loaded;
-      // use it to scope payload loading.
-      await loadPayloadsForEvents(
-        selectedSubstrate,
-        eventRows,
-        selectedActivation,
-      );
-
-      if (bootId !== bootRequestRef.current) return;
-
-      await loadAll(
-        selectedSubstrate,
-        selectedActivation,
-        networkRows,
-      );
+        });
     } catch (err) {
       if (bootId !== bootRequestRef.current) return;
 
@@ -1597,12 +1559,16 @@ function EventStoreContent() {
     clearScopeData,
     loadEvents,
     loadPayloadsForEvents,
-    loadAll,
+    loadBudgets,
+    loadPayloadBoards,
+    loadObservationStatuses,
+    loadWirePackets,
   ]);
 
   useEffect(() => {
     loadInitial();
   }, [loadInitial]);
+
 
   const runningBitcoinNetworkIds = useMemo(
     () =>
@@ -1617,7 +1583,7 @@ function EventStoreContent() {
 
   useEffect(() => {
     if (!substrate || !/^\d+$/.test(String(activation))) return;
-    if (loadingBudgets) return;
+
     const networkIds = JSON.parse(runningBitcoinNetworkIds);
     if (!networkIds.length) return;
 
@@ -1645,25 +1611,44 @@ function EventStoreContent() {
 
       setWirePackets((current) => {
         const next = { ...current };
+
         results.forEach((result, index) => {
           if (result.status !== "fulfilled") return;
+
           const metadata = result.value;
-          if (metadata?.activation != null && String(metadata.activation) !== selectedActivation) return;
+
+          if (
+            metadata?.activation != null &&
+            String(metadata.activation) !== selectedActivation
+          ) {
+            return;
+          }
+
           next[networkIds[index]] = metadata;
         });
+
         return next;
       });
 
-      if (!cancelled) timeoutId = window.setTimeout(pollWirePackets, WIREPACKETS_POLL_MS);
+      if (!cancelled) {
+        timeoutId = window.setTimeout(
+          pollWirePackets,
+          WIREPACKETS_POLL_MS,
+        );
+      }
     };
 
     timeoutId = window.setTimeout(pollWirePackets, 0);
+
     return () => {
       cancelled = true;
-      if (timeoutId !== null) window.clearTimeout(timeoutId);
-    };
-  }, [substrate, activation, runningBitcoinNetworkIds, loadingBudgets]);
 
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [substrate, activation, runningBitcoinNetworkIds]);
+  
   const chooseSubstrate = async (name) => {
     eventsRequestRef.current += 1;
     boardRequestRef.current += 1;
@@ -1691,7 +1676,6 @@ function EventStoreContent() {
     if (!name) return;
 
     try {
-      // Resolve activations from persistent events, not substrate metadata.
       const eventRows = await loadEvents(
         name,
         "",
@@ -1699,8 +1683,6 @@ function EventStoreContent() {
       );
 
       if (selectedSubstrateRef.current !== name) return;
-
-      // Event index failed; loadEvents already reported the error.
       if (eventRows === null) return;
 
       const availableActivations = Array.from(
@@ -1716,18 +1698,12 @@ function EventStoreContent() {
       setActivation(selected);
       selectedActivationRef.current = selected;
 
-      const networkRows = networks;
-
-      await loadPayloadsForEvents(name, eventRows, selected);
-
-      if (
-        selectedSubstrateRef.current !== name ||
-        selectedActivationRef.current !== selected
-      ) {
-        return;
-      }
-
-      await loadAll(name, selected, networkRows);
+      // Activation data has independent request lifecycles.
+      void loadPayloadsForEvents(name, eventRows, selected);
+      void loadBudgets(name, selected);
+      void loadPayloadBoards(name, selected, networks);
+      void loadObservationStatuses(name, selected, networks);
+      void loadWirePackets(name, selected, networks);
     } catch (err) {
       if (selectedSubstrateRef.current === name) {
         setError(
@@ -1739,9 +1715,15 @@ function EventStoreContent() {
     }
   };
 
+
+  
   async function chooseActivation(value) {
     if (!/^\d+$/.test(String(value))) return;
+    if (!substrate) return;
+
     const selected = String(value);
+    const selectedSubstrate = substrate;
+    const selectedEvents = events;
 
     boardRequestRef.current += 1;
     wireRequestRef.current += 1;
@@ -1750,6 +1732,7 @@ function EventStoreContent() {
 
     selectedActivationRef.current = selected;
     setActivation(selected);
+
     setBudgets([]);
     setWirePackets({});
     setBoards({});
@@ -1757,60 +1740,96 @@ function EventStoreContent() {
     setStreamResults({});
     setLogViewer(null);
     setPayloads([]);
+
     setError("");
     setNotice("");
     setBudgetErrors({});
     setBudgetNotices({});
     setBudgetLoadError("");
+
     setLoadingBudgets(true);
     setLoadingBoards(true);
     setLoadingWire(true);
 
-    await loadPayloadsForEvents(substrate, events, selected);
-    await loadAll(substrate, selected, networks);
-  }
-
-const refreshAll = async () => {
-  const requestId = ++bootRequestRef.current;
-  const name = selectedSubstrateRef.current;
-  const activation = selectedActivationRef.current;
-
-  if (!name) return;
-
-  setLoadingList(true);
-  setError("");
-  setNotice("");
-  setHandoffWarning("");
-
-  try {
-    await Promise.all([
-      listSubstrates(),
-      loadEvents(name, activation, { payloads: false }),
-    ]);
-
-    if (
-      requestId !== bootRequestRef.current ||
-      selectedSubstrateRef.current !== name
-    ) {
-      return;
-    }
-
-    setNotice("Event Store refreshed.");
-  } catch (err) {
-    if (requestId !== bootRequestRef.current) return;
-
-    setError(
-      err instanceof Error
-        ? `Refresh failed: ${err.message}`
-        : "Refresh failed.",
+    // Each activation-scoped request starts independently.
+    void loadPayloadsForEvents(
+      selectedSubstrate,
+      selectedEvents,
+      selected,
     );
-    setNotice("");
-  } finally {
-    if (requestId === bootRequestRef.current) {
-      setLoadingList(false);
-    }
+
+    void loadBudgets(
+      selectedSubstrate,
+      selected,
+    );
+
+    void loadPayloadBoards(
+      selectedSubstrate,
+      selected,
+      networks,
+    );
+
+    void loadObservationStatuses(
+      selectedSubstrate,
+      selected,
+      networks,
+    );
+
+    void loadWirePackets(
+      selectedSubstrate,
+      selected,
+      networks,
+    );
   }
-};
+
+
+  const refreshAll = async () => {
+    const requestId = ++bootRequestRef.current;
+    const name = selectedSubstrateRef.current;
+
+    if (!name) return;
+
+    setLoadingList(true);
+    setError("");
+    setNotice("");
+    setHandoffWarning("");
+
+    try {
+      const [walletRows, eventRows] = await Promise.all([
+        listSubstrates(),
+        loadEvents(name, "", { payloads: false }),
+      ]);
+
+      if (
+        requestId !== bootRequestRef.current ||
+        selectedSubstrateRef.current !== name
+      ) {
+        return;
+      }
+
+      setSubstrates(walletRows);
+
+      if (eventRows === null) {
+        setNotice("");
+        return;
+      }
+
+      setNotice("Event Store refreshed.");
+    } catch (err) {
+      if (requestId !== bootRequestRef.current) return;
+
+      setError(
+        err instanceof Error
+          ? `Refresh failed: ${err.message}`
+          : "Refresh failed.",
+      );
+      setNotice("");
+    } finally {
+      if (requestId === bootRequestRef.current) {
+        setLoadingList(false);
+      }
+    }
+  };
 
   const appendStreamResult = (networkId, label, body) => {
     setStreamResults((current) => ({
