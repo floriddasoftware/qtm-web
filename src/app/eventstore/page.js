@@ -370,7 +370,7 @@ function BudgetSummary({ budget }) {
 
 function BudgetEditor({ budget, disabled, onSave }) {
   const toDraft = () => ({
-    min_events: String(budget?.min_events ?? 0),
+    min_events: String(budget?.min_events ?? 12),
     max_events: String(budget?.max_events ?? 1024),
   });
 
@@ -1144,47 +1144,73 @@ function EventStoreContent() {
     }
   }, [loadPayloadsForEvents]);
 
-  const loadBudgets = useCallback(async (name, activationValue) => {
-    if (!name || !/^\d+$/.test(String(activationValue))) {
-      budgetRequestRef.current += 1;
-      setLoadingBudgets(false);
-      setBudgetLoadError("");
-      return;
-    }
-    const selected = String(activationValue);
-    const requestId = ++budgetRequestRef.current;
-    setLoadingBudgets(true);
+const loadBudgets = useCallback(async (name, activationValue) => {
+  if (!name || !/^\d+$/.test(String(activationValue))) {
+    budgetRequestRef.current += 1;
+    setLoadingBudgets(false);
     setBudgetLoadError("");
-    try {
-      const body = await apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/budgets`);
-      if (
-        requestId !== budgetRequestRef.current ||
-        selectedSubstrateRef.current !== name ||
-        selectedActivationRef.current !== selected
-      ) {
-        return;
-      }
-      const rows = Array.isArray(body?.budgets) ? body.budgets : [];
-      setBudgets(rows.filter((row) => row?.activation == null || String(row.activation) === selected));
-    } catch (err) {
-      if (
-        requestId === budgetRequestRef.current &&
-        selectedSubstrateRef.current === name &&
-        selectedActivationRef.current === selected
-      ) {
-        setBudgets([]);
-        const message = err instanceof Error ? err.message : "API error";
-        setBudgetLoadError(`Unable to load network budgets: ${message}`);
-        setError(`Unable to load network budgets: ${message}`);
-      }
-    } finally {
-      if (requestId === budgetRequestRef.current) {
-        setLoadingBudgets(false);
-      }
-    }
-  }, []);
+    setBudgets([]);
+    return [];
+  }
 
-  const loadNetworkData = useCallback(async (name, activationValue, networkRows) => {
+  const selected = String(activationValue);
+  const requestId = ++budgetRequestRef.current;
+
+  setLoadingBudgets(true);
+  setBudgetLoadError("");
+
+  try {
+    const body = await apiRequest(
+      `/wallets/${enc(name)}/activations/${enc(selected)}/budgets`,
+    );
+
+    if (
+      requestId !== budgetRequestRef.current ||
+      selectedSubstrateRef.current !== name ||
+      selectedActivationRef.current !== selected
+    ) {
+      return [];
+    }
+
+    const rows = Array.isArray(body?.budgets)
+      ? body.budgets.filter(
+          (row) =>
+            row?.activation == null ||
+            String(row.activation) === selected,
+        )
+      : [];
+
+    setBudgets(rows);
+    return rows;
+  } catch (err) {
+    if (
+      requestId === budgetRequestRef.current &&
+      selectedSubstrateRef.current === name &&
+      selectedActivationRef.current === selected
+    ) {
+      setBudgets([]);
+
+      const message =
+        err instanceof Error ? err.message : "API error";
+
+      setBudgetLoadError(
+        `Unable to load network budgets: ${message}`,
+      );
+      setError(
+        `Unable to load network budgets: ${message}`,
+      );
+    }
+
+    return [];
+  } finally {
+    if (requestId === budgetRequestRef.current) {
+      setLoadingBudgets(false);
+    }
+  }
+}, []);
+
+const loadNetworkData = useCallback(
+  async (name, activationValue, networkRows, budgetRows) => {
     if (!name || !/^\d+$/.test(String(activationValue))) {
       setLoadingBoards(false);
       setLoadingWire(false);
@@ -1193,9 +1219,12 @@ function EventStoreContent() {
 
     const selected = String(activationValue);
     const requestId = ++scopeRequestRef.current;
+
     const activeNetworks = (networkRows || [])
       .map(normalizeNetwork)
       .filter(Boolean);
+
+    const budgets = Array.isArray(budgetRows) ? budgetRows : [];
 
     const isCurrent = () =>
       requestId === scopeRequestRef.current &&
@@ -1206,6 +1235,7 @@ function EventStoreContent() {
     setLoadingWire(true);
 
     try {
+      // 1. Load activation-scoped payload boards.
       const boardResults = await Promise.allSettled(
         activeNetworks.map((network) =>
           apiRequest(
@@ -1217,17 +1247,50 @@ function EventStoreContent() {
       if (!isCurrent()) return;
 
       const nextBoards = {};
+
       boardResults.forEach((result, index) => {
         if (result.status !== "fulfilled") return;
+
         const body = result.value;
-        if (body?.activation != null && String(body.activation) !== selected) return;
+
+        if (
+          body?.activation != null &&
+          String(body.activation) !== selected
+        ) {
+          return;
+        }
+
         nextBoards[activeNetworks[index].id] = body;
       });
+
       setBoards(nextBoards);
 
+      // 2. Budget is already resolved. Determine which Bitcoin
+      //    networks have a configured submission range.
       const btcNetworks = activeNetworks.filter(bitcoinNetwork);
+
+      const budgetByNetwork = new Map(
+        budgets.map((row) => [
+          row?.network?.id,
+          row,
+        ]),
+      );
+
+      const configuredBitcoinNetworks = btcNetworks.filter(
+        (network) => {
+          const budget = budgetByNetwork.get(network.id);
+          return (
+            budget?.configured === true &&
+            Number(budget?.budget?.max_events) >= 1
+          );
+        },
+      );
+
+      // 3. Request WirePackets only for networks with a budget.
+      //    qtm-api resolves submissions 1..=max_events from this
+      //    activation/network budget.
       const wireResults = await Promise.allSettled(
-        btcNetworks.map((network) =>
+        configuredBitcoinNetworks.map((network) =>
           apiRequest(
             `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/wirepackets`,
           ),
@@ -1237,12 +1300,23 @@ function EventStoreContent() {
       if (!isCurrent()) return;
 
       const nextWire = {};
+
       wireResults.forEach((result, index) => {
         if (result.status !== "fulfilled") return;
+
         const metadata = result.value;
-        if (metadata?.activation != null && String(metadata.activation) !== selected) return;
-        nextWire[btcNetworks[index].id] = metadata;
+        const network = configuredBitcoinNetworks[index];
+
+        if (
+          metadata?.activation != null &&
+          String(metadata.activation) !== selected
+        ) {
+          return;
+        }
+
+        nextWire[network.id] = metadata;
       });
+
       setWirePackets(nextWire);
     } finally {
       if (requestId === scopeRequestRef.current) {
@@ -1250,7 +1324,9 @@ function EventStoreContent() {
         setLoadingWire(false);
       }
     }
-  }, []);
+  },
+  [],
+);
 
   const loadObservationStatuses = useCallback(async (name, activationValue, networkRows) => {
     if (!name || !/^\d+$/.test(String(activationValue))) return;
@@ -1269,71 +1345,48 @@ function EventStoreContent() {
     setObservations(next);
   }, []);
 
-  const loadAll = useCallback(async (name, activationValue, networkRows = []) => {
+const loadAll = useCallback(
+  async (name, activationValue, networkRows = []) => {
     if (!name || !/^\d+$/.test(String(activationValue))) {
       budgetRequestRef.current += 1;
       scopeRequestRef.current += 1;
+
       setLoadingBudgets(false);
       setLoadingBoards(false);
       setLoadingWire(false);
       setBudgetLoadError("");
       return;
     }
+
     const selected = String(activationValue);
-    // Establish the synchronized substrate state at this activation.
+
     selectedSubstrateRef.current = name;
     selectedActivationRef.current = selected;
+
     setError("");
-    // Each loader owns its own loading flag and request guard.
+
+    // 1. Budget is the prerequisite for WirePackets.
+    const budgetRows = await loadBudgets(name, selected);
+
+    if (
+      selectedSubstrateRef.current !== name ||
+      selectedActivationRef.current !== selected
+    ) {
+      return;
+    }
+
+    // 2. After the budget resolves, load activation-scoped data.
     await Promise.all([
-      loadBudgets(name, selected),
-      loadNetworkData(name, selected, networkRows),
+      loadNetworkData(name, selected, networkRows, budgetRows),
       loadObservationStatuses(name, selected, networkRows),
     ]);
-  }, [loadBudgets, loadNetworkData, loadObservationStatuses]);
-
-  /**
-   * Resolve the substrate the outer frame requested via ?substrate=.
-   * Never silently substitute walletRows[0].
-   */
-  const resolveSubstrate = useCallback((walletRows, requested) => {
-    const names = walletRows.map((row) => row?.name).filter(Boolean);
-    if (!names.length) {
-      return {
-        name: "",
-        activation: "0",
-        warning: requested
-          ? `Outer frame requested substrate "${requested}", but the API returned no substrates (GET /wallets → {"substrates":[]}).`
-          : "The API returned no substrates. Event Store cannot open a substrate until discovery succeeds.",
-      };
-    }
-
-    if (requested) {
-      const match = walletRows.find((row) => row?.name === requested);
-      if (match) {
-        const raw = String(match.activations ?? "0");
-        return {
-          name: match.name,
-          activation: /^\d+$/.test(raw) ? raw : "0",
-          warning: "",
-        };
-      }
-      return {
-        name: "",
-        activation: "0",
-        warning: `Outer frame requested substrate "${requested}", but it is not present in GET /wallets. Available: ${names.join(", ") || "(none)"}.`,
-      };
-    }
-
-    // No outer-frame substrate: open the first available substrate deliberately.
-    const first = walletRows[0];
-    const raw = String(first?.activations ?? "0");
-    return {
-      name: first.name,
-      activation: /^\d+$/.test(raw) ? raw : "0",
-      warning: "",
-    };
-  }, []);
+  },
+  [
+    loadBudgets,
+    loadNetworkData,
+    loadObservationStatuses,
+  ],
+);
 
   const loadInitial = useCallback(async () => {
     const bootId = ++bootRequestRef.current;
@@ -1443,53 +1496,101 @@ function EventStoreContent() {
     [networks, observations],
   );
 
-  useEffect(() => {
-    if (!substrate || !/^\d+$/.test(String(activation))) return;
-    const networkIds = JSON.parse(runningBitcoinNetworkIds);
-    if (!networkIds.length) return;
+useEffect(() => {
+  if (!substrate || !/^\d+$/.test(String(activation))) {
+    return;
+  }
 
-    const selectedSubstrate = substrate;
-    const selectedActivation = String(activation);
-    let cancelled = false;
-    let timeoutId = null;
+  const selectedSubstrate = substrate;
+  const selectedActivation = String(activation);
 
-    const pollWirePackets = async () => {
-      const results = await Promise.allSettled(
-        networkIds.map((networkId) =>
-          apiRequest(
-            `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(networkId)}/wirepackets`,
-          ),
-        ),
+  const budgetByNetwork = new Map(
+    budgets.map((row) => [
+      row?.network?.id,
+      row,
+    ]),
+  );
+
+  const networkIds = networks
+    .filter(bitcoinNetwork)
+    .filter((network) => {
+      const budget = budgetByNetwork.get(network.id);
+
+      return (
+        observations[network.id]?.running === true &&
+        budget?.configured === true &&
+        Number(budget?.budget?.max_events) >= 1
       );
+    })
+    .map((network) => network.id);
 
-      if (
-        cancelled ||
-        selectedSubstrateRef.current !== selectedSubstrate ||
-        selectedActivationRef.current !== selectedActivation
-      ) {
-        return;
-      }
+  if (!networkIds.length) return;
 
-      setWirePackets((current) => {
-        const next = { ...current };
-        results.forEach((result, index) => {
-          if (result.status !== "fulfilled") return;
-          const metadata = result.value;
-          if (metadata?.activation != null && String(metadata.activation) !== selectedActivation) return;
-          next[networkIds[index]] = metadata;
-        });
-        return next;
+  let cancelled = false;
+  let timeoutId = null;
+
+  const pollWirePackets = async () => {
+    const results = await Promise.allSettled(
+      networkIds.map((networkId) =>
+        apiRequest(
+          `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(networkId)}/wirepackets`,
+        ),
+      ),
+    );
+
+    if (
+      cancelled ||
+      selectedSubstrateRef.current !== selectedSubstrate ||
+      selectedActivationRef.current !== selectedActivation
+    ) {
+      return;
+    }
+
+    setWirePackets((current) => {
+      const next = { ...current };
+
+      results.forEach((result, index) => {
+        if (result.status !== "fulfilled") return;
+
+        const metadata = result.value;
+
+        if (
+          metadata?.activation != null &&
+          String(metadata.activation) !== selectedActivation
+        ) {
+          return;
+        }
+
+        next[networkIds[index]] = metadata;
       });
 
-      if (!cancelled) timeoutId = window.setTimeout(pollWirePackets, WIREPACKETS_POLL_MS);
-    };
+      return next;
+    });
 
-    timeoutId = window.setTimeout(pollWirePackets, 0);
-    return () => {
-      cancelled = true;
-      if (timeoutId !== null) window.clearTimeout(timeoutId);
-    };
-  }, [substrate, activation, runningBitcoinNetworkIds]);
+    if (!cancelled) {
+      timeoutId = window.setTimeout(
+        pollWirePackets,
+        WIREPACKETS_POLL_MS,
+      );
+    }
+  };
+
+  timeoutId = window.setTimeout(pollWirePackets, 0);
+
+  return () => {
+    cancelled = true;
+
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
+  };
+}, [
+  substrate,
+  activation,
+  budgets,
+  networks,
+  observations,
+]);
 
   const chooseSubstrate = async (name) => {
     eventsRequestRef.current += 1;
