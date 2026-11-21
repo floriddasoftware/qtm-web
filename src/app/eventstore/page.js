@@ -1124,42 +1124,61 @@ function EventStoreContent() {
     }
   }, [isCurrentScope]);
 
-  const loadEvents = useCallback(async (name, activationValue) => {
-    if (!name) {
+const loadEvents = useCallback(async (name, activationValue) => {
+  if (!name) {
+    setLoadingEvents(false);
+    return null;
+  }
+
+  const selected = String(activationValue);
+  const requestId = ++eventsRequestRef.current;
+
+  setLoadingEvents(true);
+  setError("");
+
+  try {
+    const eventBody = await apiRequest(
+      `/wallets/${enc(name)}/events`
+    );
+
+    if (
+      requestId !== eventsRequestRef.current ||
+      selectedSubstrateRef.current !== name
+    ) {
+      return null;
+    }
+
+    const nextEvents = Array.isArray(eventBody?.events)
+      ? eventBody.events
+      : [];
+
+    setEvents(nextEvents);
+    setStore(eventBody);
+
+    await loadPayloadsForEvents(name, nextEvents, selected);
+
+    return nextEvents;
+  } catch (err) {
+    if (
+      requestId === eventsRequestRef.current &&
+      selectedSubstrateRef.current === name
+    ) {
+      setEvents([]);
+      setPayloads([]);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load events."
+      );
+    }
+
+    return null;
+  } finally {
+    if (requestId === eventsRequestRef.current) {
       setLoadingEvents(false);
-      return;
     }
-    const selected = String(activationValue);
-    const requestId = ++eventsRequestRef.current;
-    setLoadingEvents(true);
-    setError("");
-    try {
-      const eventBody = await apiRequest(`/wallets/${enc(name)}/events`);
-      if (
-        requestId !== eventsRequestRef.current ||
-        selectedSubstrateRef.current !== name
-      ) {
-        return;
-      }
-      const nextEvents = Array.isArray(eventBody?.events) ? eventBody.events : [];
-      setEvents(nextEvents);
-      setStore(eventBody);
-      await loadPayloadsForEvents(name, nextEvents, selected);
-    } catch (err) {
-      if (
-        requestId === eventsRequestRef.current &&
-        selectedSubstrateRef.current === name
-      ) {
-        setEvents([]);
-        setPayloads([]);
-        setError(err instanceof Error ? err.message : "Unable to load events.");
-      }
-    } finally {
-      if (requestId === eventsRequestRef.current) {
-        setLoadingEvents(false);
-      }
-    }
-  }, [loadPayloadsForEvents]);
+  }
+}, [loadPayloadsForEvents]);
 
   /**
    * Step 6 — Network budget
@@ -1665,62 +1684,133 @@ function EventStoreContent() {
     loadAll(substrate, selected, networks);
   }
 
-  const refreshAll = async () => {
-    if (!substrate || !/^\d+$/.test(String(activation))) return;
-    const selected = String(activation);
-    // Re-run the full hierarchy: budgets first, then boards/observation,
-    // then WirePackets. Events are refreshed after scope data so payload
-    // records stay consistent with the selected activation.
-    await loadAll(substrate, selected, networks);
-    await loadEvents(substrate, selected);
-    setNotice("Event Store refreshed.");
-  };
+  
+const refreshAll = async () => {
+  const requestId = ++bootRequestRef.current;
+  const previousSubstrate = substrate;
+  const previousActivation = String(activation);
 
-  const saveBudget = async (network, draft) => {
-    const key = networkKey(network);
+  if (!previousSubstrate || !/^\d+$/.test(previousActivation)) {
+    return;
+  }
 
-    setBudgetErrors((current) => ({ ...current, [key]: "" }));
-    setBudgetNotices((current) => ({ ...current, [key]: "" }));
+  setLoadingList(true);
+  setError("");
+  setNotice("");
+  setHandoffWarning("");
 
-    try {
-      const body = {
-        min_events: Number(draft.min_events),
-        max_events: Number(draft.max_events),
-      };
+  // 1. Reload persisted substrate list.
+  try {
+    const walletRows = await listSubstrates();
+    if (requestId !== bootRequestRef.current) return;
 
-      if (!Number.isSafeInteger(body.min_events) || body.min_events < 0) {
-        throw new Error("Minimum events must be a non-negative safe integer.");
-      }
+    setSubstrates(walletRows);
 
-      if (!Number.isSafeInteger(body.max_events) || body.max_events < 1) {
-        throw new Error("Maximum events must be a positive safe integer.");
-      }
+    // 2. Resolve the selected substrate from the refreshed list.
+    const resolved = resolveSubstrate(walletRows, previousSubstrate);
 
-      if (body.min_events > body.max_events) {
-        throw new Error("Minimum events cannot exceed maximum events.");
-      }
-
-      await apiRequest(
-        `/wallets/${enc(substrate)}/activations/${enc(activation)}/budgets/${enc(network.id)}`,
-        {
-          method: "PUT",
-          body: JSON.stringify(body),
-        },
-      );
-
-      setBudgetNotices((current) => ({
-        ...current,
-        [key]: "Network budget saved.",
-      }));
-
-      await loadBudgets(substrate, activation);
-    } catch (err) {
-      setBudgetErrors((current) => ({
-        ...current,
-        [key]: err instanceof Error ? err.message : "Unable to save network budget.",
-      }));
+    if (!resolved.name) {
+      setSubstrate("");
+      setActivation("");
+      selectedSubstrateRef.current = "";
+      selectedActivationRef.current = "";
+      clearScopeData();
+      setHandoffWarning(resolved.warning);
+      setLoadingList(false);
+      return;
     }
-  };
+
+    const selectedSubstrate = resolved.name;
+
+    setSubstrate(selectedSubstrate);
+    selectedSubstrateRef.current = selectedSubstrate;
+
+    // 3. Reload events for this substrate before downstream scope data.
+    const eventRows = await loadEvents(
+      selectedSubstrate,
+      previousActivation,
+    );
+
+    if (requestId !== bootRequestRef.current) return;
+
+    const availableActivations = Array.isArray(eventRows)
+      ? eventRows
+          .map(activationFromEvent)
+          .filter(Boolean)
+      : [];
+
+    // 4. Resolve activation/event scope.
+    const selectedActivation = availableActivations.includes(previousActivation)
+      ? previousActivation
+      : resolved.activation;
+
+    setActivation(selectedActivation);
+    selectedActivationRef.current = selectedActivation;
+
+    // 5. Reload network registry for the resolved event.
+    const networkRows = await listNetworks();
+
+    if (requestId !== bootRequestRef.current) return;
+
+    setNetworks(networkRows);
+
+    // 6. Load budgets for this activation/network scope.
+    const budgetRows = await loadBudgets(
+      selectedSubstrate,
+      selectedActivation,
+    );
+
+    if (requestId !== bootRequestRef.current) return;
+
+    if (budgetRows === null) {
+      setLoadingBoards(false);
+      setLoadingWire(false);
+      setNotice("");
+      return;
+    }
+
+    // 7. Resolve network payload boards and observation status.
+    await Promise.all([
+      loadPayloadBoards(
+        selectedSubstrate,
+        selectedActivation,
+        networkRows,
+      ),
+      loadObservationStatuses(
+        selectedSubstrate,
+        selectedActivation,
+        networkRows,
+      ),
+    ]);
+
+    if (requestId !== bootRequestRef.current) return;
+
+    // 8. WirePackets only after substrates, events, networks
+    //    and budgets have been resolved.
+    await loadWirePackets(
+      selectedSubstrate,
+      selectedActivation,
+      networkRows,
+    );
+
+    if (requestId !== bootRequestRef.current) return;
+
+    setNotice("Event Store refreshed.");
+  } catch (err) {
+    if (requestId !== bootRequestRef.current) return;
+
+    setError(
+      err instanceof Error
+        ? `Refresh failed: ${err.message}`
+        : "Refresh failed.",
+    );
+    setNotice("");
+  } finally {
+    if (requestId === bootRequestRef.current) {
+      setLoadingList(false);
+    }
+  }
+};
 
   const appendStreamResult = (networkId, label, body) => {
     setStreamResults((current) => ({
