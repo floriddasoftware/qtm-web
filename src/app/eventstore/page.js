@@ -952,7 +952,8 @@ function EventStoreContent() {
   const selectedSubstrateRef = useRef("");
   const selectedActivationRef = useRef("");
   const payloadRequestRef = useRef(0);
-  const scopeRequestRef = useRef(0);
+  const boardRequestRef = useRef(0);
+  const wireRequestRef = useRef(0);
   const eventsRequestRef = useRef(0);
   const budgetRequestRef = useRef(0);
   const bootRequestRef = useRef(0);
@@ -1228,6 +1229,7 @@ function EventStoreContent() {
   /**
    * Step 5 continuation — Payload boards for each network under the activation.
    * Independent of budget; may run in parallel with observation status.
+   * Uses its own request ref so WirePackets loads cannot invalidate it.
    */
   const loadPayloadBoards = useCallback(async (name, activationValue, networkRows) => {
     if (!name || !/^\d+$/.test(String(activationValue))) {
@@ -1236,13 +1238,13 @@ function EventStoreContent() {
     }
 
     const selected = String(activationValue);
-    const requestId = ++scopeRequestRef.current;
+    const requestId = ++boardRequestRef.current;
     const activeNetworks = (networkRows || [])
       .map(normalizeNetwork)
       .filter(Boolean);
 
     const isCurrent = () =>
-      requestId === scopeRequestRef.current &&
+      requestId === boardRequestRef.current &&
       selectedSubstrateRef.current === name &&
       selectedActivationRef.current === selected;
 
@@ -1268,7 +1270,7 @@ function EventStoreContent() {
       });
       setBoards(nextBoards);
     } finally {
-      if (requestId === scopeRequestRef.current) {
+      if (requestId === boardRequestRef.current) {
         setLoadingBoards(false);
       }
     }
@@ -1280,6 +1282,7 @@ function EventStoreContent() {
    * Only invoked after budgets have resolved so submissions map to
    * 1 … budget.max_events. Never starts before the parent event, network,
    * and budget hierarchy is in place.
+   * Uses its own request ref so payload board loads cannot invalidate it.
    */
   const loadWirePackets = useCallback(async (name, activationValue, networkRows) => {
     if (!name || !/^\d+$/.test(String(activationValue))) {
@@ -1288,14 +1291,14 @@ function EventStoreContent() {
     }
 
     const selected = String(activationValue);
-    const requestId = ++scopeRequestRef.current;
+    const requestId = ++wireRequestRef.current;
     const activeNetworks = (networkRows || [])
       .map(normalizeNetwork)
       .filter(Boolean);
     const btcNetworks = activeNetworks.filter(bitcoinNetwork);
 
     const isCurrent = () =>
-      requestId === scopeRequestRef.current &&
+      requestId === wireRequestRef.current &&
       selectedSubstrateRef.current === name &&
       selectedActivationRef.current === selected;
 
@@ -1326,7 +1329,7 @@ function EventStoreContent() {
       });
       setWirePackets(nextWire);
     } finally {
-      if (requestId === scopeRequestRef.current) {
+      if (requestId === wireRequestRef.current) {
         setLoadingWire(false);
       }
     }
@@ -1361,7 +1364,8 @@ function EventStoreContent() {
   const loadAll = useCallback(async (name, activationValue, networkRows = []) => {
     if (!name || !/^\d+$/.test(String(activationValue))) {
       budgetRequestRef.current += 1;
-      scopeRequestRef.current += 1;
+      boardRequestRef.current += 1;
+      wireRequestRef.current += 1;
       setLoadingBudgets(false);
       setLoadingBoards(false);
       setLoadingWire(false);
@@ -1589,7 +1593,8 @@ function EventStoreContent() {
 
   const chooseSubstrate = async (name) => {
     eventsRequestRef.current += 1;
-    scopeRequestRef.current += 1;
+    boardRequestRef.current += 1;
+    wireRequestRef.current += 1;
     payloadRequestRef.current += 1;
     budgetRequestRef.current += 1;
 
@@ -1629,7 +1634,8 @@ function EventStoreContent() {
     if (!/^\d+$/.test(String(value))) return;
     const selected = String(value);
 
-    scopeRequestRef.current += 1;
+    boardRequestRef.current += 1;
+    wireRequestRef.current += 1;
     payloadRequestRef.current += 1;
     budgetRequestRef.current += 1;
 
