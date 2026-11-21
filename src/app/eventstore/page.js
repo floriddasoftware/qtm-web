@@ -1036,12 +1036,6 @@ function EventStoreContent() {
       observations[network.id]?.running === true,
   );
 
-    const observationRunning = networks.some(
-    (network) =>
-      bitcoinNetwork(network) &&
-      observations[network.id]?.running === true,
-  );
-
   const requiredScopeLoading =
     loadingEvents ||
     loadingBudgets ||
