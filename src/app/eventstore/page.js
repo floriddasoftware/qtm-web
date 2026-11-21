@@ -1783,53 +1783,138 @@ function EventStoreContent() {
   }
 
 
-  const refreshAll = async () => {
-    const requestId = ++bootRequestRef.current;
-    const name = selectedSubstrateRef.current;
 
-    if (!name) return;
+const refreshAll = async () => {
+  const requestId = ++bootRequestRef.current;
+  const name = selectedSubstrateRef.current;
 
-    setLoadingList(true);
-    setError("");
-    setNotice("");
-    setHandoffWarning("");
+  if (!name) {
+    setLoadingList(false);
+    return;
+  }
 
-    try {
-      const [walletRows, eventRows] = await Promise.all([
-        listSubstrates(),
-        loadEvents(name, "", { payloads: false }),
-      ]);
+  setLoadingList(true);
+  setError("");
+  setNotice("");
+  setHandoffWarning("");
+  setBudgetLoadError("");
 
-      if (
-        requestId !== bootRequestRef.current ||
-        selectedSubstrateRef.current !== name
-      ) {
-        return;
-      }
+  try {
+    const [walletRows, eventBody] = await Promise.all([
+      listSubstrates(),
+      apiRequest(`/wallets/${enc(name)}/events`),
+    ]);
 
-      setSubstrates(walletRows);
-
-      if (eventRows === null) {
-        setNotice("");
-        return;
-      }
-
-      setNotice("Event Store refreshed.");
-    } catch (err) {
-      if (requestId !== bootRequestRef.current) return;
-
-      setError(
-        err instanceof Error
-          ? `Refresh failed: ${err.message}`
-          : "Refresh failed.",
-      );
-      setNotice("");
-    } finally {
-      if (requestId === bootRequestRef.current) {
-        setLoadingList(false);
-      }
+    if (
+      requestId !== bootRequestRef.current ||
+      selectedSubstrateRef.current !== name
+    ) {
+      return;
     }
-  };
+
+    setSubstrates(walletRows);
+
+    const eventRows = Array.isArray(eventBody?.events)
+      ? eventBody.events
+      : [];
+
+    setEvents(eventRows);
+    setStore(eventBody);
+
+    const availableActivations = Array.from(
+      new Set(
+        eventRows
+          .map(activationFromEvent)
+          .filter(Boolean),
+      ),
+    ).sort((a, b) => Number(b) - Number(a));
+
+    const currentActivation = selectedActivationRef.current;
+
+    const selectedActivation = availableActivations.includes(
+      currentActivation,
+    )
+      ? currentActivation
+      : availableActivations[0] ?? "0";
+
+    selectedActivationRef.current = selectedActivation;
+    setActivation(selectedActivation);
+
+    const networkRows = await listNetworks();
+
+    if (
+      requestId !== bootRequestRef.current ||
+      selectedSubstrateRef.current !== name ||
+      selectedActivationRef.current !== selectedActivation
+    ) {
+      return;
+    }
+
+    setNetworks(networkRows);
+
+    setPayloads([]);
+    setBudgets([]);
+    setBoards({});
+    setWirePackets({});
+    setObservations({});
+    setStreamResults({});
+    setBudgetErrors({});
+    setBudgetNotices({});
+    setLogViewer(null);
+
+    const scopedLoaders = [
+      loadPayloadsForEvents(name, eventRows, selectedActivation),
+      loadPayloadBoards(name, selectedActivation, networkRows),
+      loadObservationStatuses(name, selectedActivation, networkRows),
+    ];
+
+    const budgetRows = await loadBudgets(name, selectedActivation);
+
+    if (
+      requestId !== bootRequestRef.current ||
+      selectedSubstrateRef.current !== name ||
+      selectedActivationRef.current !== selectedActivation
+    ) {
+      return;
+    }
+
+    if (budgetRows !== null) {
+      await loadWirePackets(name, selectedActivation, networkRows);
+    }
+
+    await Promise.allSettled(scopedLoaders);
+
+    if (
+      requestId !== bootRequestRef.current ||
+      selectedSubstrateRef.current !== name ||
+      selectedActivationRef.current !== selectedActivation
+    ) {
+      return;
+    }
+
+    setNotice("Event Store refreshed.");
+  } catch (err) {
+    if (
+      requestId !== bootRequestRef.current ||
+      selectedSubstrateRef.current !== name
+    ) {
+      return;
+    }
+
+    setError(
+      err instanceof Error
+        ? `Refresh failed: ${err.message}`
+        : "Refresh failed.",
+    );
+
+    setNotice("");
+  } finally {
+    if (requestId === bootRequestRef.current) {
+      setLoadingList(false);
+    }
+  }
+};
+
 
   const appendStreamResult = (networkId, label, body) => {
     setStreamResults((current) => ({
