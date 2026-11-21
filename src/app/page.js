@@ -1,2134 +1,1710 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 
-const API_BASE = (
-  process.env.NEXT_PUBLIC_QTM_API_BASE ||
-  "https://qtm-api.onrender.com"
-).replace(/\/+$/, "");
-
-const COIN_TYPES = [
-  { key: "bitcoin", name: "Bitcoin", symbol: "BTC", type: 0, path: "m/44'/0'/0'/0/0" },
-  { key: "ethereum", name: "Ethereum", symbol: "ETH", type: 60, path: "m/44'/60'/0'/0/0" },
-  { key: "solana", name: "Solana", symbol: "SOL", type: 501, path: "m/44'/501'/0'/0'" },
-  { key: "tron", name: "Tron", symbol: "TRX", type: 195, path: "m/44'/195'/0'/0/0" },
+// Substrate state lives in the machine-local ~/.qp/substrates and is operated
+// on by the QP runtime. Inside a native shell (for example Tauri) the console
+// calls that runtime directly through IPC: no HTTP. A plain browser cannot
+// reach the local filesystem, so it uses the qtm-api HTTP server.
+// Prefer NEXT_PUBLIC_QTM_API_BASE when set; otherwise fall back to the public
+// qtm-api deployment so a Vercel (or similar) host never routes /wallets to
+// itself.
+// Substrate storage is owned by the server-side QP runtime.
+// substrate_root() is resolved by Rust, never by the browser.
+const TABS = [
+  { id: "create", label: "Create" },
+  { id: "receive", label: "Receive" },
+  { id: "transit", label: "Transit" },
+  { id: "exile", label: "Exile" },
 ];
 
-const BITCOIN_KINDS = {
-  legacy: { label: "Legacy · P2PKH", note: "BIP44 · m/44'/0'/0'/0/0" },
-  segwit: { label: "SegWit · P2WPKH", note: "BIP84 · m/84'/0'/0'/0/0" },
-  other: { label: "Bitcoin", note: "" },
+const API_BASE = (
+  process.env.NEXT_PUBLIC_QTM_API_BASE || "https://qtm-api.onrender.com"
+).replace(/\/+$/, "");
+
+const isRecord = (value) =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+const objectAt = (source, keys) => {
+  if (!isRecord(source)) return undefined;
+  for (const key of keys) {
+    if (isRecord(source[key])) return source[key];
+  }
+  return undefined;
 };
 
-const INPUT =
-  "h-10 w-full min-w-0 rounded-xl border border-zinc-200 bg-white px-3 text-sm outline-none transition focus:border-zinc-500 focus:ring-4 focus:ring-zinc-500/10 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950";
-const BUTTON =
-  "inline-flex min-h-10 items-center justify-center rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium transition hover:bg-zinc-50 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800";
-const OUTER =
-  "qtm-pop min-w-0 self-start rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900";
-const INNER =
-  "qtm-pop min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/70 dark:border-zinc-800 dark:bg-zinc-950/60";
+const valueAt = (source, keys) => {
+  if (!isRecord(source)) return undefined;
+  for (const key of keys) {
+    if (source[key] !== null && source[key] !== undefined) {
+      return source[key];
+    }
+  }
+  return undefined;
+};
 
-const QTM_STYLES = `
-@keyframes qtm-pop {
-  from { opacity: 0; transform: translateY(8px) scale(0.98); }
-  to { opacity: 1; transform: none; }
-}
-.qtm-pop { animation: qtm-pop 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
-@keyframes qtm-backdrop-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-@keyframes qtm-dialog-in {
-  from { opacity: 0; transform: translateY(12px) scale(0.97); }
-  to { opacity: 1; transform: none; }
-}
-.qtm-backdrop { animation: qtm-backdrop-in 0.2s ease-out both; }
-.qtm-dialog { animation: qtm-dialog-in 0.25s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
-@media (prefers-reduced-motion: reduce) {
-  .qtm-pop, .qtm-backdrop, .qtm-dialog { animation: none; }
-}
-`;
+const formatKey = (key) =>
+  String(key)
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
 
-const WIREPACKETS_POLL_MS = 2000;
+function friendlyValue(value) {
+  if (value === null || value === undefined || value === "") {
+    return "Not provided";
+  }
+  if (typeof value === "boolean") {
+    return value ? "Yes" : "No";
+  }
+  if (["string", "number", "bigint"].includes(typeof value)) {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value.length ? `${value.length} items` : "None";
+  }
+  return "Details available";
+}
+
+function flatten(value, prefix = "", rows = []) {
+  if (value === null || value === undefined) {
+    if (prefix) rows.push([prefix, "Not provided"]);
+  } else if (Array.isArray(value)) {
+    if (!value.length && prefix) {
+      rows.push([prefix, "None"]);
+    }
+    value.forEach((item, index) => {
+      flatten(item, `${prefix || "Item"} ${index + 1}`, rows);
+    });
+  } else if (isRecord(value)) {
+    const entries = Object.entries(value);
+    if (!entries.length && prefix) {
+      rows.push([prefix, "No details returned"]);
+    }
+    entries.forEach(([key, child]) => {
+      flatten(
+        child,
+        prefix ? `${prefix} · ${formatKey(key)}` : formatKey(key),
+        rows
+      );
+    });
+  } else {
+    rows.push([prefix || "Value", friendlyValue(value)]);
+  }
+  return rows;
+}
+
+function hasContent(value) {
+  return (
+    value !== null &&
+    value !== undefined &&
+    (typeof value !== "object" ||
+      (Array.isArray(value) ? value.length > 0 : Object.keys(value).length > 0))
+  );
+}
+
+class RuntimeError extends Error {
+  constructor(message, details = {}) {
+    super(message);
+    this.name = "RuntimeError";
+    this.status = details.status ?? 0;
+    this.statusText = details.statusText ?? "";
+    this.url = details.url ?? "";
+    this.body = details.body;
+  }
+}
+
+// Native IPC entry point, present only inside a native shell.
+function nativeInvoke() {
+  if (typeof window === "undefined" || !isTauri()) return null;
+  return invoke;
+}
+
+const NATIVE_COMMANDS = {
+  listSubstrates: "qtm_list_substrates",
+  listNetworks: "qtm_list_networks",
+  createSubstrate: "qtm_create",
+  receive: "qtm_receive",
+  transit: "qtm_transit",
+  exile: "qtm_exile",
+  listEvents: "qtm_events",
+  submissionValue: "qtm_submission_value",
+};
+
+const API_ROUTES = {
+  listSubstrates: () => ["GET", "/wallets"],
+  listNetworks: () => ["GET", "/networks"],
+  createSubstrate: () => ["POST", "/wallets"],
+  openSubstrate: ({ name, activation }) => [
+    "GET",
+    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(
+      activation
+    )}/open`,
+  ],
+  receive: ({ name }) => [
+    "POST",
+    `/wallets/${encodeURIComponent(name)}/receive`,
+  ],
+  transit: ({ name }) => [
+    "POST",
+    `/wallets/${encodeURIComponent(name)}/transit`,
+  ],
+  exile: ({ name }) => [
+    "POST",
+    `/wallets/${encodeURIComponent(name)}/exile`,
+  ],
+  listEvents: ({ name }) => [
+    "GET",
+    `/wallets/${encodeURIComponent(name)}/events`,
+  ],
+  submissionValue: ({ name, activation, network, field }) => [
+    "GET",
+    `/wallets/${encodeURIComponent(
+      name
+    )}/activations/${encodeURIComponent(
+      activation
+    )}/networks/${encodeURIComponent(network)}/${encodeURIComponent(field)}`,
+  ],
+};
+
+function directMessage(cause) {
+  if (typeof cause === "string" && cause.trim()) return cause.trim();
+  if (cause instanceof Error && cause.message) return cause.message;
+  if (isRecord(cause)) {
+    const message = valueAt(cause, ["error", "message", "detail"]);
+    if (typeof message === "string" && message.trim()) return message.trim();
+    if (message !== undefined) return String(message);
+  }
+  return "The QP runtime reported an error.";
+}
+
+function parseApiResponse(raw) {
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { response_text: raw };
+  }
+}
 
 async function apiRequest(path, options = {}) {
+  const method = options.method || "GET";
+  const url = `${API_BASE}${path}`;
+  const startedAt = performance.now();
+
   let response;
+
+  console.info(`[QTM API] START ${method} ${path}`);
+
   try {
-    response = await fetch(`${API_BASE}${path}`, {
-      ...options,
-      cache: "no-store",
+    response = await fetch(url, {
+      method,
       headers: {
         Accept: "application/json",
-        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...(options.body !== undefined
+          ? { "Content-Type": "application/json" }
+          : {}),
         ...options.headers,
       },
+      ...(options.body !== undefined
+        ? { body: JSON.stringify(options.body) }
+        : {}),
+      cache: "no-store",
+      ...(options.signal ? { signal: options.signal } : {}),
     });
+
+    console.info(
+      `[QTM API] HEADERS ${method} ${path} ` +
+        `status=${response.status} ` +
+        `elapsed=${Math.round(performance.now() - startedAt)}ms`
+    );
   } catch (cause) {
-    if (cause?.name === "AbortError") throw cause;
-    throw new Error(
-      `Could not reach the QTM API at ${API_BASE}: ${
-        cause instanceof Error ? cause.message : "network error"
-      }`,
+    console.error(
+      `[QTM API] FETCH FAILED ${method} ${path}`,
+      cause
+    );
+
+    throw new RuntimeError(
+      `Could not reach the QTM API at ${API_BASE} while calling ${method} ${path}: ${directMessage(cause)}`,
+      { status: 0, url }
     );
   }
 
-  const raw = await response.text();
-  let body = {};
-  if (raw) {
-    try {
-      body = JSON.parse(raw);
-    } catch {
-      body = { response_text: raw };
-    }
+  let raw;
+
+  try {
+    raw = await response.text();
+
+    console.info(
+      `[QTM API] BODY COMPLETE ${method} ${path} ` +
+        `bytes=${raw.length} ` +
+        `elapsed=${Math.round(performance.now() - startedAt)}ms`
+    );
+  } catch (cause) {
+    console.error(
+      `[QTM API] BODY FAILED ${method} ${path}`,
+      cause
+    );
+
+    throw new RuntimeError(
+      `The QTM API connection closed before the response was read (${method} ${path}): ${directMessage(cause)}`,
+      {
+        status: response.status,
+        statusText: response.statusText,
+        url: response.url || url,
+      }
+    );
   }
+
+  const data = parseApiResponse(raw);
+
   if (!response.ok) {
-    throw new Error(
-      body?.error ||
-        body?.message ||
-        body?.detail ||
-        body?.response_text ||
-        `Request failed with HTTP ${response.status}`,
+    const message = valueAt(data, ["error", "message", "detail"]);
+
+    throw new RuntimeError(
+      typeof message === "string" && message.trim()
+        ? message.trim()
+        : `Request failed with HTTP ${response.status}: ${method} ${path}`,
+      {
+        status: response.status,
+        statusText: response.statusText,
+        url: response.url || url,
+        body: data,
+      }
     );
   }
-  return body;
+
+  console.info(
+    `[QTM API] SUCCESS ${method} ${path} ` +
+      `elapsed=${Math.round(performance.now() - startedAt)}ms`
+  );
+
+  return data;
 }
 
-function enc(value) {
-  return encodeURIComponent(String(value));
-}
+async function callRuntime(operation, args = {}) {
+  const native = nativeInvoke();
 
-/**
- * Frontend dependency on qtm-api list_substrates() via GET /wallets.
- * Establishes the persisted substrate list before any activation scope is selected.
- * Response shape: { substrates: [{ name, dimension, activations }] }
- */
-async function listSubstrates() {
-  const body = await apiRequest("/wallets");
-  const rows = Array.isArray(body?.substrates) ? body.substrates : [];
-  return rows
-    .filter((entry) => entry && typeof entry.name === "string" && entry.name.length > 0)
-    .map((entry) => ({
-      name: entry.name,
-      dimension: entry.dimension != null ? String(entry.dimension) : "",
-      activations:
-        entry.activations != null && /^\d+$/.test(String(entry.activations))
-          ? String(entry.activations)
-          : "0",
-    }));
-}
+  if (native) {
+    const command = NATIVE_COMMANDS[operation];
 
-function activationFromEvent(event) {
-  const value =
-    event?.activation ??
-    event?.heritage?.state?.activation_count ??
-    event?.manifold?.activations;
-  return value === undefined || value === null || !/^\d+$/.test(String(value))
-    ? null
-    : String(value);
-}
+    if (!command) {
+      throw new RuntimeError(
+        `Native command is not registered: ${operation}`
+      );
+    }
 
-function normalizeNetwork(network) {
-  if (!network || typeof network.id !== "string") return null;
-  return {
-    id: network.id,
-    name: network.name || network.id,
-    coin: network.coin,
-    purpose: network.purpose,
-    path: network.path,
-    registered: network.registered,
-  };
-}
-
-/**
- * Frontend dependency on GET /networks (registered path registry).
- * Response shape: { networks: [{ id, name, coin, purpose, path }] }
- */
-async function listNetworks() {
-  const body = await apiRequest("/networks");
-  const rows = Array.isArray(body?.networks) ? body.networks : [];
-  return rows.map(normalizeNetwork).filter(Boolean);
-}
-
-function normalizePayload(entry, fallbackRecord) {
-  const network = normalizeNetwork(entry?.network);
-  const path = entry?.path ?? entry?.payload_path;
-  const depth = entry?.depth_identifier ?? entry?.depthIdentifier ?? entry?.depth_id;
-  if (!network || typeof path !== "string" || depth == null) return null;
-  const record = String(entry?.record ?? fallbackRecord);
-  const rawDirection = String(entry?.direction || "").toLowerCase();
-  const direction =
-    rawDirection === "transit_inputs" || rawDirection === "transit"
-      ? "transit_inputs"
-      : rawDirection === "exile_outputs" || rawDirection === "exile"
-        ? "exile_outputs"
-        : record.startsWith("event_")
-          ? "transit_inputs"
-          : record.startsWith("exile_")
-            ? "exile_outputs"
-            : "unclassified";
-  const objects = Array.isArray(entry?.objects) ? entry.objects : [];
-  return {
-    ...entry,
-    record,
-    network,
-    path,
-    depth_identifier: String(depth),
-    direction,
-    objects,
-  };
-}
-
-function payloadRowKey(payload) {
-  return JSON.stringify([
-    payload.record,
-    payload.network.id,
-    payload.path,
-    payload.depth_identifier,
-  ]);
-}
-
-function coinKey(network) {
-  if (!network) return "other";
-  const coin = String(network.coin ?? "").toLowerCase();
-  const id = String(network.id ?? "").toLowerCase();
-  for (const c of COIN_TYPES) {
-    if (
-      coin === c.key ||
-      coin === String(c.type) ||
-      coin === c.symbol.toLowerCase() ||
-      id === c.symbol.toLowerCase() ||
-      id.includes(c.key)
-    ) {
-      return c.key;
+    try {
+      return await native(command, args || {});
+    } catch (cause) {
+      throw new RuntimeError(directMessage(cause));
     }
   }
-  const match = String(network.path ?? "").match(/^m\/\d+'?\/(\d+)'?/);
-  if (match) {
-    const found = COIN_TYPES.find((c) => String(c.type) === match[1]);
-    if (found) return found.key;
+
+  const route = API_ROUTES[operation];
+
+  if (!route) {
+    throw new RuntimeError(
+      `Browser API route is not registered: ${operation}`
+    );
   }
-  return "other";
+
+  const [method, path] = route(args || {});
+
+  const body = ["createSubstrate", "receive", "transit"].includes(operation)
+    ? args?.request
+    : undefined;
+
+  return apiRequest(path, {
+    method,
+    ...(body !== undefined ? { body } : {}),
+  });
 }
 
-function bitcoinNetwork(network) {
-  return coinKey(network) === "bitcoin";
+function eventMapOf(source) {
+  const direct = objectAt(source, ["event", "event_map", "eventMap"]);
+  if (direct) return direct;
+
+  const frame = objectAt(source, ["frame"]);
+  const frameEvent = objectAt(frame, [
+    "event",
+    "event_map",
+    "eventMap",
+  ]);
+  if (frameEvent) return frameEvent;
+
+  const transaction = objectAt(frame, [
+    "quantum_transaction",
+    "quantumTransaction",
+  ]);
+  return objectAt(transaction, ["event", "event_map", "eventMap"]);
 }
 
-function bitcoinKind(network) {
-  const text = `${network.id} ${network.name} ${network.path || ""}`.toLowerCase();
-  const purpose = String(network.purpose ?? "");
-  if (purpose === "84" || /segwit|bech32|p2wpkh|84'/.test(text)) return "segwit";
-  if (purpose === "44" || /legacy|p2pkh|44'/.test(text)) return "legacy";
-  return "other";
-}
-
-function ownPayloadKind(board, network) {
-  const own = coinKey(network);
-  const matches = (Array.isArray(board?.kinds) ? board.kinds : []).filter(
-    (entry) => coinKey({ coin: entry?.kind, id: String(entry?.kind ?? "") }) === own,
-  );
-  return matches.sort((a, b) => Number(Boolean(b.in_scope)) - Number(Boolean(a.in_scope)))[0] || null;
-}
-
-function money(value) {
-  if (value === undefined || value === null || value === "") return "—";
-  return String(value);
-}
-
-function flag(value) {
-  return value == null ? "Not reported" : value ? "Yes" : "No";
-}
-
-/* ───────────────────────── UI primitives ───────────────────────── */
-
-function Pill({ children, tone = "neutral" }) {
-  const tones = {
-    neutral:
-      "border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
-    ok: "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300",
-    warn: "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200",
-  };
+function ResultHeading({ eyebrow, title }) {
   return (
-    <span className={`inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${tones[tone]}`}>
+    <div className="flex flex-col gap-1">
+      {eyebrow && (
+        <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+          {eyebrow}
+        </p>
+      )}
+      <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+        {title}
+      </h3>
+    </div>
+  );
+}
+
+function KeyValueList({ value, emptyText = "No details were returned." }) {
+  const rows = flatten(value);
+
+  if (!rows.length) {
+    return (
+      <p className="text-xs text-zinc-500 dark:text-zinc-400">{emptyText}</p>
+    );
+  }
+
+  return (
+    <dl className="grid grid-cols-1 gap-x-4 gap-y-2 text-xs sm:grid-cols-2">
+      {rows.map(([key, itemValue], index) => (
+        <div key={`${key}-${index}`} className="min-w-0">
+          <dt className="truncate font-medium text-zinc-500 dark:text-zinc-400">
+            {key}
+          </dt>
+          <dd className="break-words text-zinc-900 dark:text-zinc-100">
+            {itemValue}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function ResultSection({
+  title,
+  description,
+  value,
+  defaultOpen = false,
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="flex w-full items-center justify-between gap-3 px-3 py-3 text-left hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
+      >
+        <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-50">
+          {title}
+        </span>
+        {description && (
+          <span className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+            {description}
+          </span>
+        )}
+        <span className="text-xs text-zinc-500 dark:text-zinc-400">
+          {open ? "▴" : "▾"}
+        </span>
+      </button>
+
+      {open && (
+        <div className="border-t border-zinc-200 px-3 py-3 dark:border-zinc-800">
+          {hasContent(value) ? (
+            <KeyValueList value={value} />
+          ) : (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              This information was not returned by the API.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Field({
+  label,
+  value,
+  onChange,
+  required = false,
+  placeholder = "",
+  mono = false,
+  type = "text",
+  autoComplete,
+}) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+        {label}
+      </span>
+      <input
+        type={type}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        required={required}
+        placeholder={placeholder}
+        autoComplete={autoComplete}
+        className={`h-9 w-full rounded-lg border border-zinc-300 bg-white px-3 text-xs text-zinc-900 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800 ${
+          mono ? "font-mono" : ""
+        }`}
+      />
+    </label>
+  );
+}
+
+function NumberField({ label, value, onChange, min = 0 }) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+        {label}
+      </span>
+      <input
+        type="number"
+        min={min}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        required
+        className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-2.5 font-mono text-xs text-zinc-900 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus:ring-zinc-800"
+      />
+    </label>
+  );
+}
+
+// Controlled ordinal selector. Amount (N) defines the coordinate range 1…N;
+// every unit is its own button and button n means ordinal coordinate n.
+// The grid is windowed (only visible rows are mounted) inside a scroll
+// container, so there is no display cutoff and every ordinal stays reachable.
+// When amount changes to N the frame loads persisted events for that range
+// (0..N) and marks every ordinal backed by a persisted transit event with a
+const ORDINAL_COLUMNS = 8;
+const ORDINAL_ROW_HEIGHT = 38;
+const ORDINAL_VIEWPORT_HEIGHT = 190;
+const ORDINAL_OVERSCAN = 2;
+
+function ReceiveOrdinalSelector({
+  amount,
+  ordinal,
+  onChange,
+  persistedOrdinals = [],
+  persistedLoading = false,
+  persistedError = "",
+}) {
+  const [scrollTop, setScrollTop] = useState(0);
+
+  const count = Number(amount);
+  const selected = Number(ordinal);
+  const persisted = new Set(persistedOrdinals);
+
+  if (!Number.isSafeInteger(count) || count <= 0) {
+    return (
+      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+        Enter a positive amount to load persisted ordinals.
+      </p>
+    );
+  }
+
+  const totalRows = Math.ceil(count / ORDINAL_COLUMNS);
+  const firstRow = Math.max(
+    0,
+    Math.floor(scrollTop / ORDINAL_ROW_HEIGHT) - ORDINAL_OVERSCAN
+  );
+  const lastRow = Math.min(
+    totalRows - 1,
+    Math.ceil((scrollTop + ORDINAL_VIEWPORT_HEIGHT) / ORDINAL_ROW_HEIGHT) +
+      ORDINAL_OVERSCAN
+  );
+
+  const rows = [];
+
+  for (let row = firstRow; row <= lastRow; row += 1) {
+    const cells = [];
+
+    for (let column = 0; column < ORDINAL_COLUMNS; column += 1) {
+      const id = row * ORDINAL_COLUMNS + column + 1;
+
+      if (id > count) break;
+
+      const isSelected = id === selected;
+      const isPersisted = persisted.has(id);
+
+      const cellClass = isPersisted
+        ? isSelected
+          ? "border-emerald-600 bg-emerald-200 text-emerald-950 dark:border-emerald-400 dark:bg-emerald-900/70 dark:text-emerald-100"
+          : "border-emerald-300 bg-emerald-100 text-emerald-950 hover:bg-emerald-200 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200 dark:hover:bg-emerald-900/70"
+        : isSelected
+        ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-950"
+        : "border-zinc-200 bg-zinc-50 text-zinc-800 hover:border-zinc-400 hover:bg-white dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200 dark:hover:border-zinc-500 dark:hover:bg-zinc-900";
+
+      cells.push(
+        <button
+          key={id}
+          type="button"
+          onClick={() => onChange(id)}
+          className={`flex h-8 min-w-0 items-center justify-center rounded-md border px-0.5 text-center transition-colors ${cellClass}`}
+        >
+          {id}
+        </button>
+      );
+    }
+
+    rows.push(
+      <div
+        key={row}
+        className="grid gap-1"
+        style={{ gridTemplateColumns: `repeat(${ORDINAL_COLUMNS}, minmax(0, 1fr))` }}
+      >
+        {cells}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 className="text-xs font-semibold text-zinc-900 dark:text-zinc-50">
+          Ordinal units · Range 0–{count}
+        </h4>
+        <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+          {persisted.size} persisted transit(s) · {count} available coordinates · Selected{" "}
+          {Number.isSafeInteger(selected) ? selected : "none"}
+        </p>
+      </div>
+
+      {persistedLoading && (
+        <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+          Loading persisted events…
+        </p>
+      )}
+      {persistedError && (
+        <p className="text-[11px] text-red-600 dark:text-red-400">
+          {persistedError}
+        </p>
+      )}
+
+      <div
+        onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+        className="overflow-y-auto rounded-lg border border-zinc-200 p-1 dark:border-zinc-800"
+        style={{ height: ORDINAL_VIEWPORT_HEIGHT }}
+      >
+        <div className="flex flex-col gap-1">{rows}</div>
+      </div>
+
+      <div className="flex flex-wrap gap-3 text-[11px] text-zinc-500 dark:text-zinc-400">
+        <span className="inline-flex items-center gap-1">
+          <span className="h-2 w-2 rounded-full bg-emerald-400" />
+          Persisted transit
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <span className="h-2 w-2 rounded-full bg-zinc-300 dark:bg-zinc-600" />
+          No persisted transit
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function eventRecordsOf(source) {
+  const candidates = [
+    source?.events,
+    source?.records,
+    source?.event_records,
+    source?.eventRecords,
+    source?.items,
+    source?.data?.events,
+    source?.data?.records,
+  ];
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      return candidate.filter(isRecord);
+    }
+    if (isRecord(candidate)) {
+      for (const key of ["events", "records", "items"]) {
+        if (Array.isArray(candidate[key])) {
+          return candidate[key].filter(isRecord);
+        }
+      }
+    }
+  }
+
+  return [];
+}
+
+function recordNameOf(record) {
+  for (const key of [
+    "record_name",
+    "recordName",
+    "filename",
+    "file_name",
+    "fileName",
+    "name",
+    "record",
+    "path",
+    "id",
+  ]) {
+    if (typeof record?.[key] === "string" && record[key].trim()) {
+      return record[key];
+    }
+  }
+  return "";
+}
+
+// Same 6:3 (2:1) ratio for every frame; stacks and relaxes the ratio on
+// narrow screens, scrolling inside the frame when content is taller.
+function Frame({ eyebrow, title, tone = "default", actions, children }) {
+  const toneClass =
+    tone === "sensitive"
+      ? "border-amber-300 bg-amber-50/60 dark:border-amber-900 dark:bg-amber-950/30"
+      : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900";
+
+  return (
+    <section className={`flex flex-col overflow-hidden rounded-2xl border ${toneClass}`}>
+      <header className="flex flex-wrap items-start justify-between gap-2 border-b border-inherit px-4 py-3">
+        <div className="flex flex-col gap-1">
+          {eyebrow && (
+            <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+              {eyebrow}
+            </p>
+          )}
+          <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+            {title}
+          </h3>
+        </div>
+        {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+      </header>
+      <div className="min-h-0 flex-1 overflow-y-auto p-4">{children}</div>
+    </section>
+  );
+}
+
+function FrameButton({ onClick, disabled, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="h-7 rounded-md border border-zinc-300 bg-white px-2 text-[11px] font-medium text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+    >
+      {children}
+    </button>
+  );
+}
+
+// Copies the exact underlying value (never a formatted label or a shortened
+// display string) to the clipboard.
+async function copyValue(value) {
+  if (value === null || value === undefined) return;
+  try {
+    await navigator.clipboard.writeText(String(value));
+  } catch {
+    // Clipboard access can be denied by the browser; nothing else to do.
+  }
+}
+
+// Small overlapping-squares copy control. `label` is the accessible name,
+// for example "Copy address".
+function CopyButton({ value, label }) {
+  const [copied, setCopied] = useState(false);
+  const empty = value === null || value === undefined || value === "";
+
+  useEffect(() => {
+    if (!copied) return undefined;
+    const timer = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(timer);
+  }, [copied]);
+
+  async function handleCopy() {
+    if (empty) return;
+    await copyValue(value);
+    setCopied(true);
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      disabled={empty}
+      title={label}
+      aria-label={label}
+      className="inline-flex h-5 w-5 items-center justify-center rounded border border-zinc-300 text-[10px] text-zinc-500 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+    >
+      {copied ? (
+        <span aria-hidden="true">✓</span>
+      ) : (
+        <span aria-hidden="true">⧉</span>
+      )}
+    </button>
+  );
+}
+
+// One labelled network value with its own copy control.
+function NetworkValueRow({ label, value, copyLabel }) {
+  return (
+    <div className="flex items-center justify-between gap-2 text-xs">
+      <span className="text-zinc-500 dark:text-zinc-400">{label}</span>
+      <span className="flex min-w-0 items-center gap-1">
+        <span className="truncate font-mono text-zinc-900 dark:text-zinc-100">
+          {value === null || value === undefined || value === ""
+            ? "Not provided"
+            : String(value)}
+        </span>
+        <CopyButton value={value} label={copyLabel} />
+      </span>
+    </div>
+  );
+}
+
+// Display safeguard only; it is not access control.
+function Blurred({ revealed, children }) {
+  return (
+    <span className={revealed ? "" : "select-none blur-sm"}>
       {children}
     </span>
   );
 }
 
-function Notice({ children, type = "error" }) {
-  const styles =
-    type === "success"
-      ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200"
-      : "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200";
-  return (
-    <p role={type === "error" ? "alert" : "status"} className={`qtm-pop break-words rounded-xl border px-3 py-2 text-xs leading-5 ${styles}`}>
-      {children}
-    </p>
-  );
-}
+// ---------------------------------------------------------------------------
+// Operation 2: Independent Submission Derivation Results
+// ---------------------------------------------------------------------------
+function DeriveResults({ result }) {
+  const [revealSensitive, setRevealSensitive] = useState(false);
+  const [privateKey, setPrivateKey] = useState("");
+  const [privateKeyLoading, setPrivateKeyLoading] = useState(false);
+  const [privateKeyError, setPrivateKeyError] = useState("");
 
-function Field({ label, children }) {
+  async function revealPrivateKey() {
+    if (privateKey) {
+      setPrivateKey("");
+      return;
+    }
+
+    setPrivateKeyLoading(true);
+    setPrivateKeyError("");
+
+    try {
+      const value = await callRuntime("submissionValue", {
+        name: result.substrate,
+        activation: result.activation,
+        submission: result.submission,
+        network: result.network,
+        field: "xpriv",
+      });
+
+      setPrivateKey(
+        typeof value === "string"
+          ? value
+          : value?.response_text ?? JSON.stringify(value)
+      );
+    } catch (error) {
+      setPrivateKeyError(
+        error instanceof Error
+          ? error.message
+          : "Unable to retrieve the private extended key."
+      );
+    } finally {
+      setPrivateKeyLoading(false);
+    }
+  }
+
   return (
-    <div className="min-w-0">
-      <dt className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-        {label}
-      </dt>
-      <dd className="mt-0.5 break-words text-sm font-medium leading-5">{children ?? "—"}</dd>
+    <div className="flex flex-col gap-4">
+      <div>
+        <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+          Submission derivation identity
+        </h3>
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          Persisted independently under activation {result?.activation}, submission{" "}
+          {result?.submission}, network {result?.network}.
+        </p>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <FrameButton
+          onClick={() => setRevealSensitive((current) => !current)}
+        >
+          {revealSensitive ? "Hide values" : "Reveal values"}
+        </FrameButton>
+      </div>
+
+      <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+        {revealSensitive ? (
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                Private extended key · Xpriv
+              </span>
+              <FrameButton
+                onClick={revealPrivateKey}
+                disabled={privateKeyLoading}
+              >
+                {privateKeyLoading
+                  ? "Loading…"
+                  : privateKey
+                  ? "Clear"
+                  : "Reveal Xpriv"}
+              </FrameButton>
+            </div>
+
+            {privateKeyError && (
+              <p className="text-xs text-red-600 dark:text-red-400">
+                {privateKeyError}
+              </p>
+            )}
+
+            {privateKey && (
+              <p className="break-all font-mono text-xs text-zinc-900 dark:text-zinc-100">
+                {privateKey}
+              </p>
+            )}
+
+            {!privateKey && !privateKeyError && (
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Xpriv is fetched on demand only when explicitly revealed.
+              </p>
+            )}
+          </div>
+        ) : (
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+            Full scriptPubKey and extended keys are hidden. Reveal to inspect all
+            derived values for this submission.
+          </p>
+        )}
+      </div>
     </div>
   );
 }
 
-function Fields({ children, min = "8rem" }) {
-  return (
-    <dl className="grid gap-x-4 gap-y-3" style={{ gridTemplateColumns: `repeat(auto-fit, minmax(${min}, 1fr))` }}>
-      {children}
-    </dl>
-  );
-}
-
-function Stat({ label, value, wide = false }) {
-  return (
-    <div className={`min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/60 ${wide ? "col-span-2" : ""}`}>
-      <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">{label}</p>
-      <p className="mt-1 break-all text-sm font-semibold tabular-nums">{value}</p>
-    </div>
-  );
-}
-
-function Collapsible({ open, children }) {
-  return (
-    <div className={`grid transition-[grid-template-rows,opacity,visibility] duration-300 ease-out motion-reduce:transition-none ${open ? "visible grid-rows-[1fr] opacity-100" : "invisible grid-rows-[0fr] opacity-0"}`}>
-      <div className="min-h-0 min-w-0 overflow-hidden">{children}</div>
-    </div>
-  );
-}
-
-function Card({
-  title,
-  subtitle,
-  badge,
-  defaultOpen = false,
-  inner = false,
-  scroll = false,
-  className = "",
-  style,
-  children,
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <section style={style} className={`${inner ? INNER : OUTER} ${className}`}>
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-        className={`flex w-full items-center gap-3 text-left ${inner ? "px-3 py-2.5" : "px-4 py-3.5"}`}
-      >
-        <span className="min-w-0 flex-1">
-          <span className={`block truncate font-semibold ${inner ? "text-[11px] uppercase tracking-wider text-zinc-600 dark:text-zinc-300" : "text-sm"}`}>
-            {title}
-          </span>
-          {subtitle && <span className="mt-0.5 block truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400">{subtitle}</span>}
-        </span>
-        {badge}
-        <span aria-hidden="true" className={`shrink-0 text-zinc-400 transition-transform duration-300 ${open ? "rotate-180" : ""}`}>▾</span>
-      </button>
-      <Collapsible open={open}>
-        <div className={`border-t border-zinc-200/80 dark:border-zinc-800 ${inner ? "p-3" : "p-4"} ${scroll ? "max-h-80 overflow-y-auto overscroll-contain" : ""}`}>
-          {children}
-        </div>
-      </Collapsible>
-    </section>
-  );
-}
-
-function SectionHeading({ title, meta, children }) {
-  return (
-    <div className="flex flex-wrap items-center gap-2 px-1 pt-2">
-      <h2 className="text-base font-semibold tracking-tight">{title}</h2>
-      {meta && <Pill>{meta}</Pill>}
-      {children && <p className="basis-full text-xs text-zinc-500 dark:text-zinc-400">{children}</p>}
-    </div>
-  );
-}
-
-/* ───────────────────────── Network pieces ───────────────────────── */
-
-function BudgetSummary({ budget }) {
-  return (
-    <Fields min="7rem">
-      <Field label="Min events">{money(budget?.min_events)}</Field>
-      <Field label="Max events">{money(budget?.max_events)}</Field>
-    </Fields>
-  );
-}
-
-function BudgetEditor({ budget, disabled, onSave }) {
-  const toDraft = () => ({
-    min_events: String(budget?.min_events ?? 0),
-    max_events: String(budget?.max_events ?? 1024),
-  });
-
-  const [draft, setDraft] = useState(toDraft);
+// Frame 4 · Network inputs. Fed by result.receive.derivation (metadata sent
+// by the Receive response). Every supported network discovered for the
+// activation gets its own section; values are loaded from the persisted
+// activation.
+function ReceiveNetworkDerivations({ derivation }) {
+  const [networkValues, setNetworkValues] = useState({});
+  const [privateKeys, setPrivateKeys] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [privateKeyLoading, setPrivateKeyLoading] = useState({});
+  const [error, setError] = useState({});
+  const [privateKeyError, setPrivateKeyError] = useState({});
 
   useEffect(() => {
-    setDraft(toDraft());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [budget?.min_events, budget?.max_events]);
+    let active = true;
+
+    async function loadNetworkValues() {
+      const networks = Array.isArray(derivation?.networks)
+        ? derivation.networks
+        : [];
+
+      if (
+        !derivation?.substrate ||
+        !Number.isSafeInteger(Number(derivation.activation)) ||
+        !networks.length
+      ) {
+        setNetworkValues({});
+        return;
+      }
+
+      setLoading(true);
+      setError({});
+
+      try {
+        const fields = [
+          "fingerprint",
+          "scriptpubkey",
+          "xpub",
+          "zpub",
+          "address",
+        ];
+
+        const failures = {};
+
+        const entries = await Promise.all(
+          networks
+            .filter(
+              (network) =>
+                network.supported === true &&
+                network.available !== false &&
+                typeof network.network === "string"
+            )
+            .map(async (network) => {
+              try {
+                const values = await Promise.all(
+                  fields.map(async (field) => {
+                    const response = await callRuntime("submissionValue", {
+                      name: derivation.substrate,
+                      activation: Number(derivation.activation),
+                      network: network.network,
+                      field,
+                    });
+
+                    return [
+                      field,
+                      typeof response === "string"
+                        ? response
+                        : response?.response_text ?? JSON.stringify(response),
+                    ];
+                  })
+                );
+
+                return [network.network, Object.fromEntries(values)];
+              } catch (err) {
+                failures[network.network] =
+                  err instanceof Error
+                    ? err.message
+                    : "Unable to retrieve activation network values.";
+                return null;
+              }
+            })
+        );
+
+        if (active) {
+          setNetworkValues(Object.fromEntries(entries.filter(Boolean)));
+          setError(failures);
+        }
+      } catch (err) {
+        if (active) {
+          setError({
+            general:
+              err instanceof Error
+                ? err.message
+                : "Unable to retrieve activation network values.",
+          });
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    loadNetworkValues();
+
+    return () => {
+      active = false;
+    };
+  }, [derivation]);
+
+  async function revealPrivateKey(networkId) {
+    if (privateKeys[networkId]) {
+      setPrivateKeys((current) => {
+        const next = { ...current };
+        delete next[networkId];
+        return next;
+      });
+      return;
+    }
+
+    setPrivateKeyLoading((current) => ({
+      ...current,
+      [networkId]: true,
+    }));
+    setPrivateKeyError((current) => ({
+      ...current,
+      [networkId]: "",
+    }));
+
+    try {
+      const value = await callRuntime("submissionValue", {
+        name: derivation.substrate,
+        activation: Number(derivation.activation),
+        network: networkId,
+        field: "xpriv",
+      });
+
+      setPrivateKeys((current) => ({
+        ...current,
+        [networkId]:
+          typeof value === "string"
+            ? value
+            : value?.response_text ?? JSON.stringify(value),
+      }));
+    } catch (error) {
+      setPrivateKeyError((current) => ({
+        ...current,
+        [networkId]:
+          error instanceof Error
+            ? error.message
+            : "Unable to retrieve the private extended key.",
+      }));
+    } finally {
+      setPrivateKeyLoading((current) => {
+        const next = { ...current };
+        delete next[networkId];
+        return next;
+      });
+    }
+  }
+
+  const networks = Array.isArray(derivation?.networks)
+    ? derivation.networks
+    : [];
+
+  if (!networks.length) {
+    return (
+      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+        No network derivation metadata was returned.
+      </p>
+    );
+  }
 
   return (
-    <form
-      className="mt-4 grid gap-3 border-t border-zinc-200 pt-4 sm:grid-cols-2 dark:border-zinc-800"
-      onSubmit={(event) => {
-        event.preventDefault();
-        onSave(draft);
-      }}
-    >
-      {[
-        ["min_events", "Min events"],
-        ["max_events", "Max events"],
-      ].map(([key, label]) => (
-        <label key={key} className="block min-w-0">
-          <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
-            {label}
-          </span>
-          <input
-            className={INPUT}
-            inputMode="numeric"
-            value={draft[key]}
-            disabled={disabled}
-            onChange={(event) =>
-              setDraft((current) => ({
-                ...current,
-                [key]: event.target.value,
-              }))
-            }
-          />
-        </label>
-      ))}
+    <div className="flex flex-col gap-4">
+      {error.general && (
+        <p className="text-xs text-red-600 dark:text-red-400">{error.general}</p>
+      )}
 
-      <div className="sm:col-span-2">
-        <button
-          className={`${BUTTON} w-full sm:w-auto`}
-          type="submit"
-          disabled={disabled}
+      {networks.map((network) => {
+        const id = network.network;
+        const values = networkValues[id] || {};
+        const isLoading = loading;
+        const sectionError = error[id];
+        const pk = privateKeys[id];
+        const pkLoading = privateKeyLoading[id];
+        const pkError = privateKeyError[id];
+
+        return (
+          <ResultSection
+            key={id}
+            title={id}
+            description={
+              network.supported === false
+                ? "Unsupported"
+                : network.available === false
+                ? "Unavailable"
+                : ""
+            }
+            defaultOpen={network.supported !== false}
+          >
+            <div className="flex flex-col gap-3">
+              {isLoading && (
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                  Loading network values…
+                </p>
+              )}
+
+              {sectionError && (
+                <p className="text-xs text-red-600 dark:text-red-400">
+                  {sectionError}
+                </p>
+              )}
+
+              {!isLoading && !sectionError && (
+                <>
+                  <NetworkValueRow
+                    label="Fingerprint"
+                    value={values.fingerprint}
+                    copyLabel={`Copy fingerprint for ${id}`}
+                  />
+                  <NetworkValueRow
+                    label="ScriptPubKey"
+                    value={values.scriptpubkey}
+                    copyLabel={`Copy scriptPubKey for ${id}`}
+                  />
+                  <NetworkValueRow
+                    label="Xpub"
+                    value={values.xpub}
+                    copyLabel={`Copy xpub for ${id}`}
+                  />
+                  <NetworkValueRow
+                    label="Zpub"
+                    value={values.zpub}
+                    copyLabel={`Copy zpub for ${id}`}
+                  />
+                  <NetworkValueRow
+                    label="Address"
+                    value={values.address}
+                    copyLabel={`Copy address for ${id}`}
+                  />
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <FrameButton
+                      onClick={() => revealPrivateKey(id)}
+                      disabled={pkLoading}
+                    >
+                      {pkLoading
+                        ? "Loading…"
+                        : pk
+                        ? "Clear Xpriv"
+                        : "Reveal Xpriv"}
+                    </FrameButton>
+                  </div>
+
+                  {pkError && (
+                    <p className="text-xs text-red-600 dark:text-red-400">
+                      {pkError}
+                    </p>
+                  )}
+
+                  {pk && (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                        Private extended key
+                      </span>
+                      <p className="break-all font-mono text-xs text-zinc-900 dark:text-zinc-100">
+                        {pk}
+                      </p>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </ResultSection>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Operation 1: Receive
+// ---------------------------------------------------------------------------
+function ReceiveResult({ result }) {
+  return (
+    <div className="flex flex-col gap-4">
+      <ResultHeading
+        eyebrow="Receive"
+        title="Receive result"
+      />
+
+      <ResultSection
+        title="Summary"
+        description="Core response fields"
+        value={result}
+        defaultOpen
+      />
+
+      <ReceiveNetworkDerivations derivation={result?.derivation} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Operation 3: Transit
+// ---------------------------------------------------------------------------
+function TransitResult({ result }) {
+  return (
+    <div className="flex flex-col gap-4">
+      <ResultHeading eyebrow="Transit" title="Transit result" />
+
+      <ResultSection
+        title="Summary"
+        description="Core response fields"
+        value={result}
+        defaultOpen
+      />
+
+      <ResultSection
+        title="Event map"
+        description="Decoded event details"
+        value={eventMapOf(result)}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Operation 4: Exile
+// ---------------------------------------------------------------------------
+function ExileResult({ result }) {
+  return (
+    <div className="flex flex-col gap-4">
+      <ResultHeading eyebrow="Exile" title="Exile result" />
+
+      <ResultSection
+        title="Summary"
+        description="Core response fields"
+        value={result}
+        defaultOpen
+      />
+
+      <ResultSection
+        title="Event map"
+        description="Decoded event details"
+        value={eventMapOf(result)}
+      />
+    </div>
+  );
+}
+
+function CreateForm({ onSubmit, loading }) {
+  const [name, setName] = useState("");
+  const [passphrase, setPassphrase] = useState("");
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    onSubmit({
+      name: name.trim(),
+      request: {
+        name: name.trim(),
+        passphrase,
+      },
+    });
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+      <Field
+        label="Name"
+        value={name}
+        onChange={setName}
+        required
+        placeholder="my-substrate"
+        autoComplete="off"
+      />
+      <Field
+        label="Passphrase"
+        value={passphrase}
+        onChange={setPassphrase}
+        required
+        type="password"
+        autoComplete="new-password"
+      />
+      <div className="flex justify-end">
+        <FrameButton
+          onClick={handleSubmit}
+          disabled={loading || !name.trim()}
         >
-          Save network budget
-        </button>
+          {loading ? "Creating…" : "Create substrate"}
+        </FrameButton>
       </div>
     </form>
   );
 }
 
-function PayloadBoard({ board, kind, loading }) {
-  if (loading && !board) return <p className="text-xs text-zinc-500">Loading payload board…</p>;
-  if (!board) return <p className="text-xs text-zinc-500">No payload-board response yet.</p>;
-  const obs = board.observation;
-  const ap = kind?.authorized_payload;
-  return (
-    <div className="space-y-3">
-      {board.error && <Notice>{board.error}</Notice>}
-      {board.message && <p className="text-xs text-zinc-500">{board.message}</p>}
-      {kind ? (
-        <Fields min="8rem">
-          <Field label="Payload kind">{money(kind.kind)}</Field>
-          <Field label="Commitment"><span className="break-all font-mono text-xs">{money(board.commitment)}</span></Field>
-          <Field label="Depth path">{money(kind.depth_path)}</Field>
-          <Field label="Depth record">{money(kind.depth_record)}</Field>
-          <Field label="Depth objects">{kind.depth_objects?.length ?? 0}</Field>
-          <Field label="Authorized payload">{flag(ap?.carried)}</Field>
-          <Field label="Authorization">{money(ap?.authorization_state)}</Field>
-          <Field label="Settlement">{money(ap?.settlement_state)}</Field>
-          {obs && <Field label="Miner feature">{flag(obs.bit_minner_feature)}</Field>}
-          {obs && <Field label="Settlement carried">{flag(obs.settlement_payload_carried)}</Field>}
-        </Fields>
-      ) : (
-        <p className="text-xs text-zinc-500">The API returned no payload kind for this network&apos;s chain.</p>
-      )}
-    </div>
-  );
-}
-
-/* ───────────────────────── Bit-Miner log popup ───────────────────────── */
-
-const LOG_POLL_RUNNING_MS = 2500;
-const LOG_POLL_STOPPED_MS = 6000;
-const LOG_DISPLAY_MAX_CHARS = 250_000;
-const LOG_STICK_THRESHOLD_PX = 24;
-
-const LOG_BUTTON =
-  "inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-[11px] font-medium transition hover:bg-zinc-50 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800";
-
-async function fetchBitMinerLog({ substrate, activation, network, signal }) {
-  const path = `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(network)}/observation/log`;
-  let response;
-  try {
-    response = await fetch(`${API_BASE}${path}`, { cache: "no-store", headers: { Accept: "text/plain" }, signal });
-  } catch (cause) {
-    if (cause?.name === "AbortError") throw cause;
-    const reason = cause instanceof Error && cause.message ? cause.message : "network error";
-    throw new Error(`Could not reach the QTM runtime at ${API_BASE} (${reason}).`);
-  }
-
-  const text = await response.text();
-  if (!response.ok) {
-    let detail = text.trim();
-    try {
-      const parsed = JSON.parse(text);
-      detail = parsed?.error || parsed?.message || parsed?.detail || detail;
-    } catch {
-      // Keep the raw error body.
-    }
-    throw new Error(detail ? String(detail).slice(0, 400) : `Log request failed with HTTP ${response.status}.`);
-  }
-  return text.length > LOG_DISPLAY_MAX_CHARS ? text.slice(-LOG_DISPLAY_MAX_CHARS) : text;
-}
-
-function BitMinerLogPopup({ substrate, activation, network, running, onClose, onRefreshStatus }) {
-  const [log, setLog] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState("");
-  const [updatedAt, setUpdatedAt] = useState(null);
-  const [pinned, setPinned] = useState(true);
-
-  const dialogRef = useRef(null);
-  const scrollRef = useRef(null);
-  const pinnedRef = useRef(true);
-  const requestRef = useRef(0);
-  const inflightRef = useRef(null);
-  const closeRef = useRef(onClose);
-
-  useEffect(() => { closeRef.current = onClose; }, [onClose]);
-
-  const load = useCallback(async () => {
-    inflightRef.current?.abort();
-    const controller = new AbortController();
-    inflightRef.current = controller;
-    const requestId = ++requestRef.current;
-    setRefreshing(true);
-    try {
-      const text = await fetchBitMinerLog({ substrate, activation, network, signal: controller.signal });
-      if (requestId !== requestRef.current) return;
-      setLog((previous) => (previous === text ? previous : text));
-      setUpdatedAt(new Date());
-      setError("");
-    } catch (err) {
-      if (err?.name === "AbortError" || requestId !== requestRef.current) return;
-      setError(err instanceof Error ? err.message : "Unable to load the bit-miner log.");
-    } finally {
-      if (requestId === requestRef.current) {
-        setLoading(false);
-        setRefreshing(false);
-      }
-    }
-  }, [substrate, activation, network]);
+function ReceiveForm({ substrateOptions, onSubmit, loading }) {
+  const [name, setName] = useState("");
+  const [amount, setAmount] = useState("1");
+  const [ordinal, setOrdinal] = useState("1");
+  const [persistedOrdinals, setPersistedOrdinals] = useState([]);
+  const [persistedLoading, setPersistedLoading] = useState(false);
+  const [persistedError, setPersistedError] = useState("");
 
   useEffect(() => {
-    let cancelled = false;
-    let timer = null;
-    const interval = running ? LOG_POLL_RUNNING_MS : LOG_POLL_STOPPED_MS;
-    const tick = async () => {
-      if (!document.hidden) await load();
-      if (!cancelled) timer = setTimeout(tick, interval);
-    };
-    tick();
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-      requestRef.current += 1;
-      inflightRef.current?.abort();
-    };
-  }, [load, running]);
-
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
-  }, [log]);
-
-  function handleScroll() {
-    const el = scrollRef.current;
-    if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= LOG_STICK_THRESHOLD_PX;
-    pinnedRef.current = atBottom;
-    setPinned(atBottom);
-  }
-
-  function jumpToLatest() {
-    const el = scrollRef.current;
-    if (!el) return;
-    pinnedRef.current = true;
-    setPinned(true);
-    el.scrollTop = el.scrollHeight;
-  }
-
-  function handleRefresh() {
-    pinnedRef.current = true;
-    setPinned(true);
-    onRefreshStatus?.();
-    load();
-  }
-
-  useEffect(() => {
-    const previousFocus = document.activeElement;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    dialogRef.current?.focus();
-
-    function onKeyDown(event) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeRef.current?.();
-        return;
-      }
-      if (event.key !== "Tab" || !dialogRef.current) return;
-      const focusable = dialogRef.current.querySelectorAll('button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])');
-      if (focusable.length === 0) {
-        event.preventDefault();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      document.body.style.overflow = previousOverflow;
-      if (previousFocus instanceof HTMLElement) previousFocus.focus();
-    };
-  }, []);
-
-  const hasLog = typeof log === "string" && log.length > 0;
-
-  return (
-    <div className="qtm-backdrop fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/50 p-3 backdrop-blur-sm sm:p-6" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="bitminer-log-title"
-        tabIndex={-1}
-        className="qtm-dialog flex max-h-[78vh] w-full max-w-[800px] flex-col overflow-hidden rounded-3xl border border-zinc-200 bg-white text-zinc-950 shadow-2xl outline-none sm:min-w-[min(720px,100%)] dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
-      >
-        <div className="flex items-start justify-between gap-3 border-b border-zinc-200 px-4 py-3 sm:px-5 sm:py-4 dark:border-zinc-800">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 id="bitminer-log-title" className="text-sm font-semibold tracking-tight sm:text-base">Bit-Miner logs</h2>
-              <span role="status" className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${running ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300" : "border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"}`}>
-                <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${running ? "bg-emerald-500 motion-safe:animate-pulse" : "bg-zinc-400"}`} />
-                {running ? "Running" : "Stopped"}
-              </span>
-            </div>
-            <p className="mt-1 break-all font-mono text-[10px] leading-4 text-zinc-500 dark:text-zinc-400">{substrate} · activation {activation} · {network}</p>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <button type="button" className={LOG_BUTTON} disabled={refreshing} onClick={handleRefresh}>{refreshing ? "Refreshing…" : "Refresh"}</button>
-            <button type="button" aria-label="Close log viewer" className={`${LOG_BUTTON} w-8 px-0 text-base leading-none`} onClick={onClose}>×</button>
-          </div>
-        </div>
-
-        <div className="relative flex min-h-0 flex-1 flex-col bg-zinc-950">
-          {error && <div role="alert" className="shrink-0 break-words border-b border-red-900/60 bg-red-950 px-4 py-2 text-xs leading-5 text-red-200">{error}{hasLog ? " Showing the last output received." : ""}</div>}
-          <div ref={scrollRef} onScroll={handleScroll} tabIndex={0} aria-label="Bit-miner process log output" className="min-h-[16rem] flex-1 overflow-auto overscroll-contain px-4 py-3 sm:px-5">
-            {loading && log === null ? (
-              <p className="text-xs text-zinc-400">Loading log…</p>
-            ) : hasLog ? (
-              <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-zinc-100 sm:text-xs">{log}</pre>
-            ) : error && log === null ? (
-              <p className="text-xs text-zinc-400">The log could not be loaded.</p>
-            ) : (
-              <p className="text-xs text-zinc-400">No log output yet. Output appears here once the bit-miner process writes to its log.</p>
-            )}
-          </div>
-          {!pinned && hasLog && <button type="button" onClick={jumpToLatest} className="absolute bottom-3 right-4 rounded-full border border-zinc-600 bg-zinc-800/95 px-3 py-1.5 text-[11px] font-medium text-zinc-100 shadow-lg transition hover:bg-zinc-700">Jump to latest ↓</button>}
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 px-4 py-2.5 text-[10px] text-zinc-500 sm:px-5 dark:border-zinc-800 dark:text-zinc-400">
-          <span>{updatedAt ? `Updated ${updatedAt.toLocaleTimeString()}` : "Waiting for first response…"}</span>
-          <span>Auto-refresh every {(running ? LOG_POLL_RUNNING_MS : LOG_POLL_STOPPED_MS) / 1000}s · Esc to close</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function StreamBody({ status, busy, results, network, onAction, onRefresh, onViewLogs }) {
-  const running = status?.running === true;
-  return (
-    <div className="space-y-3">
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <Pill tone={running ? "ok" : "warn"}>{running ? "Running" : status?.running === false ? "Stopped" : "Unknown"}</Pill>
-        {status?.pid && <span className="text-xs text-zinc-500">PID {status.pid}</span>}
-        {status?.submissions != null && <span className="text-xs text-zinc-500">Submissions {status.submissions}</span>}
-      </div>
-      <div className="grid grid-cols-3 gap-2">
-        <button type="button" className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`} disabled={busy || running} onClick={() => onAction("start", network)}>{busy ? "Working…" : "Start"}</button>
-        <button type="button" className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`} disabled={busy} onClick={() => onRefresh(network)}>Refresh</button>
-        <button type="button" className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`} disabled={busy || !running} onClick={() => onAction("stop", network)}>Stop</button>
-      </div>
-      {status?.error && <Notice>{status.error}</Notice>}
-      {status?.path && <p className="break-all font-mono text-[10px] text-zinc-500">Event path: {status.path}</p>}
-      {status?.log_path && <p className="break-all font-mono text-[10px] text-zinc-500">Process log: {status.log_path}</p>}
-      <div>
-        <div className="flex items-center justify-between">
-          <h5 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">BitMiner responses</h5>
-          <div className="flex items-center gap-2">
-            <button type="button" className={LOG_BUTTON} disabled={!onViewLogs} onClick={() => onViewLogs?.(network)}>View process logs</button>
-            <span className="text-[10px] tabular-nums text-zinc-500">{results.length}</span>
-          </div>
-        </div>
-        <div aria-live="polite" aria-label="Bitcoin bit-miner API responses" className="mt-2 max-h-56 space-y-2 overflow-y-auto overscroll-contain rounded-xl bg-white p-2 dark:bg-zinc-900">
-          {results.map((entry) => (
-            <div key={entry.id} className="border-b border-zinc-200 pb-2 last:border-0 last:pb-0 dark:border-zinc-800">
-              <div className="mb-1 flex items-center justify-between gap-2 text-[10px] text-zinc-500">
-                <span className="min-w-0 break-words font-semibold">{entry.label}</span>
-                <time className="shrink-0">{entry.time}</time>
-              </div>
-              <pre className="overflow-x-auto whitespace-pre-wrap break-all text-[10px] leading-4 text-zinc-700 dark:text-zinc-300">{JSON.stringify(entry.body, null, 2)}</pre>
-            </div>
-          ))}
-          {results.length === 0 && <p className="py-2 text-xs text-zinc-500">Start bit-miner to launch its window loop. Refresh checks process status without adding another response entry.</p>}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function WirePacketsBody({ metadata, loading }) {
-  const [selectedSubmission, setSelectedSubmission] = useState("");
-  const route = metadata?.file_route;
-  const href = route
-    ? `${API_BASE}${route.startsWith("/") ? route : `/${route}`}`
-    : null;
-  const packets = Array.isArray(metadata?.packets) ? metadata.packets : [];
-  const selectedPacket =
-    packets.find((packet) => String(packet.submission) === selectedSubmission) ||
-    packets[packets.length - 1] ||
-    null;
-  const entries = Array.isArray(selectedPacket?.packets)
-    ? [...selectedPacket.packets].sort((a, b) => Number(a.vout) - Number(b.vout))
-    : [];
-
-  if (loading && !metadata) {
-    return <p className="text-xs text-zinc-500">Loading WirePackets…</p>;
-  }
-  if (!metadata) {
-    return <p className="text-xs text-zinc-500">No WirePackets metadata response.</p>;
-  }
-
-  return (
-    <div className="space-y-3">
-      <Fields min="7rem">
-        <Field label="Scope">{money(metadata.scope)}</Field>
-        <Field label="Total bytes">
-          {metadata.bytes == null ? "Not reported" : Number(metadata.bytes).toLocaleString()}
-        </Field>
-        <Field label="Persisted submissions">{packets.length}</Field>
-        <Field label="Files present">{flag(metadata.exists)}</Field>
-      </Fields>
-
-      {metadata.path && (
-        <p className="break-all font-mono text-[11px] text-zinc-500">{metadata.path}</p>
-      )}
-
-      {packets.length > 0 ? (
-        <div className="space-y-2">
-          <label className="flex min-w-0 items-center gap-2">
-            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Submission</span>
-            <select
-              aria-label="Select WirePacket submission"
-              className="h-8 min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-2 text-xs dark:border-zinc-700 dark:bg-zinc-950"
-              value={selectedPacket ? String(selectedPacket.submission) : ""}
-              onChange={(event) => setSelectedSubmission(event.target.value)}
-            >
-              {packets.map((packet) => (
-                <option key={packet.submission} value={String(packet.submission)}>
-                  Submission {packet.submission} · {packet.packet_count ?? packet.packets?.length ?? 0} vout entries
-                </option>
-              ))}
-            </select>
-            <Pill tone="ok">{entries.length} vout</Pill>
-          </label>
-
-          {selectedPacket && (
-            <div className="min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/70 p-2 dark:border-zinc-800 dark:bg-zinc-950/60">
-              <p className="mb-2 break-all font-mono text-[10px] text-zinc-500">{selectedPacket.path}</p>
-              {entries.length > 0 ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[620px] table-fixed text-left text-[10px]">
-                    <thead className="text-[9px] uppercase tracking-wider text-zinc-500">
-                      <tr>
-                        <th className="w-12 px-2 py-1.5">Vout</th>
-                        <th className="w-24 px-2 py-1.5 text-right">Value (sat)</th>
-                        <th className="w-44 px-2 py-1.5">Txid</th>
-                        <th className="px-2 py-1.5">Script pubkey</th>
-                        <th className="w-32 px-2 py-1.5">Commitment</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                      {entries.map((entry, index) => (
-                        <tr key={`${entry.vout}-${index}`} className="align-top">
-                          <td className="whitespace-nowrap px-2 py-2 font-mono tabular-nums">{money(entry.vout)}</td>
-                          <td className="whitespace-nowrap px-2 py-2 text-right font-mono tabular-nums">{entry.value_sat == null ? "—" : Number(entry.value_sat).toLocaleString()}</td>
-                          <td className="break-all px-2 py-2 font-mono text-zinc-500">{money(entry.txid)}</td>
-                          <td className="break-all px-2 py-2 font-mono text-zinc-500">{money(entry.script_pubkey)}</td>
-                          <td className="break-all px-2 py-2 font-mono text-zinc-500">{money(entry.commitment)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <p className="text-xs text-zinc-500">No decoded packet values for this submission.</p>
-              )}
-            </div>
-          )}
-        </div>
-      ) : (
-        <p className="text-xs text-zinc-500">The API returned no persisted submission files for this activation.</p>
-      )}
-
-      {href && (
-        <a className={`${BUTTON} w-full`} href={href} target="_blank" rel="noreferrer">
-          Open combined WirePackets file
-        </a>
-      )}
-    </div>
-  );
-}
-
-function PayloadItem({ payload }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="min-w-0 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="flex items-start justify-between gap-2">
-        <span className="min-w-0 break-all text-xs font-semibold">{payload.record}</span>
-        <Pill>{payload.objects.length} obj</Pill>
-      </div>
-      <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">{payload.depth_identifier}</p>
-      <p className="mt-0.5 break-all font-mono text-[10px] text-zinc-400">{payload.path}</p>
-      {payload.objects.length > 0 && (
-        <>
-          <button type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)} className="mt-2 flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-xs text-zinc-600 transition hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800">
-            Depth objects
-            <span aria-hidden="true" className={`transition-transform duration-300 ${open ? "rotate-180" : ""}`}>▾</span>
-          </button>
-          <Collapsible open={open}>
-            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all text-[10px] text-zinc-500">{JSON.stringify(payload.objects, null, 2)}</pre>
-          </Collapsible>
-        </>
-      )}
-    </div>
-  );
-}
-
-function PayloadRecordsBody({ group }) {
-  const sections = [
-    ["Transit inputs", group.transit_inputs],
-    ["Exile outputs", group.exile_outputs],
-    ["Unclassified", group.unclassified],
-  ].filter(([, rows]) => rows.length > 0);
-  if (sections.length === 0) return <p className="text-xs text-zinc-500">No payload records for this network.</p>;
-  return (
-    <div className="space-y-4">
-      {sections.map(([title, rows]) => (
-        <div key={title}>
-          <h5 className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{title} <Pill>{rows.length}</Pill></h5>
-          <div className="grid gap-2">{rows.map((payload) => <PayloadItem key={payloadRowKey(payload)} payload={payload} />)}</div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function NetworkCard({
-  kind, network, defaultOpen, index, activation, budgetRow, group, board, wire,
-  observation, busy, results, loadingBoards, loadingBudgets, loadingWire,
-  budgetError, budgetNotice, onSaveBudget, onStreamAction, onRefreshStream, onViewLogs,
-}) {
-  const meta = BITCOIN_KINDS[kind];
-  const style = { animationDelay: `${Math.min(index, 6) * 60}ms` };
-
-  if (!network) {
-    return (
-      <Card title={meta.label} subtitle={meta.note} badge={<Pill tone="warn">Not registered</Pill>} style={style}>
-        <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">The API has not returned a {meta.label} network for this activation yet. It will appear here as soon as it is registered.</p>
-      </Card>
-    );
-  }
-
-  const budget = budgetRow?.budget || null;
-  const configured = Boolean(budgetRow?.configured && budget);
-  const payloadKind = ownPayloadKind(board, network);
-  const payloadTotal = group.transit_inputs.length + group.exile_outputs.length + group.unclassified.length;
-
-  return (
-    <Card title={kind === "other" ? network.name : meta.label} subtitle={network.id} badge={<Pill tone={configured ? "ok" : "neutral"}>{configured ? "Budget set" : "No budget"}</Pill>} defaultOpen={defaultOpen} style={style}>
-      <div className="space-y-3">
-        <Fields min="7rem">
-          <Field label="Purpose">{money(network.purpose)}</Field>
-          <Field label="Derivation path"><span className="break-all font-mono text-xs">{money(network.path)}</span></Field>
-        </Fields>
-        <Card inner defaultOpen title={`Network budget · activation ${activation}`} badge={loadingBudgets ? <Pill>Loading</Pill> : null}>
-          <BudgetSummary budget={budget} />
-          <BudgetEditor budget={budget} disabled={loadingBudgets} onSave={(draft) => onSaveBudget(network, draft)} />
-          {budgetError && <div className="mt-3"><Notice>{budgetError}</Notice></div>}
-          {budgetNotice && <div className="mt-3"><Notice type="success">{budgetNotice}</Notice></div>}
-        </Card>
-        <Card inner scroll title="Payload board" badge={<Pill tone={payloadKind?.available ? "ok" : "neutral"}>{payloadKind ? (payloadKind.available ? "Available" : "Unavailable") : "None"}</Pill>}>
-          <PayloadBoard board={board} kind={payloadKind} loading={loadingBoards} />
-        </Card>
-        <Card inner title="Bit-miner" badge={<Pill tone={observation?.running === true ? "ok" : "neutral"}>{observation?.running === true ? "Running" : "Idle"}</Pill>}>
-          <StreamBody status={observation} busy={busy} results={results} network={network} onAction={onStreamAction} onRefresh={onRefreshStream} onViewLogs={onViewLogs} />
-        </Card>
-        <Card inner title="Wirepackets file" badge={<Pill tone={wire?.exists ? "ok" : "neutral"}>{wire?.exists ? "Present" : "None"}</Pill>}>
-          <WirePacketsBody metadata={wire} loading={loadingWire} />
-        </Card>
-        <Card inner scroll title="Payload records" badge={<Pill>{payloadTotal}</Pill>}>
-          <PayloadRecordsBody group={group} />
-        </Card>
-      </div>
-    </Card>
-  );
-}
-
-/* ───────────────────────── Page ─────────────────────────
- *
- * Event Store chronology (persisted hierarchy):
- *   1. Substrates          GET /wallets
- *   2. Selected substrate  resolve from list / ?substrate=
- *   3–4. Events / Activations
- *                          GET /wallets/:substrate/events
- *                          Each activation is an independent event scope
- *   5. Network             GET /networks (path registry)
- *   6. Network budget      GET /wallets/:substrate/activations/:activation/budgets
- *   7. WirePackets         GET …/networks/:id/wirepackets
- *                          Only after budgets; submissions = 1 … max_events
- *
- * WirePackets must never load before its parent event, network, and budget
- * have been resolved. loadAll enforces steps 6 → 7 strictly.
- */
-
-function EventStoreContent() {
-  const searchParams = useSearchParams();
-  const requestedSubstrate = (searchParams.get("substrate") || "").trim();
-
-  const [substrates, setSubstrates] = useState([]);
-  const [substrate, setSubstrate] = useState("");
-  const [activation, setActivation] = useState("");
-  const [events, setEvents] = useState([]);
-  const [networks, setNetworks] = useState([]);
-  const [payloads, setPayloads] = useState([]);
-  const [budgets, setBudgets] = useState([]);
-  const [boards, setBoards] = useState({});
-  const [wirePackets, setWirePackets] = useState({});
-  const [observations, setObservations] = useState({});
-  const [busyObservation, setBusyObservation] = useState({});
-  const [streamResults, setStreamResults] = useState({});
-  const [loadingList, setLoadingList] = useState(false);
-  const [loadingEvents, setLoadingEvents] = useState(false);
-  const [loadingPayloads, setLoadingPayloads] = useState(false);
-  const [loadingBudgets, setLoadingBudgets] = useState(false);
-  const [loadingBoards, setLoadingBoards] = useState(false);
-  const [loadingWire, setLoadingWire] = useState(false);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
-  const [budgetErrors, setBudgetErrors] = useState({});
-  const [budgetNotices, setBudgetNotices] = useState({});
-  const [budgetLoadError, setBudgetLoadError] = useState("");
-  const [store, setStore] = useState(null);
-  const [logViewer, setLogViewer] = useState(null);
-  const [handoffWarning, setHandoffWarning] = useState("");
-
-  const selectedSubstrateRef = useRef("");
-  const selectedActivationRef = useRef("");
-  const payloadRequestRef = useRef(0);
-  const scopeRequestRef = useRef(0);
-  const eventsRequestRef = useRef(0);
-  const budgetRequestRef = useRef(0);
-  const bootRequestRef = useRef(0);
-
-  const selectedEvents = useMemo(
-    () => events.filter((event) => activationFromEvent(event) === String(activation)),
-    [events, activation],
-  );
-
-  const retainedMass = useMemo(
-    () => selectedEvents.reduce((sum, event) => {
-      const value = event?.retained_mass ?? event?.heritage?.state?.retained_mass ?? "0";
-      return /^\d+$/.test(String(value)) ? sum + BigInt(value) : sum;
-    }, 0n),
-    [selectedEvents],
-  );
-
-  const payloadGroups = useMemo(() => {
-    const groups = new Map();
-    for (const payload of payloads) {
-      const id = payload.network.id;
-      if (!groups.has(id)) groups.set(id, { transit_inputs: [], exile_outputs: [], unclassified: [] });
-      groups.get(id)[payload.direction].push(payload);
-    }
-    return groups;
-  }, [payloads]);
-
-  const networkBudgetById = useMemo(() => {
-    const result = new Map();
-    for (const row of budgets) {
-      const network = normalizeNetwork(row.network);
-      if (network) result.set(network.id, row);
-    }
-    return result;
-  }, [budgets]);
-
-  const activationOptions = useMemo(() => {
-    const values = new Set(events.map(activationFromEvent).filter(Boolean));
-    if (activation) values.add(String(activation));
-    if (!values.size) values.add("0");
-    return [...values].sort((a, b) => Number(b) - Number(a));
-  }, [events, activation]);
-
-  const renderedNetworks = useMemo(() => {
-    const byId = new Map(networks.map((network) => [network.id, network]));
-    for (const payload of payloads) {
-      if (!byId.has(payload.network.id)) byId.set(payload.network.id, payload.network);
-    }
-    return [...byId.values()];
-  }, [networks, payloads]);
-
-  const bitcoinSlots = useMemo(() => {
-    const buckets = { legacy: [], segwit: [], other: [] };
-    for (const network of renderedNetworks) {
-      if (bitcoinNetwork(network)) buckets[bitcoinKind(network)].push(network);
-    }
-    const slots = [];
-    for (const kind of ["legacy", "segwit"]) {
-      if (buckets[kind].length === 0) slots.push({ kind, network: null });
-      else buckets[kind].forEach((network) => slots.push({ kind, network }));
-    }
-    buckets.other.forEach((network) => slots.push({ kind: "other", network }));
-    return slots;
-  }, [renderedNetworks]);
-
-  const configuredCount = budgets.filter((row) => row.configured && row.budget).length;
-  const activationSelected = Boolean(substrate) && /^\d+$/.test(String(activation));
-  const requiredScopeLoading =
-    loadingEvents || loadingBudgets || loadingBoards || loadingWire;
-  const anyLoading = requiredScopeLoading || loadingPayloads;
-  const overviewBadge = (() => {
-    if (loadingList) return <Pill>Loading</Pill>;
-    if (!substrate) return <Pill tone="warn">No substrate</Pill>;
-    if (!activationSelected) return <Pill tone="warn">No activation</Pill>;
-    if (requiredScopeLoading) return <Pill>Syncing</Pill>;
-    if (budgetLoadError) return <Pill tone="warn">Budget error</Pill>;
-    if (error) return <Pill tone="warn">Partial</Pill>;
-    return <Pill tone="ok">Ready</Pill>;
-  })();
-
-  const isCurrentScope = useCallback((name, activationValue, requestId, requestRef) => {
-    return (
-      requestId === requestRef.current &&
-      selectedSubstrateRef.current === name &&
-      selectedActivationRef.current === String(activationValue)
-    );
-  }, []);
-
-  const clearScopeData = useCallback(() => {
-    setEvents([]);
-    setPayloads([]);
-    setBudgets([]);
-    setBoards({});
-    setWirePackets({});
-    setObservations({});
-    setStreamResults({});
-    setLogViewer(null);
-    setStore(null);
-    setBudgetErrors({});
-    setBudgetNotices({});
-    setBudgetLoadError("");
-  }, []);
-
-  const loadPayloadsForEvents = useCallback(async (name, eventRows, activationValue) => {
-    const selectedActivation = String(activationValue);
-    const scopedEvents = Array.isArray(eventRows)
-      ? eventRows.filter((event) => activationFromEvent(event) === selectedActivation)
-      : [];
-
-    if (!name || !/^\d+$/.test(selectedActivation) || scopedEvents.length === 0) {
-      payloadRequestRef.current += 1;
-      setPayloads([]);
-      setLoadingPayloads(false);
-      return [];
-    }
-
-    const requestId = ++payloadRequestRef.current;
-    setLoadingPayloads(true);
-    try {
-      const records = [...new Set(scopedEvents.map((event) => event?.record).filter((record) => typeof record === "string" && record.length > 0))];
-      const results = await Promise.allSettled(
-        records.map((record) => apiRequest(`/wallets/${enc(name)}/events/${enc(record)}/payloads`)),
-      );
-
-      if (!isCurrentScope(name, selectedActivation, requestId, payloadRequestRef)) return null;
-
-      const unique = new Map();
-      const failures = [];
-      results.forEach((result, index) => {
-        if (result.status !== "fulfilled") {
-          failures.push(records[index]);
-          return;
-        }
-        const rows = Array.isArray(result.value?.payloads) ? result.value.payloads : [];
-        rows.forEach((entry) => {
-          const normalized = normalizePayload(entry, records[index]);
-          if (!normalized) return;
-          const key = payloadRowKey(normalized);
-          if (!unique.has(key)) unique.set(key, normalized);
-        });
-      });
-
-      const collected = [...unique.values()];
-      setPayloads(collected);
-
-      if (failures.length > 0 && collected.length === 0) {
-        setError(`Unable to load payload records for ${failures.length} event(s).`);
-      }
-      return collected;
-    } catch (err) {
-      if (isCurrentScope(name, selectedActivation, requestId, payloadRequestRef)) {
-        setPayloads([]);
-        setError(`Unable to load payload render data: ${err instanceof Error ? err.message : "unknown API error"}`);
-      }
-      return null;
-    } finally {
-      if (requestId === payloadRequestRef.current) setLoadingPayloads(false);
-    }
-  }, [isCurrentScope]);
-
-  const loadEvents = useCallback(async (name, activationValue) => {
     if (!name) {
-      setLoadingEvents(false);
-      return null;
-    }
-
-    const selected = String(activationValue);
-    const requestId = ++eventsRequestRef.current;
-
-    setLoadingEvents(true);
-    setError("");
-
-    try {
-      const eventBody = await apiRequest(`/wallets/${enc(name)}/events`);
-
-      if (
-        requestId !== eventsRequestRef.current ||
-        selectedSubstrateRef.current !== name
-      ) {
-        return null;
-      }
-
-      const nextEvents = Array.isArray(eventBody?.events)
-        ? eventBody.events
-        : [];
-
-      setEvents(nextEvents);
-      setStore(eventBody);
-
-      await loadPayloadsForEvents(name, nextEvents, selected);
-
-      return nextEvents;
-    } catch (err) {
-      if (
-        requestId === eventsRequestRef.current &&
-        selectedSubstrateRef.current === name
-      ) {
-        setEvents([]);
-        setPayloads([]);
-        setError(
-          err instanceof Error
-            ? err.message
-            : "Unable to load events.",
-        );
-      }
-
-      return null;
-    } finally {
-      if (requestId === eventsRequestRef.current) {
-        setLoadingEvents(false);
-      }
-    }
-  }, [loadPayloadsForEvents]);
-
-  /**
-   * Step 6 — Network budget
-   * GET /wallets/:substrate/activations/:activation/budgets
-   * Must complete before WirePackets so the submission range
-   * (1 … budget.max_events) is known to the API handlers.
-   * Returns the resolved budget rows (or null on stale/abort).
-   */
-  const loadBudgets = useCallback(async (name, activationValue) => {
-    if (!name || !/^\d+$/.test(String(activationValue))) {
-      budgetRequestRef.current += 1;
-      setLoadingBudgets(false);
-      setBudgetLoadError("");
-      return null;
-    }
-    const selected = String(activationValue);
-    const requestId = ++budgetRequestRef.current;
-    setLoadingBudgets(true);
-    setBudgetLoadError("");
-    try {
-      const body = await apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/budgets`);
-      if (
-        requestId !== budgetRequestRef.current ||
-        selectedSubstrateRef.current !== name ||
-        selectedActivationRef.current !== selected
-      ) {
-        return null;
-      }
-      const rows = Array.isArray(body?.budgets) ? body.budgets : [];
-      const filtered = rows.filter((row) => row?.activation == null || String(row.activation) === selected);
-      setBudgets(filtered);
-      return filtered;
-    } catch (err) {
-      if (
-        requestId === budgetRequestRef.current &&
-        selectedSubstrateRef.current === name &&
-        selectedActivationRef.current === selected
-      ) {
-        setBudgets([]);
-        const message = err instanceof Error ? err.message : "API error";
-        setBudgetLoadError(`Unable to load network budgets: ${message}`);
-        setError(`Unable to load network budgets: ${message}`);
-      }
-      return null;
-    } finally {
-      if (requestId === budgetRequestRef.current) {
-        setLoadingBudgets(false);
-      }
-    }
-  }, []);
-
-  /**
-   * Step 5 continuation — Payload boards for each network under the activation.
-   * Independent of budget; may run in parallel with observation status.
-   */
-  const loadPayloadBoards = useCallback(async (name, activationValue, networkRows) => {
-    if (!name || !/^\d+$/.test(String(activationValue))) {
-      setLoadingBoards(false);
+      setPersistedOrdinals([]);
       return;
     }
 
-    const selected = String(activationValue);
-    const requestId = ++scopeRequestRef.current;
-    const activeNetworks = (networkRows || [])
-      .map(normalizeNetwork)
-      .filter(Boolean);
+    let active = true;
 
-    const isCurrent = () =>
-      requestId === scopeRequestRef.current &&
-      selectedSubstrateRef.current === name &&
-      selectedActivationRef.current === selected;
+    async function loadPersisted() {
+      setPersistedLoading(true);
+      setPersistedError("");
 
-    setLoadingBoards(true);
-
-    try {
-      const boardResults = await Promise.allSettled(
-        activeNetworks.map((network) =>
-          apiRequest(
-            `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/payload-board`,
-          ),
-        ),
-      );
-
-      if (!isCurrent()) return;
-
-      const nextBoards = {};
-      boardResults.forEach((result, index) => {
-        if (result.status !== "fulfilled") return;
-        const body = result.value;
-        if (body?.activation != null && String(body.activation) !== selected) return;
-        nextBoards[activeNetworks[index].id] = body;
-      });
-      setBoards(nextBoards);
-    } finally {
-      if (requestId === scopeRequestRef.current) {
-        setLoadingBoards(false);
-      }
-    }
-  }, []);
-
-  /**
-   * Step 7 — WirePackets
-   * GET /wallets/:substrate/activations/:activation/networks/:id/wirepackets
-   * Only invoked after budgets have resolved so submissions map to
-   * 1 … budget.max_events. Never starts before the parent event, network,
-   * and budget hierarchy is in place.
-   */
-  const loadWirePackets = useCallback(async (name, activationValue, networkRows) => {
-    if (!name || !/^\d+$/.test(String(activationValue))) {
-      setLoadingWire(false);
-      return;
-    }
-
-    const selected = String(activationValue);
-    const requestId = ++scopeRequestRef.current;
-    const activeNetworks = (networkRows || [])
-      .map(normalizeNetwork)
-      .filter(Boolean);
-    const btcNetworks = activeNetworks.filter(bitcoinNetwork);
-
-    const isCurrent = () =>
-      requestId === scopeRequestRef.current &&
-      selectedSubstrateRef.current === name &&
-      selectedActivationRef.current === selected;
-
-    setLoadingWire(true);
-
-    try {
-      if (btcNetworks.length === 0) {
-        if (isCurrent()) setWirePackets({});
-        return;
-      }
-
-      const wireResults = await Promise.allSettled(
-        btcNetworks.map((network) =>
-          apiRequest(
-            `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/wirepackets`,
-          ),
-        ),
-      );
-
-      if (!isCurrent()) return;
-
-      const nextWire = {};
-      wireResults.forEach((result, index) => {
-        if (result.status !== "fulfilled") return;
-        const metadata = result.value;
-        if (metadata?.activation != null && String(metadata.activation) !== selected) return;
-        nextWire[btcNetworks[index].id] = metadata;
-      });
-      setWirePackets(nextWire);
-    } finally {
-      if (requestId === scopeRequestRef.current) {
-        setLoadingWire(false);
-      }
-    }
-  }, []);
-
-  const loadObservationStatuses = useCallback(async (name, activationValue, networkRows) => {
-    if (!name || !/^\d+$/.test(String(activationValue))) return;
-    const selected = String(activationValue);
-    const btcNetworks = (networkRows || []).map(normalizeNetwork).filter(bitcoinNetwork);
-    const results = await Promise.allSettled(
-      btcNetworks.map((network) =>
-        apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/observation`),
-      ),
-    );
-    if (selectedSubstrateRef.current !== name || selectedActivationRef.current !== selected) return;
-    const next = {};
-    results.forEach((result, index) => {
-      if (result.status === "fulfilled") next[btcNetworks[index].id] = result.value;
-    });
-    setObservations(next);
-  }, []);
-
-  /**
-   * Activation-scoped synchronization (steps 5–7).
-   * Chronology is strict:
-   *   5. Networks already resolved (path registry)
-   *   6. Budgets for each network under this activation
-   *   7. WirePackets only after budgets succeed (submission range known)
-   * Payload boards and observation status may run after budgets but
-   * before or alongside WirePackets; WirePackets never precede budgets.
-   */
-  const loadAll = useCallback(async (name, activationValue, networkRows = []) => {
-    if (!name || !/^\d+$/.test(String(activationValue))) {
-      budgetRequestRef.current += 1;
-      scopeRequestRef.current += 1;
-      setLoadingBudgets(false);
-      setLoadingBoards(false);
-      setLoadingWire(false);
-      setBudgetLoadError("");
-      return;
-    }
-    const selected = String(activationValue);
-    selectedSubstrateRef.current = name;
-    selectedActivationRef.current = selected;
-    setError("");
-
-    const budgetRows = await loadBudgets(name, selected);
-    if (
-      selectedSubstrateRef.current !== name ||
-      selectedActivationRef.current !== selected
-    ) {
-      return;
-    }
-
-    await Promise.all([
-      loadPayloadBoards(name, selected, networkRows),
-      loadObservationStatuses(name, selected, networkRows),
-    ]);
-
-    if (
-      selectedSubstrateRef.current !== name ||
-      selectedActivationRef.current !== selected
-    ) {
-      return;
-    }
-
-    if (budgetRows !== null) {
-      await loadWirePackets(name, selected, networkRows);
-    } else {
-      setLoadingWire(false);
-    }
-  }, [loadBudgets, loadPayloadBoards, loadObservationStatuses, loadWirePackets]);
-
-  /**
-   * Resolve the substrate the outer frame requested via ?substrate=.
-   * Never silently substitute walletRows[0].
-   */
-  const resolveSubstrate = useCallback((walletRows, requested) => {
-    const names = walletRows.map((row) => row?.name).filter(Boolean);
-    if (!names.length) {
-      return {
-        name: "",
-        activation: "0",
-        warning: requested
-          ? `Outer frame requested substrate "${requested}", but the API returned no substrates (GET /wallets → {"substrates":[]}).`
-          : "The API returned no substrates. Event Store cannot open a substrate until discovery succeeds.",
-      };
-    }
-
-    if (requested) {
-      const match = walletRows.find((row) => row?.name === requested);
-      if (match) {
-        const raw = String(match.activations ?? "0");
-        return {
-          name: match.name,
-          activation: /^\d+$/.test(raw) ? raw : "0",
-          warning: "",
-        };
-      }
-      return {
-        name: "",
-        activation: "0",
-        warning: `Outer frame requested substrate "${requested}", but it is not present in GET /wallets. Available: ${names.join(", ") || "(none)"}.`,
-      };
-    }
-
-    const first = walletRows[0];
-    const raw = String(first?.activations ?? "0");
-    return {
-      name: first.name,
-      activation: /^\d+$/.test(raw) ? raw : "0",
-      warning: "",
-    };
-  }, []);
-
-  const loadInitial = useCallback(async () => {
-    const bootId = ++bootRequestRef.current;
-    setLoadingList(true);
-    setError("");
-    setHandoffWarning("");
-    setNotice("");
-
-    try {
-      const walletRows = await listSubstrates();
-      if (bootId !== bootRequestRef.current) return;
-
-      setSubstrates(walletRows);
-
-      const resolved = resolveSubstrate(walletRows, requestedSubstrate);
-      if (resolved.warning) {
-        setHandoffWarning(resolved.warning);
-      }
-
-      if (!resolved.name) {
-        setSubstrate("");
-        setActivation("");
-        clearScopeData();
-        selectedSubstrateRef.current = "";
-        selectedActivationRef.current = "";
-        try {
-          const networkRows = await listNetworks();
-          if (bootId === bootRequestRef.current) setNetworks(networkRows);
-        } catch {
-          // Network registry is secondary; substrate discovery failure is the primary error.
-        }
-        return;
-      }
-
-      setSubstrate(resolved.name);
-      setActivation(resolved.activation);
-      selectedSubstrateRef.current = resolved.name;
-      selectedActivationRef.current = resolved.activation;
-
-      await loadEvents(resolved.name, resolved.activation);
-      if (bootId !== bootRequestRef.current) return;
-
-      let networkRows = [];
       try {
-        networkRows = await listNetworks();
-        if (bootId !== bootRequestRef.current) return;
-        setNetworks(networkRows);
-      } catch (netErr) {
-        if (bootId === bootRequestRef.current) {
-          setNetworks([]);
-          setError(
-            netErr instanceof Error
-              ? `Unable to load network registry: ${netErr.message}`
-              : "Unable to load network registry.",
+        const data = await callRuntime("listEvents", { name });
+        const events = eventRecordsOf(data);
+
+        const ordinals = events
+          .map((event) => {
+            const map = eventMapOf(event);
+            return valueAt(map, ["ordinal", "ordinal_id", "index"]);
+          })
+          .filter((value) => Number.isSafeInteger(Number(value)))
+          .map((value) => Number(value));
+
+        if (active) {
+          setPersistedOrdinals(Array.from(new Set(ordinals)));
+        }
+      } catch (error) {
+        if (active) {
+          setPersistedError(
+            error instanceof Error
+              ? error.message
+              : "Unable to load persisted events."
           );
         }
-      }
-
-      if (bootId !== bootRequestRef.current) return;
-
-      setLoadingList(false);
-
-      await loadAll(resolved.name, resolved.activation, networkRows);
-    } catch (err) {
-      if (bootId === bootRequestRef.current) {
-        setError(
-          err instanceof Error
-            ? `Unable to list substrates (GET /wallets): ${err.message}`
-            : "Unable to list substrates (GET /wallets).",
-        );
-        setSubstrates([]);
-        setSubstrate("");
-        setActivation("");
-        clearScopeData();
-      }
-    } finally {
-      if (bootId === bootRequestRef.current) {
-        setLoadingList(false);
+      } finally {
+        if (active) setPersistedLoading(false);
       }
     }
-  }, [clearScopeData, loadAll, loadEvents, requestedSubstrate, resolveSubstrate]);
 
-  useEffect(() => {
-    loadInitial();
-  }, [loadInitial]);
+    loadPersisted();
 
-  const runningBitcoinNetworkIds = useMemo(
-    () =>
-      JSON.stringify(
-        networks
-          .filter(bitcoinNetwork)
-          .filter((network) => observations[network.id]?.running === true)
-          .map((network) => network.id),
-      ),
-    [networks, observations],
-  );
-
-  useEffect(() => {
-    if (!substrate || !/^\d+$/.test(String(activation))) return;
-    if (loadingBudgets) return;
-    const networkIds = JSON.parse(runningBitcoinNetworkIds);
-    if (!networkIds.length) return;
-
-    const selectedSubstrate = substrate;
-    const selectedActivation = String(activation);
-    let cancelled = false;
-    let timeoutId = null;
-
-    const pollWirePackets = async () => {
-      const results = await Promise.allSettled(
-        networkIds.map((networkId) =>
-          apiRequest(
-            `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(networkId)}/wirepackets`,
-          ),
-        ),
-      );
-
-      if (
-        cancelled ||
-        selectedSubstrateRef.current !== selectedSubstrate ||
-        selectedActivationRef.current !== selectedActivation
-      ) {
-        return;
-      }
-
-      setWirePackets((current) => {
-        const next = { ...current };
-        results.forEach((result, index) => {
-          if (result.status !== "fulfilled") return;
-          const metadata = result.value;
-          if (metadata?.activation != null && String(metadata.activation) !== selectedActivation) return;
-          next[networkIds[index]] = metadata;
-        });
-        return next;
-      });
-
-      if (!cancelled) timeoutId = window.setTimeout(pollWirePackets, WIREPACKETS_POLL_MS);
-    };
-
-    timeoutId = window.setTimeout(pollWirePackets, 0);
     return () => {
-      cancelled = true;
-      if (timeoutId !== null) window.clearTimeout(timeoutId);
+      active = false;
     };
-  }, [substrate, activation, runningBitcoinNetworkIds, loadingBudgets]);
+  }, [name]);
 
-  const chooseSubstrate = async (name) => {
-    eventsRequestRef.current += 1;
-    scopeRequestRef.current += 1;
-    payloadRequestRef.current += 1;
-    budgetRequestRef.current += 1;
-
-    selectedSubstrateRef.current = name;
-    selectedActivationRef.current = "";
-
-    setLoadingEvents(false);
-    setLoadingPayloads(false);
-    setLoadingBudgets(false);
-    setLoadingBoards(false);
-    setLoadingWire(false);
-    setBudgetLoadError("");
-
-    setSubstrate(name);
-    setActivation("");
-    clearScopeData();
-    setError("");
-    setNotice("");
-    setHandoffWarning("");
-
-    if (!name) return;
-
-    try {
-      const substrateRow = substrates.find((entry) => entry.name === name);
-      const rawActivation = String(substrateRow?.activations ?? "0");
-      const selected = /^\d+$/.test(rawActivation) ? rawActivation : "0";
-      setActivation(selected);
-      selectedActivationRef.current = selected;
-      await loadEvents(name, selected);
-      await loadAll(name, selected, networks);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to open substrate.");
-    }
-  };
-
-  async function chooseActivation(value) {
-    if (!/^\d+$/.test(String(value))) return;
-    const selected = String(value);
-
-    scopeRequestRef.current += 1;
-    payloadRequestRef.current += 1;
-    budgetRequestRef.current += 1;
-
-    selectedActivationRef.current = selected;
-    setActivation(selected);
-    setBudgets([]);
-    setWirePackets({});
-    setBoards({});
-    setObservations({});
-    setStreamResults({});
-    setLogViewer(null);
-    setPayloads([]);
-    setError("");
-    setNotice("");
-    setBudgetErrors({});
-    setBudgetNotices({});
-    setBudgetLoadError("");
-    setLoadingBudgets(true);
-    setLoadingBoards(true);
-    setLoadingWire(true);
-
-    await loadPayloadsForEvents(substrate, events, selected);
-    await loadAll(substrate, selected, networks);
+  function handleSubmit(event) {
+    event.preventDefault();
+    onSubmit({
+      name: name.trim(),
+      request: {
+        amount: Number(amount),
+        ordinal: Number(ordinal),
+      },
+    });
   }
 
-  const refreshAll = async () => {
-    const requestId = ++bootRequestRef.current;
-    const previousSubstrate = substrate;
-    const previousActivation = String(activation);
-
-    if (!previousSubstrate || !/^\d+$/.test(previousActivation)) {
-      return;
-    }
-
-    setLoadingList(true);
-    setError("");
-    setNotice("");
-    setHandoffWarning("");
-
-    try {
-      const walletRows = await listSubstrates();
-      if (requestId !== bootRequestRef.current) return;
-
-      setSubstrates(walletRows);
-
-      const resolved = resolveSubstrate(walletRows, previousSubstrate);
-
-      if (!resolved.name) {
-        setSubstrate("");
-        setActivation("");
-        selectedSubstrateRef.current = "";
-        selectedActivationRef.current = "";
-        clearScopeData();
-        setHandoffWarning(resolved.warning);
-        return;
-      }
-
-      const selectedSubstrate = resolved.name;
-      setSubstrate(selectedSubstrate);
-      selectedSubstrateRef.current = selectedSubstrate;
-
-      const eventRows = await loadEvents(selectedSubstrate, previousActivation);
-      if (requestId !== bootRequestRef.current) return;
-
-      const availableActivations = Array.isArray(eventRows)
-        ? eventRows.map(activationFromEvent).filter(Boolean)
-        : [];
-
-      const selectedActivation = availableActivations.includes(previousActivation)
-        ? previousActivation
-        : resolved.activation;
-
-      setActivation(selectedActivation);
-      selectedActivationRef.current = selectedActivation;
-
-      const networkRows = await listNetworks();
-      if (requestId !== bootRequestRef.current) return;
-
-      setNetworks(networkRows);
-
-      const budgetRows = await loadBudgets(selectedSubstrate, selectedActivation);
-      if (requestId !== bootRequestRef.current) return;
-
-      if (budgetRows === null) {
-        setLoadingBoards(false);
-        setLoadingWire(false);
-        setNotice("");
-        return;
-      }
-
-      await Promise.all([
-        loadPayloadBoards(selectedSubstrate, selectedActivation, networkRows),
-        loadObservationStatuses(selectedSubstrate, selectedActivation, networkRows),
-      ]);
-      if (requestId !== bootRequestRef.current) return;
-
-      await loadWirePackets(selectedSubstrate, selectedActivation, networkRows);
-      if (requestId !== bootRequestRef.current) return;
-
-      setNotice("Event Store refreshed.");
-    } catch (err) {
-      if (requestId !== bootRequestRef.current) return;
-
-      setError(
-        err instanceof Error
-          ? `Refresh failed: ${err.message}`
-          : "Refresh failed.",
-      );
-      setNotice("");
-    } finally {
-      if (requestId === bootRequestRef.current) {
-        setLoadingList(false);
-      }
-    }
-  };
-
-  const appendStreamResult = (networkId, label, body) => {
-    setStreamResults((current) => ({
-      ...current,
-      [networkId]: [
-        ...(current[networkId] || []),
-        {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          label,
-          time: new Date().toLocaleTimeString(),
-          body,
-        },
-      ].slice(-60),
-    }));
-  };
-
-  const refreshStream = async (network) => {
-    const id = network.id;
-    const selectedSubstrate = substrate;
-    const selectedActivation = String(activation);
-    const route = `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(id)}/observation`;
-    setBusyObservation((current) => ({ ...current, [id]: true }));
-    try {
-      const status = await apiRequest(route);
-      if (selectedSubstrateRef.current !== selectedSubstrate || selectedActivationRef.current !== selectedActivation) return;
-      setObservations((current) => ({ ...current, [id]: status }));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to retrieve bit-miner process status.");
-    } finally {
-      setBusyObservation((current) => ({ ...current, [id]: false }));
-    }
-  };
-
-  const streamAction = async (action, network) => {
-    const id = network.id;
-    const selectedSubstrate = substrate;
-    const selectedActivation = String(activation);
-    const route = `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(id)}/observation`;
-    setBusyObservation((current) => ({ ...current, [id]: true }));
-    try {
-      const result = await apiRequest(route, { method: action === "start" ? "POST" : "DELETE" });
-      if (selectedSubstrateRef.current !== selectedSubstrate || selectedActivationRef.current !== selectedActivation) return;
-      appendStreamResult(id, `${action.toUpperCase()} observation response`, result);
-      setObservations((current) => ({ ...current, [id]: result }));
-
-      if (action === "start") {
-        const status = await apiRequest(route);
-        if (selectedSubstrateRef.current !== selectedSubstrate || selectedActivationRef.current !== selectedActivation) return;
-        appendStreamResult(id, "Initial process status", status);
-        setObservations((current) => ({ ...current, [id]: status }));
-      }
-      setNotice(result?.message || `Bitcoin bit-miner ${action} request completed.`);
-    } catch (err) {
-      const failure = { error: err instanceof Error ? err.message : "Bitcoin bit-miner request failed." };
-      appendStreamResult(id, `${action.toUpperCase()} request error`, failure);
-      setError(failure.error);
-    } finally {
-      setBusyObservation((current) => ({ ...current, [id]: false }));
-    }
-  };
-
-  const saveBudget = async (network, draft) => {
-    const id = network.id;
-    const selectedSubstrate = substrate;
-    const selectedActivation = String(activation);
-    setBudgetErrors((current) => ({ ...current, [id]: "" }));
-    setBudgetNotices((current) => ({ ...current, [id]: "" }));
-
-    const minEvents = Number(draft.min_events);
-    const maxEvents = Number(draft.max_events);
-    if (!Number.isInteger(minEvents) || minEvents < 0 || !Number.isInteger(maxEvents) || maxEvents < 0) {
-      setBudgetErrors((current) => ({
-        ...current,
-        [id]: "Min events and max events must be non-negative integers.",
-      }));
-      return;
-    }
-
-    try {
-      await apiRequest(
-        `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(id)}/budgets`,
-        {
-          method: "PUT",
-          body: JSON.stringify({ min_events: minEvents, max_events: maxEvents }),
-        },
-      );
-      if (
-        selectedSubstrateRef.current !== selectedSubstrate ||
-        selectedActivationRef.current !== selectedActivation
-      ) {
-        return;
-      }
-      await loadBudgets(selectedSubstrate, selectedActivation);
-      await loadWirePackets(selectedSubstrate, selectedActivation, networks);
-      setBudgetNotices((current) => ({
-        ...current,
-        [id]: `Saved budget (${minEvents} … ${maxEvents}).`,
-      }));
-    } catch (err) {
-      setBudgetErrors((current) => ({
-        ...current,
-        [id]: err instanceof Error ? err.message : "Unable to save network budget.",
-      }));
-    }
-  };
-
-  const activeLogViewer =
-    logViewer &&
-    logViewer.substrate === substrate &&
-    logViewer.activation === String(activation) &&
-    bitcoinSlots.some((slot) => slot.network?.id === logViewer.network)
-      ? logViewer
-      : null;
-
-  const openBitMinerLogs = (network) => {
-    if (!substrate || !network?.id || !/^\d+$/.test(String(activation))) return;
-    setLogViewer({ substrate, activation: String(activation), network: network.id });
-  };
-
-  const closeBitMinerLogs = useCallback(() => setLogViewer(null), []);
-
-  const eventsEmptyText = loadingEvents
-    ? "Loading persisted events…"
-    : substrate
-      ? "No persisted event records were returned."
-      : "Select a substrate to inspect persisted records.";
-
-  const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
-
   return (
-    <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
-      <style>{QTM_STYLES}</style>
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4" inert={activeLogViewer ? true : undefined} aria-hidden={activeLogViewer ? true : undefined}>
-        <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <div className="min-w-0">
-            <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">QTM Event Store</h1>
-            <p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 sm:text-sm dark:text-zinc-400">
-              Persisted substrate events, activation-scoped payloads, network budgets, payload boards, Bitcoin observation and API-owned wirepackets.
-            </p>
-          </div>
-          <div className="grid grid-cols-3 gap-2 sm:flex">
-            <a href="/network" className={BUTTON}>Network</a>
-            <a href="/" className={BUTTON}>QTM</a>
-            <button type="button" className={BUTTON} disabled={!substrate || anyLoading} onClick={refreshAll}>{anyLoading ? "Syncing…" : "Refresh"}</button>
-          </div>
-        </header>
-
-        {handoffWarning && <Notice type="error">{handoffWarning}</Notice>}
-        {error && <Notice>{error}</Notice>}
-        {budgetLoadError && budgetLoadError !== error && (
-          <Notice>{budgetLoadError}</Notice>
-        )}
-        {notice && <Notice type="success">{notice}</Notice>}
-        {activationSelected && requiredScopeLoading && (
-          <Notice type="success">
-            Synchronizing activation {activation} for substrate {substrate}…
-          </Notice>
-        )}
-
-        <Card
-          defaultOpen
-          title="Overview"
-          subtitle={
-            substrate
-              ? `${substrate} · activation ${activation || "—"}`
-              : requestedSubstrate
-                ? `Requested: ${requestedSubstrate} (not resolved)`
-                : "No substrate selected"
-          }
-          badge={overviewBadge}
-          className="w-full"
-        >
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="block min-w-0">
-              <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">Persistent substrate</span>
-              <select
-                className={INPUT}
-                value={substrate}
-                disabled={loadingList}
-                onChange={(event) => chooseSubstrate(event.target.value)}
-              >
-                <option value="">
-                  {loadingList
-                    ? "Loading substrates…"
-                    : substrates.length === 0
-                      ? "No substrates available"
-                      : "Select substrate"}
-                </option>
-                {substrates.map((entry) => (
-                  <option key={entry.name} value={entry.name}>
-                    {entry.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="block min-w-0">
-              <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">Activation</span>
-              <select
-                className={INPUT}
-                value={activation}
-                disabled={!substrate}
-                onChange={(event) => chooseActivation(event.target.value)}
-              >
-                {activationOptions.map((value) => (
-                  <option key={value} value={value}>
-                    Activation {value}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
-            <Stat label="Events" value={selectedEvents.length} />
-            <Stat label="All events" value={events.length} />
-            <Stat label="Payloads" value={payloads.length} />
-            <Stat label="Budgets set" value={`${configuredCount} / ${networks.length}`} />
-            <Stat label="Retained mass" value={retainedMass.toString()} />
-            <Stat label="API base" value={API_BASE} wide />
-            {store?.directory && <Stat label="Substrate directory" value={store.directory} wide />}
-            {requestedSubstrate && (
-              <Stat label="Outer-frame substrate" value={requestedSubstrate} wide />
-            )}
-          </div>
-        </Card>
-
-        <SectionHeading title="Bitcoin" meta={`coin type ${COIN_TYPES[0].type}`}>
-          Legacy and SegWit share the single Bitcoin payload kind.
-        </SectionHeading>
-        {loadingPayloads && <p className="px-1 text-xs text-zinc-500">Rendering payload records…</p>}
-        <div className="grid grid-cols-1 items-start gap-3 xl:grid-cols-2">
-          {bitcoinSlots.map((slot, index) => {
-            const id = slot.network?.id;
-            return (
-              <NetworkCard
-                key={id || `placeholder-${slot.kind}`}
-                kind={slot.kind}
-                network={slot.network}
-                defaultOpen={index === 0}
-                index={index}
-                activation={activation}
-                budgetRow={id ? networkBudgetById.get(id) : undefined}
-                group={(id && payloadGroups.get(id)) || emptyGroup}
-                board={id ? boards[id] : undefined}
-                wire={id ? wirePackets[id] : undefined}
-                observation={id ? observations[id] : undefined}
-                busy={id ? busyObservation[id] === true : false}
-                results={(id && streamResults[id]) || []}
-                loadingBoards={loadingBoards}
-                loadingBudgets={loadingBudgets}
-                loadingWire={loadingWire}
-                budgetError={id ? budgetErrors[id] : ""}
-                budgetNotice={id ? budgetNotices[id] : ""}
-                onSaveBudget={saveBudget}
-                onStreamAction={streamAction}
-                onRefreshStream={refreshStream}
-                onViewLogs={openBitMinerLogs}
-              />
-            );
-          })}
-        </div>
-
-        <SectionHeading title="Other chains" meta="not yet implemented">
-          One payload kind each, from the paths registry. Placeholders until wired up.
-        </SectionHeading>
-        <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {COIN_TYPES.filter((coin) => coin.key !== "bitcoin").map((coin, index) => {
-            const registered = networks.filter((network) => coinKey(network) === coin.key).length;
-            return (
-              <Card
-                key={coin.key}
-                title={coin.name}
-                subtitle={`coin type ${coin.type}`}
-                badge={<Pill tone="warn">Planned</Pill>}
-                style={{ animationDelay: `${index * 60}ms` }}
-              >
-                <Fields min="7rem">
-                  <Field label="Registry path">
-                    <span className="break-all font-mono text-xs">{coin.path}</span>
-                  </Field>
-                  <Field label="API networks">{registered}</Field>
-                </Fields>
-              </Card>
-            );
-          })}
-        </div>
-
-        <SectionHeading title="Diagnostics" />
-        <Card
-          scroll
-          title="Persisted event records"
-          subtitle="GET /wallets/:name/events"
-          badge={<Pill>{events.length}</Pill>}
-          className="w-full"
-        >
-          <div className="hidden overflow-x-auto rounded-xl border border-zinc-200 lg:block dark:border-zinc-800">
-            <table className="w-full min-w-[850px] border-collapse text-left text-sm">
-              <thead className="bg-zinc-100 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                <tr>
-                  {["Activation", "Event type", "Record reference", "Dimension", "Structural value (Σ)", "Depth objects", "Retained mass"].map((heading) => (
-                    <th key={heading} className="px-4 py-3 font-semibold">
-                      {heading}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                {events.map((event, index) => {
-                  const state = event?.heritage?.state;
-                  return (
-                    <tr key={`${event.record}-${index}`} className="align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
-                      <td className="whitespace-nowrap px-4 py-3 font-mono">{activationFromEvent(event) ?? money(event.activation)}</td>
-                      <td className="px-4 py-3">{money(event.kind)}</td>
-                      <td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">{money(event.record)}</td>
-                      <td className="break-all px-4 py-3 font-mono">{money(event.dimension ?? state?.dimension)}</td>
-                      <td className="break-all px-4 py-3 font-mono">{money(event.structural_value ?? state?.structural_value)}</td>
-                      <td className="px-4 py-3">{money(event.depth_objects)}</td>
-                      <td className="break-all px-4 py-3 font-mono">{money(event.retained_mass ?? state?.retained_mass)}</td>
-                    </tr>
-                  );
-                })}
-                {events.length === 0 && (
-                  <tr>
-                    <td colSpan={7} className="px-4 py-10 text-center text-sm text-zinc-500">
-                      {eventsEmptyText}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:hidden">
-            {events.map((event, index) => {
-              const state = event?.heritage?.state;
-              return (
-                <article key={`${event.record}-card-${index}`} className={`${INNER} p-3`}>
-                  <div className="flex items-start justify-between gap-2">
-                    <h4 className="min-w-0 break-all text-sm font-semibold">{money(event.kind)}</h4>
-                    <Pill>Act. {activationFromEvent(event) ?? money(event.activation)}</Pill>
-                  </div>
-                  <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">{money(event.record)}</p>
-                  <div className="mt-3">
-                    <Fields min="7rem">
-                      <Field label="Dimension">{money(event.dimension ?? state?.dimension)}</Field>
-                      <Field label="Structural value (Σ)">{money(event.structural_value ?? state?.structural_value)}</Field>
-                      <Field label="Depth objects">{money(event.depth_objects)}</Field>
-                      <Field label="Retained mass">{money(event.retained_mass ?? state?.retained_mass)}</Field>
-                    </Fields>
-                  </div>
-                </article>
-              );
-            })}
-            {events.length === 0 && (
-              <p className="col-span-full rounded-xl border border-zinc-200 p-4 text-sm text-zinc-500 dark:border-zinc-800 lg:hidden">
-                {eventsEmptyText}
-              </p>
-            )}
-          </div>
-        </Card>
-
-        <footer className="border-t border-zinc-200 pt-4 text-xs text-zinc-500 dark:border-zinc-800">
-          QTM Event Store · {API_BASE}
-        </footer>
-      </div>
-
-      {activeLogViewer && (
-        <BitMinerLogPopup
-          key={`${activeLogViewer.substrate}|${activeLogViewer.activation}|${activeLogViewer.network}`}
-          substrate={activeLogViewer.substrate}
-          activation={activeLogViewer.activation}
-          network={activeLogViewer.network}
-          running={observations[activeLogViewer.network]?.running === true}
-          onClose={closeBitMinerLogs}
-          onRefreshStatus={() => refreshStream({ id: activeLogViewer.network })}
+    <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+      <Field
+        label="Substrate"
+        value={name}
+        onChange={setName}
+        required
+        placeholder="my-substrate"
+        autoComplete="off"
+      />
+      <div className="grid grid-cols-2 gap-2">
+        <NumberField
+          label="Amount"
+          value={amount}
+          onChange={setAmount}
+          min={1}
         />
-      )}
-    </main>
+        <NumberField
+          label="Ordinal"
+          value={ordinal}
+          onChange={setOrdinal}
+          min={1}
+        />
+      </div>
+      <ReceiveOrdinalSelector
+        amount={amount}
+        ordinal={ordinal}
+        onChange={setOrdinal}
+        persistedOrdinals={persistedOrdinals}
+        persistedLoading={persistedLoading}
+        persistedError={persistedError}
+      />
+      <div className="flex justify-end">
+        <FrameButton
+          onClick={handleSubmit}
+          disabled={loading || !name.trim()}
+        >
+          {loading ? "Receiving…" : "Receive"}
+        </FrameButton>
+      </div>
+    </form>
   );
 }
 
-export default function EventStorePage() {
+function TransitForm({ substrateOptions, onSubmit, loading }) {
+  const [name, setName] = useState("");
+  const [ordinal, setOrdinal] = useState("1");
+  const [to, setTo] = useState("");
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    onSubmit({
+      name: name.trim(),
+      request: {
+        ordinal: Number(ordinal),
+        to: to.trim(),
+      },
+    });
+  }
+
   return (
-    <Suspense
-      fallback={
-        <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
-          <div className="mx-auto w-full max-w-7xl">
-            <p className="text-sm text-zinc-500">Loading QTM Event Store…</p>
+    <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+      <Field
+        label="Substrate"
+        value={name}
+        onChange={setName}
+        required
+        placeholder="my-substrate"
+        autoComplete="off"
+      />
+      <NumberField
+        label="Ordinal"
+        value={ordinal}
+        onChange={setOrdinal}
+        min={1}
+      />
+      <Field
+        label="To"
+        value={to}
+        onChange={setTo}
+        required
+        placeholder="destination"
+        autoComplete="off"
+      />
+      <div className="flex justify-end">
+        <FrameButton
+          onClick={handleSubmit}
+          disabled={loading || !name.trim() || !to.trim()}
+        >
+          {loading ? "Transiting…" : "Transit"}
+        </FrameButton>
+      </div>
+    </form>
+  );
+}
+
+function ExileForm({ substrateOptions, onSubmit, loading }) {
+  const [name, setName] = useState("");
+  const [ordinal, setOrdinal] = useState("1");
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    onSubmit({
+      name: name.trim(),
+      request: {
+        ordinal: Number(ordinal),
+      },
+    });
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+      <Field
+        label="Substrate"
+        value={name}
+        onChange={setName}
+        required
+        placeholder="my-substrate"
+        autoComplete="off"
+      />
+      <NumberField
+        label="Ordinal"
+        value={ordinal}
+        onChange={setOrdinal}
+        min={1}
+      />
+      <div className="flex justify-end">
+        <FrameButton
+          onClick={handleSubmit}
+          disabled={loading || !name.trim()}
+        >
+          {loading ? "Exiling…" : "Exile"}
+        </FrameButton>
+      </div>
+    </form>
+  );
+}
+
+export default function Home() {
+  const [activeTab, setActiveTab] = useState("create");
+  const [substrates, setSubstrates] = useState([]);
+  const [substratesLoading, setSubstratesLoading] = useState(false);
+  const [substratesError, setSubstratesError] = useState("");
+  const [operationLoading, setOperationLoading] = useState(false);
+  const [operationError, setOperationError] = useState("");
+  const [operationResult, setOperationResult] = useState(null);
+
+  const substrateOptions = useMemo(
+    () =>
+      substrates
+        .map((item) => (typeof item === "string" ? item : item?.name))
+        .filter((name) => typeof name === "string" && name.trim()),
+    [substrates]
+  );
+
+  const loadSubstrates = useCallback(async () => {
+    setSubstratesLoading(true);
+    setSubstratesError("");
+
+    try {
+      const data = await callRuntime("listSubstrates");
+      const list = Array.isArray(data)
+        ? data
+        : eventRecordsOf(data);
+      setSubstrates(list);
+    } catch (error) {
+      setSubstratesError(
+        error instanceof Error
+          ? error.message
+          : "Unable to load substrates."
+      );
+    } finally {
+      setSubstratesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadSubstrates();
+  }, [loadSubstrates]);
+
+  async function handleOperation(operation, args) {
+    setOperationLoading(true);
+    setOperationError("");
+    setOperationResult(null);
+
+    try {
+      const result = await callRuntime(operation, args);
+      setOperationResult(result);
+      await loadSubstrates();
+    } catch (error) {
+      setOperationError(
+        error instanceof Error ? error.message : "Operation failed."
+      );
+    } finally {
+      setOperationLoading(false);
+    }
+  }
+
+  function handleCreate(args) {
+    return handleOperation("createSubstrate", args);
+  }
+
+  function handleReceive(args) {
+    return handleOperation("receive", args);
+  }
+
+  function handleTransit(args) {
+    return handleOperation("transit", args);
+  }
+
+  function handleExile(args) {
+    return handleOperation("exile", args);
+  }
+
+  function renderResult() {
+    if (operationError) {
+      return (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
+          {operationError}
+        </div>
+      );
+    }
+
+    if (!operationResult) {
+      return (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          No result yet. Run an operation to see its output.
+        </p>
+      );
+    }
+
+    switch (activeTab) {
+      case "receive":
+        return <ReceiveResult result={operationResult} />;
+      case "transit":
+        return <TransitResult result={operationResult} />;
+      case "exile":
+        return <ExileResult result={operationResult} />;
+      default:
+        return (
+          <ResultSection
+            title="Create result"
+            description="Core response fields"
+            value={operationResult}
+            defaultOpen
+          />
+        );
+    }
+  }
+
+  return (
+    <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-4 px-4 py-6">
+      <header className="flex flex-col gap-1">
+        <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+          QTM Web
+        </p>
+        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-50">
+          Quantum Transaction Machine
+        </h1>
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          Create, receive, transit, and exile substrate units.
+        </p>
+      </header>
+
+      <div className="flex flex-col gap-4 lg:flex-row">
+        <aside className="flex w-full flex-col gap-3 lg:w-72">
+          <Frame eyebrow="Substrates" title="Available substrates">
+            {substratesLoading && (
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Loading substrates…
+              </p>
+            )}
+
+            {substratesError && (
+              <p className="text-xs text-red-600 dark:text-red-400">
+                {substratesError}
+              </p>
+            )}
+
+            {!substratesLoading && !substratesError && !substrateOptions.length && (
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                No substrates found. Create one to get started.
+              </p>
+            )}
+
+            {!!substrateOptions.length && (
+              <ul className="flex flex-col gap-1">
+                {substrateOptions.map((name) => (
+                  <li
+                    key={name}
+                    className="truncate rounded-md border border-zinc-200 px-2 py-1 font-mono text-xs text-zinc-800 dark:border-zinc-800 dark:text-zinc-200"
+                  >
+                    {name}
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <div className="mt-3 flex justify-end">
+              <FrameButton onClick={loadSubstrates} disabled={substratesLoading}>
+                Refresh
+              </FrameButton>
+            </div>
+          </Frame>
+        </aside>
+
+        <div className="flex min-w-0 flex-1 flex-col gap-4">
+          <div className="flex flex-wrap gap-2">
+            {TABS.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveTab(tab.id)}
+                className={`h-8 rounded-full px-3 text-xs font-medium transition-colors ${
+                  activeTab === tab.id
+                    ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950"
+                    : "border border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
           </div>
-        </main>
-      }
-    >
-      <EventStoreContent />
-    </Suspense>
+
+          <Frame
+            eyebrow={TABS.find((tab) => tab.id === activeTab)?.label}
+            title={
+              activeTab === "create"
+                ? "Create a substrate"
+                : activeTab === "receive"
+                ? "Receive units"
+                : activeTab === "transit"
+                ? "Transit a unit"
+                : "Exile a unit"
+            }
+          >
+            {activeTab === "create" && (
+              <CreateForm
+                onSubmit={handleCreate}
+                loading={operationLoading}
+              />
+            )}
+            {activeTab === "receive" && (
+              <ReceiveForm
+                substrateOptions={substrateOptions}
+                onSubmit={handleReceive}
+                loading={operationLoading}
+              />
+            )}
+            {activeTab === "transit" && (
+              <TransitForm
+                substrateOptions={substrateOptions}
+                onSubmit={handleTransit}
+                loading={operationLoading}
+              />
+            )}
+            {activeTab === "exile" && (
+              <ExileForm
+                substrateOptions={substrateOptions}
+                onSubmit={handleExile}
+                loading={operationLoading}
+              />
+            )}
+          </Frame>
+
+          <Frame eyebrow="Result" title="Operation output">
+            {renderResult()}
+          </Frame>
+        </div>
+      </div>
+    </main>
   );
 }
