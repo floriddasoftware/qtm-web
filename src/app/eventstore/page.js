@@ -1023,16 +1023,28 @@ function EventStoreContent() {
     return slots;
   }, [renderedNetworks]);
 
-  const configuredCount = budgets.filter((row) => row.configured && row.budget).length;
-  const activationSelected = Boolean(substrate) && /^\d+$/.test(String(activation));
+    const observationRunning = networks.some(
+    (network) =>
+      bitcoinNetwork(network) &&
+      observations[network.id]?.running === true,
+  );
+
   const requiredScopeLoading =
-    loadingEvents || loadingBudgets || loadingBoards || loadingWire;
+    loadingEvents ||
+    loadingBudgets ||
+    loadingBoards ||
+    loadingWire ||
+    loadingObservations;
+
   const anyLoading = requiredScopeLoading || loadingPayloads;
+
   const overviewBadge = (() => {
     if (loadingList) return <Pill>Loading</Pill>;
     if (!substrate) return <Pill tone="warn">No substrate</Pill>;
     if (!activationSelected) return <Pill tone="warn">No activation</Pill>;
-    if (requiredScopeLoading) return <Pill>Syncing</Pill>;
+    if (loadingObservations) return <Pill>Checking observation</Pill>;
+    if (observationRunning) return <Pill tone="ok">Syncing</Pill>;
+    if (anyLoading) return <Pill>Loading data</Pill>;
     if (budgetLoadError) return <Pill tone="warn">Budget error</Pill>;
     if (error) return <Pill tone="warn">Partial</Pill>;
     return <Pill tone="ok">Ready</Pill>;
