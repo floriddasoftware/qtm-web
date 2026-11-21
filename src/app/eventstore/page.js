@@ -903,19 +903,21 @@ function NetworkCard({
 
 /* ───────────────────────── Page ─────────────────────────
  *
- * Event Store chronology (persisted hierarchy):
+ * Event Store model:
+ *   Activation is the caller-selected input. qtm-api receives it explicitly and
+ *   recovers the persisted event at that activation. GET /events is only an
+ *   event index/listing; it never decides the selected activation.
+ *
  *   1. Substrates          GET /wallets
  *   2. Selected substrate  resolve from list / ?substrate=
- *   3–4. Events / Activations
- *                          GET /wallets/:substrate/events
- *                          Each activation is an independent event scope
- *   5. Network             GET /networks (path registry)
- *   6. Network budget      GET /wallets/:substrate/activations/:activation/budgets
- *   7. WirePackets         GET …/networks/:id/wirepackets
+ *   3. Event index         GET /wallets/:substrate/events   (listing only)
+ *   4. Network             GET /networks (path registry)
+ *   5. Network budget      GET /wallets/:substrate/activations/:activation/budgets
+ *   6. WirePackets         GET …/networks/:id/wirepackets
  *                          Only after budgets; submissions = 1 … max_events
  *
- * WirePackets must never load before its parent event, network, and budget
- * have been resolved. loadAll enforces steps 6 → 7 strictly.
+ * WirePackets must never load before its budget has been resolved.
+ * loadAll enforces steps 5 → 6 strictly.
  */
 
 function EventStoreContent() {
@@ -1114,70 +1116,79 @@ function EventStoreContent() {
     }
   }, [isCurrentScope]);
 
-  const loadEvents = useCallback(async (name, activationValue) => {
-  if (!name) {
-    eventsRequestRef.current += 1;
-    setLoadingEvents(false);
-    setEvents([]);
-    setStore(null);
-    return null;
-  }
+  /**
+   * Event index — GET /wallets/:name/events
+   * Listing only. It does not decide the selected activation.
+   * Pass { payloads: false } when the caller reloads payloads explicitly.
+   */
+  const loadEvents = useCallback(async (name, activationValue, options = {}) => {
+    const { payloads: shouldLoadPayloads = true } = options;
 
-  const selected = String(activationValue);
-  const requestId = ++eventsRequestRef.current;
-
-  setLoadingEvents(true);
-  setError("");
-
-  try {
-    const eventBody = await apiRequest(
-      `/wallets/${enc(name)}/events`,
-    );
-
-    if (
-      requestId !== eventsRequestRef.current ||
-      selectedSubstrateRef.current !== name
-    ) {
+    if (!name) {
+      eventsRequestRef.current += 1;
+      setLoadingEvents(false);
+      setEvents([]);
+      setStore(null);
       return null;
     }
 
-    const nextEvents = Array.isArray(eventBody?.events)
-      ? eventBody.events
-      : [];
+    const selected = String(activationValue);
+    const requestId = ++eventsRequestRef.current;
 
-    setEvents(nextEvents);
-    setStore(eventBody);
+    setLoadingEvents(true);
+    setError("");
 
-    // Payload retrieval is independent from persisted event chronology.
-    // Do not await it; its own request lifecycle manages loading/errors.
-    void loadPayloadsForEvents(name, nextEvents, selected);
-
-    return nextEvents;
-  } catch (err) {
-    if (
-      requestId === eventsRequestRef.current &&
-      selectedSubstrateRef.current === name
-    ) {
-      setEvents([]);
-      setPayloads([]);
-      setStore(null);
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to load events.",
+    try {
+      const eventBody = await apiRequest(
+        `/wallets/${enc(name)}/events`,
       );
-    }
 
-    return null;
-  } finally {
-    if (requestId === eventsRequestRef.current) {
-      setLoadingEvents(false);
+      if (
+        requestId !== eventsRequestRef.current ||
+        selectedSubstrateRef.current !== name
+      ) {
+        return null;
+      }
+
+      const nextEvents = Array.isArray(eventBody?.events)
+        ? eventBody.events
+        : [];
+
+      setEvents(nextEvents);
+      setStore(eventBody);
+
+      // Payload retrieval is independent from persisted event chronology.
+      // Do not await it; its own request lifecycle manages loading/errors.
+      if (shouldLoadPayloads) {
+        void loadPayloadsForEvents(name, nextEvents, selected);
+      }
+
+      return nextEvents;
+    } catch (err) {
+      if (
+        requestId === eventsRequestRef.current &&
+        selectedSubstrateRef.current === name
+      ) {
+        setEvents([]);
+        setPayloads([]);
+        setStore(null);
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Unable to load events.",
+        );
+      }
+
+      return null;
+    } finally {
+      if (requestId === eventsRequestRef.current) {
+        setLoadingEvents(false);
+      }
     }
-  }
-}, [loadPayloadsForEvents]);
+  }, [loadPayloadsForEvents]);
 
   /**
-   * Step 6 — Network budget
+   * Step 5 — Network budget
    * GET /wallets/:substrate/activations/:activation/budgets
    * Must complete before WirePackets so the submission range
    * (1 … budget.max_events) is known to the API handlers.
@@ -1227,7 +1238,7 @@ function EventStoreContent() {
   }, []);
 
   /**
-   * Step 5 continuation — Payload boards for each network under the activation.
+   * Payload boards for each network under the activation.
    * Independent of budget; may run in parallel with observation status.
    * Uses its own request ref so WirePackets loads cannot invalidate it.
    */
@@ -1277,11 +1288,10 @@ function EventStoreContent() {
   }, []);
 
   /**
-   * Step 7 — WirePackets
+   * Step 6 — WirePackets
    * GET /wallets/:substrate/activations/:activation/networks/:id/wirepackets
    * Only invoked after budgets have resolved so submissions map to
-   * 1 … budget.max_events. Never starts before the parent event, network,
-   * and budget hierarchy is in place.
+   * 1 … budget.max_events.
    * Uses its own request ref so payload board loads cannot invalidate it.
    */
   const loadWirePackets = useCallback(async (name, activationValue, networkRows) => {
@@ -1353,13 +1363,10 @@ function EventStoreContent() {
   }, []);
 
   /**
-   * Activation-scoped synchronization (steps 5–7).
-   * Chronology is strict:
-   *   5. Networks already resolved (path registry)
-   *   6. Budgets for each network under this activation
-   *   7. WirePackets only after budgets succeed (submission range known)
-   * Payload boards and observation status may run after budgets but
-   * before or alongside WirePackets; WirePackets never precede budgets.
+   * Activation-scoped synchronization (steps 5–6).
+   * The selected activation is passed directly to every API call.
+   * WirePackets only load after budgets succeed (submission range known).
+   * Payload boards and observation status run after budgets, before WirePackets.
    */
   const loadAll = useCallback(async (name, activationValue, networkRows = []) => {
     if (!name || !/^\d+$/.test(String(activationValue))) {
@@ -1661,6 +1668,18 @@ function EventStoreContent() {
     await loadAll(substrate, selected, networks);
   }
 
+  /**
+   * Refresh lifecycle.
+   * - Substrate is re-resolved from GET /wallets.
+   * - The caller-selected activation is retained; it is never recovered from
+   *   the event list.
+   * - GET /events (index) and GET /networks refresh independently.
+   * - Payloads are reloaded explicitly for the CURRENT selected activation
+   *   (read from the ref, so an activation change during refresh is honoured).
+   * - Budgets → boards/observation → WirePackets run for that activation.
+   * - If the substrate/activation changes mid-refresh, the old chain stops and
+   *   leaves loading flags to chooseSubstrate / chooseActivation.
+   */
   const refreshAll = async () => {
     const requestId = ++bootRequestRef.current;
     const previousSubstrate = substrate;
@@ -1697,45 +1716,68 @@ function EventStoreContent() {
       setSubstrate(selectedSubstrate);
       selectedSubstrateRef.current = selectedSubstrate;
 
-      const eventRows = await loadEvents(selectedSubstrate, previousActivation);
+      // Event index and network registry are independent requests.
+      const [eventsResult, networksResult] = await Promise.allSettled([
+        loadEvents(selectedSubstrate, previousActivation, { payloads: false }),
+        listNetworks(),
+      ]);
       if (requestId !== bootRequestRef.current) return;
 
-      const availableActivations = Array.isArray(eventRows)
-        ? eventRows.map(activationFromEvent).filter(Boolean)
-        : [];
+      const eventRows =
+        eventsResult.status === "fulfilled" ? eventsResult.value : null;
 
-      const selectedActivation = availableActivations.includes(previousActivation)
-        ? previousActivation
-        : resolved.activation;
+      let networkRows = networks;
+      if (networksResult.status === "fulfilled") {
+        networkRows = networksResult.value;
+        setNetworks(networkRows);
+      } else {
+        setError(
+          networksResult.reason instanceof Error
+            ? `Unable to load network registry: ${networksResult.reason.message}`
+            : "Unable to load network registry.",
+        );
+      }
 
-      setActivation(selectedActivation);
-      selectedActivationRef.current = selectedActivation;
+      // The activation is the caller's selection. Read it from the ref so a
+      // change made while the index/registry were loading is not lost.
+      const currentActivation = selectedActivationRef.current;
+      const isStale = () =>
+        requestId !== bootRequestRef.current ||
+        selectedSubstrateRef.current !== selectedSubstrate ||
+        selectedActivationRef.current !== currentActivation;
 
-      const networkRows = await listNetworks();
-      if (requestId !== bootRequestRef.current) return;
+      if (!/^\d+$/.test(String(currentActivation))) return;
 
-      setNetworks(networkRows);
+      // Explicit payload reload for the current activation, using the fresh
+      // event index. Runs alongside the activation-scoped chain below.
+      const payloadsPromise =
+        eventRows !== null
+          ? loadPayloadsForEvents(selectedSubstrate, eventRows, currentActivation)
+          : Promise.resolve(null);
 
-      const budgetRows = await loadBudgets(selectedSubstrate, selectedActivation);
-      if (requestId !== bootRequestRef.current) return;
+      const budgetRows = await loadBudgets(selectedSubstrate, currentActivation);
+      if (isStale()) return;
 
       if (budgetRows === null) {
         setLoadingBoards(false);
         setLoadingWire(false);
-        setNotice("");
+        await payloadsPromise;
         return;
       }
 
       await Promise.all([
-        loadPayloadBoards(selectedSubstrate, selectedActivation, networkRows),
-        loadObservationStatuses(selectedSubstrate, selectedActivation, networkRows),
+        loadPayloadBoards(selectedSubstrate, currentActivation, networkRows),
+        loadObservationStatuses(selectedSubstrate, currentActivation, networkRows),
       ]);
-      if (requestId !== bootRequestRef.current) return;
+      if (isStale()) return;
 
-      await loadWirePackets(selectedSubstrate, selectedActivation, networkRows);
-      if (requestId !== bootRequestRef.current) return;
+      await loadWirePackets(selectedSubstrate, currentActivation, networkRows);
+      if (isStale()) return;
 
-      setNotice("Event Store refreshed.");
+      await payloadsPromise;
+      if (isStale()) return;
+
+      if (eventRows !== null) setNotice("Event Store refreshed.");
     } catch (err) {
       if (requestId !== bootRequestRef.current) return;
 
