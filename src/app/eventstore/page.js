@@ -918,8 +918,8 @@ function NetworkCard({
  *   5. Activation-scoped   payloads, budgets, boards, observation, WirePackets
  *                          all use the selected activation
  *
- * There is no combined substrate/activation discovery request.
- * WirePackets never load before their budget has been resolved.
+  * There is no combined substrate/activation discovery request.
+ * Each activation-scoped resource has its own request lifecycle.
  */
 
 function EventStoreContent() {
@@ -1923,7 +1923,7 @@ function EventStoreContent() {
         return;
       }
       await loadBudgets(selectedSubstrate, selectedActivation);
-      await loadWirePackets(selectedSubstrate, selectedActivation, networks);
+
       setBudgetNotices((current) => ({
         ...current,
         [id]: `Saved budget (${minEvents} … ${maxEvents}).`,
