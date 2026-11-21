@@ -1022,6 +1022,19 @@ function EventStoreContent() {
     buckets.other.forEach((network) => slots.push({ kind: "other", network }));
     return slots;
   }, [renderedNetworks]);
+  
+    const configuredCount = budgets.filter(
+    (row) => row.configured && row.budget,
+  ).length;
+
+  const activationSelected =
+    Boolean(substrate) && /^\d+$/.test(String(activation));
+
+  const observationRunning = networks.some(
+    (network) =>
+      bitcoinNetwork(network) &&
+      observations[network.id]?.running === true,
+  );
 
     const observationRunning = networks.some(
     (network) =>
