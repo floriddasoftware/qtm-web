@@ -109,9 +109,6 @@ function activationFromEvent(event) {
     : String(value);
 }
 
-// Persisted rows that can safely become the active context: a non-empty record
-// identifier and a valid numeric activation. Duplicate record identifiers are
-// collapsed (first occurrence wins) so a dropdown value is never ambiguous.
 function selectableEventRows(rows) {
   const seen = new Set();
   const result = [];
@@ -651,7 +648,7 @@ function BitMinerLogPopup({ substrate, activation, network, running, onClose, on
         </div>
 
         <div className="relative flex min-h-0 flex-1 flex-col bg-zinc-950">
-          {error && <div role="alert" className="shrink-0 break-words border-b border-red-900/60 bg-red-950 px-4 py-2 text-xs leading-5 text-red-200">{error}{hasLog ? " Showing the last output received." : ""}</div>}
+          {error && <div role="alert" className="shrink-0 break-words border-b border-red-900/60 bg-red-950 px-4 py-2 text-xs leading-5 text-red-200">{error}{hasLog ? " Showing the last output received." : ""}</div></div>}
           <div ref={scrollRef} onScroll={handleScroll} tabIndex={0} aria-label="Bit-miner process log output" className="min-h-[16rem] flex-1 overflow-auto overscroll-contain px-4 py-3 sm:px-5">
             {loading && log === null ? (
               <p className="text-xs text-zinc-400">Loading log…</p>
@@ -896,7 +893,8 @@ function PayloadRecordsBody({ group }) {
 
 function NetworkCard({
   kind, network, defaultOpen, index, activation, budgetRow, group, board, wire,
-  observation, observationError, busy, results, loadingBoards, loadingBudgets, loadingWire,
+  observation, observationError, busy, results,
+  loadingBoard, loadingBudget, loadingWire, loadingObservation,
   budgetError, budgetNotice, onSaveBudget, onStreamAction, onRefreshStream, onViewLogs,
 }) {
   const meta = BITCOIN_KINDS[kind];
@@ -926,16 +924,16 @@ function NetworkCard({
           <Field label="Purpose">{money(network.purpose)}</Field>
           <Field label="Derivation path"><span className="break-all font-mono text-xs">{money(network.path)}</span></Field>
         </Fields>
-        <Card inner defaultOpen title={`Network budget · activation ${activation}`} badge={loadingBudgets ? <Pill>Loading</Pill> : null}>
+        <Card inner defaultOpen title={`Network budget · activation ${activation}`} badge={loadingBudget ? <Pill>Loading</Pill> : null}>
           <BudgetSummary budget={budget} />
-          <BudgetEditor budget={budget} disabled={loadingBudgets} onSave={(draft) => onSaveBudget(network, draft)} />
+          <BudgetEditor budget={budget} disabled={loadingBudget} onSave={(draft) => onSaveBudget(network, draft)} />
           {budgetError && <div className="mt-3"><Notice>{budgetError}</Notice></div>}
           {budgetNotice && <div className="mt-3"><Notice type="success">{budgetNotice}</Notice></div>}
         </Card>
         <Card inner scroll title="Payload board" badge={<Pill tone={payloadKind?.available ? "ok" : "neutral"}>{payloadKind ? (payloadKind.available ? "Available" : "Unavailable") : "None"}</Pill>}>
-          <PayloadBoard board={board} kind={payloadKind} loading={loadingBoards} />
+          <PayloadBoard board={board} kind={payloadKind} loading={loadingBoard} />
         </Card>
-        <Card inner title="Bit-miner" badge={<Pill tone={status?.running === true ? "ok" : "neutral"}>{status?.running === true ? "Running" : status?.running === false ? "Idle" : "Unknown"}</Pill>}>
+        <Card inner title="Bit-miner" badge={<Pill tone={status?.running === true ? "ok" : "neutral"}>{status?.running === true ? "Running" : status?.running === false ? "Idle" : loadingObservation ? "Checking…" : "Unknown"}</Pill>}>
           <StreamBody status={status} busy={busy} results={results} network={network} actionError={observationError} onAction={onStreamAction} onRefresh={onRefreshStream} onViewLogs={onViewLogs} />
         </Card>
         <Card inner title="Wirepackets file" badge={<Pill tone={wire?.exists ? "ok" : "neutral"}>{wire?.exists ? "Present" : "None"}</Pill>}>
@@ -949,21 +947,7 @@ function NetworkCard({
   );
 }
 
-/* ───────────────────────── Page ─────────────────────────
- *
- * Entry contract (from parent route):
- *   substrate — search param, required (the only accepted parameter)
- *
- * The Event Store is a receiver. It does not discover substrates,
- * list wallets, or fall back to a first substrate.
- *
- * Persisted event records are resolved internally from the substrate
- * (GET /wallets/:name/events) and exposed through a native <select>.
- * The active scope is { substrate, event, activation }. Activation-scoped
- * resources (budgets, boards, observation, wirepackets) use the numeric
- * activation derived from the selected persisted event; event-scoped
- * resources (payloads) use the selected event's record.
- */
+/* ───────────────────────── Page ───────────────────────── */
 
 function EventStoreContent() {
   const searchParams = useSearchParams();
@@ -973,28 +957,35 @@ function EventStoreContent() {
   const [event, setEvent] = useState("");
   const [activation, setActivation] = useState("");
 
-  const [loadingObservations, setLoadingObservations] = useState(false);
-  const [events, setEvents] = useState([]);
-  const [networks, setNetworks] = useState([]);
-  const [payloads, setPayloads] = useState([]);
-  const [budgets, setBudgets] = useState([]);
-  const [boards, setBoards] = useState({});
-  const [wirePackets, setWirePackets] = useState({});
+  // Network-ID keyed states — no shared loading that can block sibling networks
   const [observations, setObservations] = useState({});
   const [busyObservation, setBusyObservation] = useState({});
   const [observationErrors, setObservationErrors] = useState({});
+  const [loadingObservations, setLoadingObservations] = useState({});
   const [streamResults, setStreamResults] = useState({});
-  const [loadingList, setLoadingList] = useState(false);
-  const [loadingEvents, setLoadingEvents] = useState(false);
-  const [loadingPayloads, setLoadingPayloads] = useState(false);
+
+  const [boards, setBoards] = useState({});
+  const [loadingBoards, setLoadingBoards] = useState({});
+  const [boardErrors, setBoardErrors] = useState({});
+
+  const [wirePackets, setWirePackets] = useState({});
+  const [loadingWire, setLoadingWire] = useState({});
+  const [wireErrors, setWireErrors] = useState({});
+
+  const [budgets, setBudgets] = useState([]);
   const [loadingBudgets, setLoadingBudgets] = useState(false);
-  const [loadingBoards, setLoadingBoards] = useState(false);
-  const [loadingWire, setLoadingWire] = useState(false);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
   const [budgetErrors, setBudgetErrors] = useState({});
   const [budgetNotices, setBudgetNotices] = useState({});
   const [budgetLoadError, setBudgetLoadError] = useState("");
+
+  const [events, setEvents] = useState([]);
+  const [networks, setNetworks] = useState([]);
+  const [payloads, setPayloads] = useState([]);
+  const [loadingList, setLoadingList] = useState(false);
+  const [loadingEvents, setLoadingEvents] = useState(false);
+  const [loadingPayloads, setLoadingPayloads] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [store, setStore] = useState(null);
   const [logViewer, setLogViewer] = useState(null);
 
@@ -1003,11 +994,11 @@ function EventStoreContent() {
   const selectedActivationRef = useRef("");
   const contextGenRef = useRef(0);
   const payloadRequestRef = useRef(0);
-  const boardRequestRef = useRef(0);
-  const wireRequestRef = useRef(0);
+  const boardRequestRef = useRef({});
+  const wireRequestRef = useRef({});
   const eventsRequestRef = useRef(0);
   const budgetRequestRef = useRef(0);
-  const observationRequestRef = useRef(0);
+  const observationRequestRef = useRef({});
   const bootRequestRef = useRef(0);
   const networkRequestRef = useRef(0);
 
@@ -1062,6 +1053,7 @@ function EventStoreContent() {
     return result;
   }, [budgets]);
 
+  // SegWit first, then Legacy, then other registered Bitcoin networks
   const bitcoinSlots = useMemo(() => {
     const buckets = { legacy: [], segwit: [], other: [] };
     for (const network of networks) {
@@ -1084,29 +1076,22 @@ function EventStoreContent() {
       observations[network.id]?.running === true,
   );
 
-  const requiredScopeLoading =
-    loadingEvents ||
-    loadingBudgets ||
-    loadingBoards ||
-    loadingWire ||
-    loadingObservations;
-
-  const anyLoading = requiredScopeLoading || loadingPayloads;
+  const anyNetworkLoading = Object.values(loadingObservations).some(Boolean) ||
+    Object.values(loadingBoards).some(Boolean) ||
+    Object.values(loadingWire).some(Boolean) ||
+    loadingBudgets;
 
   const overviewBadge = (() => {
     if (!substrate || !event) return <Pill tone="warn">Missing context</Pill>;
     if (loadingList) return <Pill>Loading</Pill>;
     if (!activationSelected) return <Pill tone="warn">Resolving event</Pill>;
-    if (loadingObservations) return <Pill>Checking observation</Pill>;
     if (observationRunning) return <Pill tone="ok">Syncing</Pill>;
-    if (anyLoading) return <Pill>Loading data</Pill>;
+    if (anyNetworkLoading || loadingPayloads) return <Pill>Loading data</Pill>;
     if (budgetLoadError) return <Pill tone="warn">Budget error</Pill>;
     if (error) return <Pill tone="warn">Partial</Pill>;
     return <Pill tone="ok">Ready</Pill>;
   })();
 
-  // A request is current only while the full context (substrate, event,
-  // activation) and the context generation it started under are unchanged.
   const isCurrentContext = useCallback((name, record, activationValue, generation) => {
     return (
       generation === contextGenRef.current &&
@@ -1116,15 +1101,13 @@ function EventStoreContent() {
     );
   }, []);
 
-  // Clears only resources that belong to the selected event/activation
-  // context and invalidates their outstanding requests. The persisted event
-  // list is untouched.
   const clearActivationResources = useCallback(() => {
     payloadRequestRef.current += 1;
-    boardRequestRef.current += 1;
-    wireRequestRef.current += 1;
+    // Invalidate all per-network request tokens
+    boardRequestRef.current = {};
+    wireRequestRef.current = {};
+    observationRequestRef.current = {};
     budgetRequestRef.current += 1;
-    observationRequestRef.current += 1;
 
     setPayloads([]);
     setBudgets([]);
@@ -1133,6 +1116,11 @@ function EventStoreContent() {
     setObservations({});
     setBusyObservation({});
     setObservationErrors({});
+    setLoadingObservations({});
+    setLoadingBoards({});
+    setLoadingWire({});
+    setBoardErrors({});
+    setWireErrors({});
     setStreamResults({});
     setLogViewer(null);
     setBudgetErrors({});
@@ -1140,12 +1128,8 @@ function EventStoreContent() {
     setBudgetLoadError("");
     setLoadingPayloads(false);
     setLoadingBudgets(false);
-    setLoadingBoards(false);
-    setLoadingWire(false);
-    setLoadingObservations(false);
   }, []);
 
-  // Full reset used by the initial loader, including the event list.
   const clearScopeData = useCallback(() => {
     clearActivationResources();
     setEvents([]);
@@ -1202,8 +1186,7 @@ function EventStoreContent() {
     }
   }, [isCurrentContext]);
 
-  // GET /networks -> existing network cards. Applied only while the
-  // substrate/event/activation context it started under is still current.
+  // GET /networks — API-owned registry. Applied only while context is current.
   const loadNetworks = useCallback(async (name, record, activationValue) => {
     const generation = contextGenRef.current;
     const requestId = ++networkRequestRef.current;
@@ -1279,6 +1262,8 @@ function EventStoreContent() {
     }
   }, []);
 
+  // Activation-scoped budget (one call, mapped by network ID). Loading is shared
+  // because the endpoint returns the full activation budget set.
   const loadBudgets = useCallback(async (name, activationValue) => {
     if (!name || !/^\d+$/.test(String(activationValue))) {
       budgetRequestRef.current += 1;
@@ -1319,182 +1304,146 @@ function EventStoreContent() {
     }
   }, []);
 
-  const loadPayloadBoards = useCallback(async (name, activationValue, networkRows) => {
-    if (!name || !/^\d+$/.test(String(activationValue))) {
-      boardRequestRef.current += 1;
-      setLoadingBoards(false);
-      return;
-    }
+  // Per-network payload-board loader. Each network settles its own loading state.
+  const loadPayloadBoardForNetwork = useCallback(async (name, activationValue, network) => {
+    const id = normalizeNetworkId(network?.id);
+    if (!name || !id || !/^\d+$/.test(String(activationValue))) return;
 
     const selected = String(activationValue);
     const generation = contextGenRef.current;
-    const requestId = ++boardRequestRef.current;
-    const activeNetworks = (networkRows || [])
-      .map(normalizeNetwork)
-      .filter(Boolean);
+    const requestId = (boardRequestRef.current[id] = (boardRequestRef.current[id] || 0) + 1);
 
     const isCurrent = () =>
-      requestId === boardRequestRef.current &&
+      boardRequestRef.current[id] === requestId &&
       generation === contextGenRef.current &&
       selectedSubstrateRef.current === name &&
       selectedActivationRef.current === selected;
 
-    setLoadingBoards(true);
+    setLoadingBoards((c) => ({ ...c, [id]: true }));
+    setBoardErrors((c) => ({ ...c, [id]: "" }));
 
     try {
-      const boardResults = await Promise.allSettled(
-        activeNetworks.map((network) =>
-          apiRequest(
-            `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/payload-board`,
-          ),
-        ),
+      const body = await apiRequest(
+        `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(id)}/payload-board`,
       );
-
       if (!isCurrent()) return;
-
-      const nextBoards = {};
-      boardResults.forEach((result, index) => {
-        if (result.status !== "fulfilled") return;
-        const body = result.value;
-        if (body?.activation != null && String(body.activation) !== selected) return;
-        nextBoards[activeNetworks[index].id] = body;
-      });
-      setBoards(nextBoards);
+      if (body?.activation != null && String(body.activation) !== selected) return;
+      setBoards((c) => ({ ...c, [id]: body }));
+    } catch (err) {
+      if (isCurrent()) {
+        setBoardErrors((c) => ({
+          ...c,
+          [id]: err instanceof Error ? err.message : "Unable to load payload board.",
+        }));
+      }
     } finally {
-      if (requestId === boardRequestRef.current) {
-        setLoadingBoards(false);
+      if (isCurrent()) {
+        setLoadingBoards((c) => ({ ...c, [id]: false }));
       }
     }
   }, []);
 
-  const loadWirePackets = useCallback(async (name, activationValue, networkRows) => {
-    if (!name || !/^\d+$/.test(String(activationValue))) {
-      wireRequestRef.current += 1;
-      setLoadingWire(false);
-      return;
-    }
+  // Per-network WirePackets loader.
+  const loadWirePacketsForNetwork = useCallback(async (name, activationValue, network) => {
+    const id = normalizeNetworkId(network?.id);
+    if (!name || !id || !/^\d+$/.test(String(activationValue)) || !bitcoinNetwork(network)) return;
 
     const selected = String(activationValue);
     const generation = contextGenRef.current;
-    const requestId = ++wireRequestRef.current;
-    const activeNetworks = (networkRows || [])
-      .map(normalizeNetwork)
-      .filter(Boolean);
-    const btcNetworks = activeNetworks.filter(bitcoinNetwork);
+    const requestId = (wireRequestRef.current[id] = (wireRequestRef.current[id] || 0) + 1);
 
     const isCurrent = () =>
-      requestId === wireRequestRef.current &&
+      wireRequestRef.current[id] === requestId &&
       generation === contextGenRef.current &&
       selectedSubstrateRef.current === name &&
       selectedActivationRef.current === selected;
 
-    setLoadingWire(true);
+    setLoadingWire((c) => ({ ...c, [id]: true }));
+    setWireErrors((c) => ({ ...c, [id]: "" }));
 
     try {
-      if (btcNetworks.length === 0) {
-        if (isCurrent()) setWirePackets({});
+      const metadata = await apiRequest(
+        `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(id)}/wirepackets`,
+      );
+      if (!isCurrent()) return;
+      if (metadata?.activation != null && String(metadata.activation) !== selected) return;
+      setWirePackets((c) => ({ ...c, [id]: metadata }));
+    } catch (err) {
+      if (isCurrent()) {
+        setWireErrors((c) => ({
+          ...c,
+          [id]: err instanceof Error ? err.message : "Unable to load WirePackets.",
+        }));
+      }
+    } finally {
+      if (isCurrent()) {
+        setLoadingWire((c) => ({ ...c, [id]: false }));
+      }
+    }
+  }, []);
+
+  // Per-network observation status loader (GET only). Status is never set optimistically.
+  const loadObservationForNetwork = useCallback(async (name, activationValue, network) => {
+    const id = normalizeNetworkId(network?.id);
+    if (!name || !id || !/^\d+$/.test(String(activationValue)) || !bitcoinNetwork(network)) return;
+
+    const selected = String(activationValue);
+    const generation = contextGenRef.current;
+    const requestId = (observationRequestRef.current[id] = (observationRequestRef.current[id] || 0) + 1);
+
+    const isCurrent = () =>
+      observationRequestRef.current[id] === requestId &&
+      generation === contextGenRef.current &&
+      selectedSubstrateRef.current === name &&
+      selectedActivationRef.current === selected;
+
+    setLoadingObservations((c) => ({ ...c, [id]: true }));
+    setObservationErrors((c) => ({ ...c, [id]: "" }));
+
+    try {
+      const status = await apiRequest(
+        `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(id)}/observation`,
+      );
+      if (!isCurrent()) return;
+      if (!observationMatches(status, id, selected)) {
+        setObservationErrors((c) => ({
+          ...c,
+          [id]: "Observation status response did not match this network.",
+        }));
         return;
       }
-
-      const wireResults = await Promise.allSettled(
-        btcNetworks.map((network) =>
-          apiRequest(
-            `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/wirepackets`,
-          ),
-        ),
-      );
-
-      if (!isCurrent()) return;
-
-      const nextWire = {};
-      wireResults.forEach((result, index) => {
-        if (result.status !== "fulfilled") return;
-        const metadata = result.value;
-        if (metadata?.activation != null && String(metadata.activation) !== selected) return;
-        nextWire[btcNetworks[index].id] = metadata;
-      });
-      setWirePackets(nextWire);
+      setObservations((c) => ({ ...c, [id]: status }));
+    } catch (err) {
+      if (isCurrent()) {
+        setObservationErrors((c) => ({
+          ...c,
+          [id]: err instanceof Error ? err.message : "Unable to load observation status.",
+        }));
+      }
     } finally {
-      if (requestId === wireRequestRef.current) {
-        setLoadingWire(false);
+      if (isCurrent()) {
+        setLoadingObservations((c) => ({ ...c, [id]: false }));
       }
     }
   }, []);
 
-  const loadObservationStatuses = useCallback(async (name, activationValue, networkRows) => {
-    if (!name || !/^\d+$/.test(String(activationValue))) {
-      observationRequestRef.current += 1;
-      setLoadingObservations(false);
-      return null;
-    }
-
-    const selected = String(activationValue);
-    const generation = contextGenRef.current;
-    const requestId = ++observationRequestRef.current;
-    const btcNetworks = (networkRows || [])
-      .map(normalizeNetwork)
-      .filter(Boolean)
-      .filter(bitcoinNetwork);
-
-    const isCurrent = () =>
-      requestId === observationRequestRef.current &&
-      generation === contextGenRef.current &&
-      selectedSubstrateRef.current === name &&
-      selectedActivationRef.current === selected;
-
-    setLoadingObservations(true);
-
-    try {
-      const results = await Promise.allSettled(
-        btcNetworks.map((network) =>
-          apiRequest(
-            `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(network.id)}/observation`,
-          ),
-        ),
-      );
-
-      if (!isCurrent()) return null;
-
-      const next = {};
-      const nextErrors = {};
-      results.forEach((result, index) => {
-        const id = btcNetworks[index].id;
-        if (result.status !== "fulfilled") {
-          nextErrors[id] = `Unable to load observation status: ${result.reason instanceof Error ? result.reason.message : "API error"}`;
-          return;
-        }
-        if (!observationMatches(result.value, id, selected)) {
-          nextErrors[id] = "Observation status response did not match this network.";
-          return;
-        }
-        next[id] = result.value;
-        nextErrors[id] = "";
-      });
-
-      setObservations(next);
-      setObservationErrors((current) => ({ ...current, ...nextErrors }));
-      return next;
-    } finally {
-      if (requestId === observationRequestRef.current) {
-        setLoadingObservations(false);
-      }
-    }
-  }, []);
-
+  // After network registry is known, kick independent loaders for each registered network.
   const loadActivationResources = useCallback(
     (name, record, activationValue, networkRows, isCurrent) => {
       const selected = String(activationValue);
 
       void loadPayloadsForRecord(name, record, selected);
-      void loadPayloadBoards(name, selected, networkRows);
-      void loadObservationStatuses(name, selected, networkRows);
 
+      // Budget is activation-scoped (single call) then mapped by network ID.
       void (async () => {
         try {
           const budgetRows = await loadBudgets(name, selected);
           if (!isCurrent()) return;
+          // After budgets settle, start WirePackets for Bitcoin networks independently.
           if (budgetRows !== null) {
-            await loadWirePackets(name, selected, networkRows);
+            for (const network of (networkRows || []).filter(bitcoinNetwork)) {
+              void loadWirePacketsForNetwork(name, selected, network);
+            }
           }
         } catch (err) {
           if (isCurrent()) {
@@ -1506,13 +1455,21 @@ function EventStoreContent() {
           }
         }
       })();
+
+      // Observation and payload-board are fully independent per network.
+      for (const network of networkRows || []) {
+        if (bitcoinNetwork(network)) {
+          void loadObservationForNetwork(name, selected, network);
+        }
+        void loadPayloadBoardForNetwork(name, selected, network);
+      }
     },
     [
       loadPayloadsForRecord,
-      loadPayloadBoards,
-      loadObservationStatuses,
       loadBudgets,
-      loadWirePackets,
+      loadWirePacketsForNetwork,
+      loadObservationForNetwork,
+      loadPayloadBoardForNetwork,
     ],
   );
 
@@ -1539,10 +1496,10 @@ function EventStoreContent() {
     clearScopeData();
 
     try {
+      // 1. Substrate → persisted events (prerequisite)
       const eventRows = await loadEvents(substrate);
 
       if (bootId !== bootRequestRef.current) return;
-
       if (eventRows === null) return;
 
       const validEvents = selectableEventRows(eventRows);
@@ -1562,22 +1519,23 @@ function EventStoreContent() {
         return;
       }
 
-      // Deterministic default: first valid row in the API's existing order.
+      // Deterministic default: first valid row.
       const matched = validEvents[0];
       const selectedRecord = String(matched.record);
       const selectedActivation = activationFromEvent(matched);
 
-      // Establish the selected context before resource requests.
       selectedEventRef.current = selectedRecord;
       selectedActivationRef.current = selectedActivation;
 
       setEvent(selectedRecord);
       setActivation(selectedActivation);
 
+      // 2. Network registry (after event context is established)
       const networkRows = await loadNetworks(substrate, selectedRecord, selectedActivation);
 
       if (networkRows === null || bootId !== bootRequestRef.current) return;
 
+      // 3. Initialize network cards; their loaders progress independently.
       loadActivationResources(
         substrate,
         selectedRecord,
@@ -1614,9 +1572,6 @@ function EventStoreContent() {
     loadInitial();
   }, [loadInitial]);
 
-  // Dropdown handler: find row -> derive activation -> update refs/state
-  // immediately -> clear old-context resources -> load the new context.
-  // The persisted event list is never re-fetched here.
   const handleSelectEvent = useCallback(
     (value) => {
       const requested = String(value ?? "");
@@ -1651,6 +1606,8 @@ function EventStoreContent() {
 
       clearActivationResources();
 
+      // Re-use already-resolved network registry; loaders for the new activation
+      // start independently and will ignore results from the previous generation.
       loadActivationResources(name, nextRecord, nextActivation, networks, () =>
         isCurrentContext(name, nextRecord, nextActivation, generation),
       );
@@ -1665,6 +1622,7 @@ function EventStoreContent() {
     ],
   );
 
+  // WirePackets polling only for networks that are currently running.
   const runningBitcoinNetworkIds = useMemo(
     () =>
       JSON.stringify(
@@ -1690,33 +1648,27 @@ function EventStoreContent() {
     let timeoutId = null;
 
     const pollWirePackets = async () => {
-      const results = await Promise.allSettled(
-        networkIds.map((networkId) =>
-          apiRequest(
-            `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(networkId)}/wirepackets`,
-          ),
-        ),
+      await Promise.allSettled(
+        networkIds.map(async (networkId) => {
+          try {
+            const metadata = await apiRequest(
+              `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(networkId)}/wirepackets`,
+            );
+            if (
+              cancelled ||
+              generation !== contextGenRef.current ||
+              selectedSubstrateRef.current !== selectedSubstrate ||
+              selectedActivationRef.current !== selectedActivation
+            ) {
+              return;
+            }
+            if (metadata?.activation != null && String(metadata.activation) !== selectedActivation) return;
+            setWirePackets((current) => ({ ...current, [networkId]: metadata }));
+          } catch {
+            // Poll failures stay local; do not surface as hard errors.
+          }
+        }),
       );
-
-      if (
-        cancelled ||
-        generation !== contextGenRef.current ||
-        selectedSubstrateRef.current !== selectedSubstrate ||
-        selectedActivationRef.current !== selectedActivation
-      ) {
-        return;
-      }
-
-      setWirePackets((current) => {
-        const next = { ...current };
-        results.forEach((result, index) => {
-          if (result.status !== "fulfilled") return;
-          const metadata = result.value;
-          if (metadata?.activation != null && String(metadata.activation) !== selectedActivation) return;
-          next[networkIds[index]] = metadata;
-        });
-        return next;
-      });
 
       if (!cancelled) {
         timeoutId = window.setTimeout(pollWirePackets, WIREPACKETS_POLL_MS);
@@ -1765,7 +1717,7 @@ function EventStoreContent() {
     };
   };
 
-  // GET .../observation — the only source of the status shown in the card.
+  // GET .../observation — sole source of truth for the status shown in the card.
   const readObservationStatus = async (scope) => {
     const status = await apiRequest(scope.route);
     if (scope.stale()) return null;
@@ -1798,8 +1750,8 @@ function EventStoreContent() {
     }
   };
 
-  // POST (start) / DELETE (stop) return action responses without a `running`
-  // flag, so they are logged only; the card status is re-read with GET.
+  // POST (start) / DELETE (stop). Action responses are logged only; status is
+  // always re-read from GET so the UI never optimistically sets running/idle.
   const streamAction = async (action, network) => {
     const scope = observationScope(network);
     if (!scope.valid) return;
@@ -1963,6 +1915,7 @@ function EventStoreContent() {
         )}
         {notice && <Notice type="success">{notice}</Notice>}
 
+        {/* Overview — event-level metadata only */}
         <Card
           defaultOpen
           title="Overview"
@@ -1991,6 +1944,7 @@ function EventStoreContent() {
           </div>
         </Card>
 
+        {/* Network cards render directly below Overview — primary structures */}
         {bitcoinSlots.map((slot, index) => {
           const id = slot.network?.id;
           return (
@@ -2009,9 +1963,10 @@ function EventStoreContent() {
               observationError={id ? observationErrors[id] : ""}
               busy={id ? busyObservation[id] === true : false}
               results={(id && streamResults[id]) || []}
-              loadingBoards={loadingBoards}
-              loadingBudgets={loadingBudgets}
-              loadingWire={loadingWire}
+              loadingBoard={id ? loadingBoards[id] === true : false}
+              loadingBudget={loadingBudgets}
+              loadingWire={id ? loadingWire[id] === true : false}
+              loadingObservation={id ? loadingObservations[id] === true : false}
               budgetError={id ? budgetErrors[id] : ""}
               budgetNotice={id ? budgetNotices[id] : ""}
               onSaveBudget={saveBudget}
