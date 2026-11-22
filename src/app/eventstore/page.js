@@ -125,11 +125,17 @@ function selectableEventRows(rows) {
   return result;
 }
 
+function normalizeNetworkId(value) {
+  if (typeof value !== "string" && typeof value !== "number") return "";
+  return String(value).trim();
+}
+
 function normalizeNetwork(network) {
-  if (!network || typeof network.id !== "string") return null;
+  const id = normalizeNetworkId(network?.id);
+  if (!id) return null;
   return {
-    id: network.id,
-    name: network.name || network.id,
+    id,
+    name: network.name || id,
     coin: network.coin,
     purpose: network.purpose,
     path: network.path,
@@ -140,7 +146,13 @@ function normalizeNetwork(network) {
 async function listNetworks() {
   const body = await apiRequest("/networks");
   const rows = Array.isArray(body?.networks) ? body.networks : [];
-  return rows.map(normalizeNetwork).filter(Boolean);
+  const unique = new Map();
+  for (const row of rows) {
+    if (row?.registered === false) continue;
+    const network = normalizeNetwork(row);
+    if (network && !unique.has(network.id)) unique.set(network.id, network);
+  }
+  return [...unique.values()];
 }
 
 function normalizePayload(entry, fallbackRecord) {
@@ -209,10 +221,13 @@ function bitcoinNetwork(network) {
 }
 
 function bitcoinKind(network) {
-  const text = `${network.id} ${network.name} ${network.path || ""}`.toLowerCase();
-  const purpose = String(network.purpose ?? "");
-  if (purpose === "84" || /segwit|bech32|p2wpkh|84'/.test(text)) return "segwit";
-  if (purpose === "44" || /legacy|p2pkh|44'/.test(text)) return "legacy";
+  const pathPurpose = String(network.path ?? "").match(/^m\/(\d+)'?/);
+  const purpose = String(network.purpose ?? "").trim() || (pathPurpose ? pathPurpose[1] : "");
+  if (purpose === "84") return "segwit";
+  if (purpose === "44") return "legacy";
+  const text = `${network.id} ${network.name}`.toLowerCase();
+  if (/segwit|bech32|p2wpkh/.test(text)) return "segwit";
+  if (/legacy|p2pkh/.test(text)) return "legacy";
   return "other";
 }
 
@@ -952,6 +967,7 @@ function EventStoreContent() {
   const budgetRequestRef = useRef(0);
   const observationRequestRef = useRef(0);
   const bootRequestRef = useRef(0);
+  const networkRequestRef = useRef(0);
 
   const eventOptions = useMemo(
     () =>
@@ -1004,17 +1020,9 @@ function EventStoreContent() {
     return result;
   }, [budgets]);
 
-  const renderedNetworks = useMemo(() => {
-    const byId = new Map(networks.map((network) => [network.id, network]));
-    for (const payload of payloads) {
-      if (!byId.has(payload.network.id)) byId.set(payload.network.id, payload.network);
-    }
-    return [...byId.values()];
-  }, [networks, payloads]);
-
   const bitcoinSlots = useMemo(() => {
     const buckets = { legacy: [], segwit: [], other: [] };
-    for (const network of renderedNetworks) {
+    for (const network of networks) {
       if (bitcoinNetwork(network)) buckets[bitcoinKind(network)].push(network);
     }
     const slots = [];
@@ -1024,7 +1032,7 @@ function EventStoreContent() {
     }
     buckets.other.forEach((network) => slots.push({ kind: "other", network }));
     return slots;
-  }, [renderedNetworks]);
+  }, [networks]);
 
   const activationSelected = Boolean(substrate) && /^\d+$/.test(String(activation));
 
@@ -1101,6 +1109,8 @@ function EventStoreContent() {
     setStore(null);
     setEvent("");
     setActivation("");
+    setNetworks([]);
+    networkRequestRef.current += 1;
     selectedEventRef.current = "";
     selectedActivationRef.current = "";
   }, [clearActivationResources]);
@@ -1146,6 +1156,31 @@ function EventStoreContent() {
       return null;
     } finally {
       if (requestId === payloadRequestRef.current) setLoadingPayloads(false);
+    }
+  }, [isCurrentContext]);
+
+  // GET /networks -> existing network cards. Applied only while the
+  // substrate/event/activation context it started under is still current.
+  const loadNetworks = useCallback(async (name, record, activationValue) => {
+    const generation = contextGenRef.current;
+    const requestId = ++networkRequestRef.current;
+    const isCurrent = () =>
+      requestId === networkRequestRef.current &&
+      isCurrentContext(name, record, activationValue, generation);
+
+    try {
+      const rows = await listNetworks();
+      if (!isCurrent()) return null;
+      setNetworks(rows);
+      return rows;
+    } catch (err) {
+      if (isCurrent()) {
+        setNetworks([]);
+        setError(
+          `Unable to load network registry: ${err instanceof Error ? err.message : "unknown API error"}`,
+        );
+      }
+      return null;
     }
   }, [isCurrentContext]);
 
@@ -1487,18 +1522,9 @@ function EventStoreContent() {
       setEvent(selectedRecord);
       setActivation(selectedActivation);
 
-      const networkRows = await listNetworks();
+      const networkRows = await loadNetworks(substrate, selectedRecord, selectedActivation);
 
-      if (
-        bootId !== bootRequestRef.current ||
-        selectedSubstrateRef.current !== substrate ||
-        selectedEventRef.current !== selectedRecord ||
-        selectedActivationRef.current !== selectedActivation
-      ) {
-        return;
-      }
-
-      setNetworks(networkRows);
+      if (networkRows === null || bootId !== bootRequestRef.current) return;
 
       loadActivationResources(
         substrate,
@@ -1528,6 +1554,7 @@ function EventStoreContent() {
     substrate,
     clearScopeData,
     loadEvents,
+    loadNetworks,
     loadActivationResources,
   ]);
 
