@@ -852,7 +852,7 @@ function NetworkCard({
 
   if (!network) {
     return (
-      <Card title={meta.label} subtitle={meta.note} badge={<Pill tone="warn">Not registered</Pill>} style={style}>
+      <Card title={meta.label} subtitle={meta.note} badge={<Pill tone="warn">Not registered</Pill>} className="w-full" style={style}>
         <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">The API has not returned a {meta.label} network for this activation yet. It will appear here as soon as it is registered.</p>
       </Card>
     );
@@ -864,7 +864,7 @@ function NetworkCard({
   const payloadTotal = group.transit_inputs.length + group.exile_outputs.length + group.unclassified.length;
 
   return (
-    <Card title={kind === "other" ? network.name : meta.label} subtitle={network.id} badge={<Pill tone={configured ? "ok" : "neutral"}>{configured ? "Budget set" : "No budget"}</Pill>} defaultOpen={defaultOpen} style={style}>
+    <Card title={kind === "other" ? network.name : meta.label} subtitle={network.id} badge={<Pill tone={configured ? "ok" : "neutral"}>{configured ? "Budget set" : "No budget"}</Pill>} defaultOpen={defaultOpen} className="w-full" style={style}>
       <div className="space-y-3">
         <Fields min="7rem">
           <Field label="Purpose">{money(network.purpose)}</Field>
@@ -1018,17 +1018,13 @@ function EventStoreContent() {
       if (bitcoinNetwork(network)) buckets[bitcoinKind(network)].push(network);
     }
     const slots = [];
-    for (const kind of ["legacy", "segwit"]) {
+    for (const kind of ["segwit", "legacy"]) {
       if (buckets[kind].length === 0) slots.push({ kind, network: null });
       else buckets[kind].forEach((network) => slots.push({ kind, network }));
     }
     buckets.other.forEach((network) => slots.push({ kind: "other", network }));
     return slots;
   }, [renderedNetworks]);
-
-  const configuredCount = budgets.filter(
-    (row) => row.configured && row.budget,
-  ).length;
 
   const activationSelected = Boolean(substrate) && /^\d+$/.test(String(activation));
 
@@ -1880,74 +1876,53 @@ function EventStoreContent() {
           }
           badge={overviewBadge}
           className="w-full"
-        > 
-
+        >
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
             <Stat label="Substrate" value={substrate || "—"} wide />
             <Stat label="Event" value={event || "—"} wide />
             <Stat label="Activation" value={activation || "—"} />
             <Stat label="Events (activation)" value={selectedEvents.length} />
             <Stat label="All events" value={events.length} />
-            <Stat label="Payloads" value={payloads.length} />
-            <Stat label="Budgets set" value={`${configuredCount} / ${networks.length}`} />
             <Stat label="Retained mass" value={retainedMass.toString()} />
             <Stat label="API base" value={API_BASE} wide />
             {store?.directory && (
               <Stat label="Substrate directory" value={store.directory} wide />
             )}
-           {focusedEvent && (
-  <div className="col-span-full flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-xs text-zinc-500 dark:text-zinc-400">
-    <span className="font-medium">Focused event</span>
-    <span className="font-mono">{focusedEvent.record}</span>
-    {focusedEvent.kind != null && (
-      <span>· {String(focusedEvent.kind)}</span>
-    )}
-  </div>
-)}
+            {focusedEvent && (
+              <Stat label="Focused kind" value={money(focusedEvent.kind)} />
+            )}
           </div>
         </Card>
 
-        <SectionHeading title="Bitcoin" meta={`coin type ${COIN_TYPES[0].type}`}>
-          Legacy and SegWit share the single Bitcoin payload kind.
-        </SectionHeading>
-
-        {loadingPayloads && (
-          <p className="px-1 text-xs text-zinc-500">
-            Rendering payload records…
-          </p>
-        )}
-
-        <div className="grid grid-cols-1 items-start gap-3 xl:grid-cols-2">
-          {bitcoinSlots.map((slot, index) => {
-            const id = slot.network?.id;
-            return (
-              <NetworkCard
-                key={id || `placeholder-${slot.kind}`}
-                kind={slot.kind}
-                network={slot.network}
-                defaultOpen={index === 0}
-                index={index}
-                activation={activation}
-                budgetRow={id ? networkBudgetById.get(id) : undefined}
-                group={(id && payloadGroups.get(id)) || emptyGroup}
-                board={id ? boards[id] : undefined}
-                wire={id ? wirePackets[id] : undefined}
-                observation={id ? observations[id] : undefined}
-                busy={id ? busyObservation[id] === true : false}
-                results={(id && streamResults[id]) || []}
-                loadingBoards={loadingBoards}
-                loadingBudgets={loadingBudgets}
-                loadingWire={loadingWire}
-                budgetError={id ? budgetErrors[id] : ""}
-                budgetNotice={id ? budgetNotices[id] : ""}
-                onSaveBudget={saveBudget}
-                onStreamAction={streamAction}
-                onRefreshStream={refreshStream}
-                onViewLogs={openBitMinerLogs}
-              />
-            );
-          })}
-        </div>
+        {bitcoinSlots.map((slot, index) => {
+          const id = slot.network?.id;
+          return (
+            <NetworkCard
+              key={id || `placeholder-${slot.kind}`}
+              kind={slot.kind}
+              network={slot.network}
+              defaultOpen={index === 0}
+              index={index}
+              activation={activation}
+              budgetRow={id ? networkBudgetById.get(id) : undefined}
+              group={(id && payloadGroups.get(id)) || emptyGroup}
+              board={id ? boards[id] : undefined}
+              wire={id ? wirePackets[id] : undefined}
+              observation={id ? observations[id] : undefined}
+              busy={id ? busyObservation[id] === true : false}
+              results={(id && streamResults[id]) || []}
+              loadingBoards={loadingBoards}
+              loadingBudgets={loadingBudgets}
+              loadingWire={loadingWire}
+              budgetError={id ? budgetErrors[id] : ""}
+              budgetNotice={id ? budgetNotices[id] : ""}
+              onSaveBudget={saveBudget}
+              onStreamAction={streamAction}
+              onRefreshStream={refreshStream}
+              onViewLogs={openBitMinerLogs}
+            />
+          );
+        })}
 
         <SectionHeading title="Other chains" meta="not yet implemented">
           One payload kind each, from the paths registry. Placeholders until wired up.
