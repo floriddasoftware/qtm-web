@@ -9,6 +9,7 @@ const API_BASE = (
 ).replace(/\/+$/, "");
 
 const COIN_TYPES = [
+[
   { key: "bitcoin", name: "Bitcoin", symbol: "BTC", type: 0, path: "m/44'/0'/0'/0/0" },
   { key: "ethereum", name: "Ethereum", symbol: "ETH", type: 60, path: "m/44'/60'/0'/0/0" },
   { key: "solana", name: "Solana", symbol: "SOL", type: 501, path: "m/44'/501'/0'/0'" },
@@ -375,7 +376,7 @@ function BudgetSummary({ budget }) {
   );
 }
 
-function BudgetEditor({ budget, disabled, onSave }) {
+function BudgetEditor({ budget, disabled, saving, onSave }) {
   const toDraft = () => ({
     min_events: String(budget?.min_events ?? 0),
     max_events: String(budget?.max_events ?? 1024),
@@ -408,7 +409,7 @@ function BudgetEditor({ budget, disabled, onSave }) {
             className={INPUT}
             inputMode="numeric"
             value={draft[key]}
-            disabled={disabled}
+            disabled={disabled || saving}
             onChange={(event) =>
               setDraft((current) => ({
                 ...current,
@@ -423,9 +424,9 @@ function BudgetEditor({ budget, disabled, onSave }) {
         <button
           className={`${BUTTON} w-full sm:w-auto`}
           type="submit"
-          disabled={disabled}
+          disabled={disabled || saving}
         >
-          Save network budget
+          {saving ? "Saving budget…" : "Save network budget"}
         </button>
       </div>
     </form>
@@ -647,53 +648,25 @@ function BitMinerLogPopup({ substrate, activation, network, running, onClose, on
           </div>
         </div>
 
-       
         <div className="relative flex min-h-0 flex-1 flex-col bg-zinc-950">
           {error && (
-            <div
-              role="alert"
-              className="shrink-0 break-words border-b border-red-900/60 bg-red-950 px-4 py-2 text-xs leading-5 text-red-200"
-            >
-              {error}
-              {hasLog ? " Showing the last output received." : ""}
+            <div role="alert" className="shrink-0 break-words border-b border-red-900/60 bg-red-950 px-4 py-2 text-xs leading-5 text-red-200">
+              {error}{hasLog ? " Showing the last output received." : ""}
             </div>
           )}
-
-          <div
-            ref={scrollRef}
-            onScroll={handleScroll}
-            tabIndex={0}
-            aria-label="Bit-miner process log output"
-            className="min-h-[16rem] flex-1 overflow-auto overscroll-contain px-4 py-3 sm:px-5"
-          >
+          <div ref={scrollRef} onScroll={handleScroll} tabIndex={0} aria-label="Bit-miner process log output" className="min-h-[16rem] flex-1 overflow-auto overscroll-contain px-4 py-3 sm:px-5">
             {loading && log === null ? (
               <p className="text-xs text-zinc-400">Loading log…</p>
             ) : hasLog ? (
-              <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-zinc-100 sm:text-xs">
-                {log}
-              </pre>
+              <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-zinc-100 sm:text-xs">{log}</pre>
             ) : error && log === null ? (
-              <p className="text-xs text-zinc-400">
-                The log could not be loaded.
-              </p>
+              <p className="text-xs text-zinc-400">The log could not be loaded.</p>
             ) : (
-              <p className="text-xs text-zinc-400">
-                No log output yet. Output appears here once the bit-miner process writes to its log.
-              </p>
+              <p className="text-xs text-zinc-400">No log output yet. Output appears here once the bit-miner process writes to its log.</p>
             )}
           </div>
-
-          {!pinned && hasLog && (
-            <button
-              type="button"
-              onClick={jumpToLatest}
-              className="absolute bottom-3 right-4 rounded-full border border-zinc-600 bg-zinc-800/95 px-3 py-1.5 text-[11px] font-medium text-zinc-100 shadow-lg transition hover:bg-zinc-700"
-            >
-              Jump to latest ↓
-            </button>
-          )}
+          {!pinned && hasLog && <button type="button" onClick={jumpToLatest} className="absolute bottom-3 right-4 rounded-full border border-zinc-600 bg-zinc-800/95 px-3 py-1.5 text-[11px] font-medium text-zinc-100 shadow-lg transition hover:bg-zinc-700">Jump to latest ↓</button>}
         </div>
-
 
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 px-4 py-2.5 text-[10px] text-zinc-500 sm:px-5 dark:border-zinc-800 dark:text-zinc-400">
           <span>{updatedAt ? `Updated ${updatedAt.toLocaleTimeString()}` : "Waiting for first response…"}</span>
@@ -926,7 +899,7 @@ function PayloadRecordsBody({ group }) {
 function NetworkCard({
   kind, network, defaultOpen, index, activation, budgetRow, group, board, wire,
   observation, observationError, busy, results,
-  loadingBoard, loadingBudget, loadingWire, loadingObservation,
+  loadingBoard, loadingBudget, savingBudget, loadingWire, loadingObservation,
   budgetError, budgetNotice, onSaveBudget, onStreamAction, onRefreshStream, onViewLogs,
 }) {
   const meta = BITCOIN_KINDS[kind];
@@ -956,12 +929,38 @@ function NetworkCard({
           <Field label="Purpose">{money(network.purpose)}</Field>
           <Field label="Derivation path"><span className="break-all font-mono text-xs">{money(network.path)}</span></Field>
         </Fields>
-        <Card inner defaultOpen title={`Network budget · activation ${activation}`} badge={loadingBudget ? <Pill>Loading</Pill> : null}>
+
+        <Card
+          inner
+          defaultOpen
+          title={`Network budget · activation ${activation}`}
+          badge={
+            loadingBudget ? (
+              <Pill>Loading</Pill>
+            ) : savingBudget ? (
+              <Pill>Saving</Pill>
+            ) : null
+          }
+        >
           <BudgetSummary budget={budget} />
-          <BudgetEditor budget={budget} disabled={loadingBudget} onSave={(draft) => onSaveBudget(network, draft)} />
-          {budgetError && <div className="mt-3"><Notice>{budgetError}</Notice></div>}
-          {budgetNotice && <div className="mt-3"><Notice type="success">{budgetNotice}</Notice></div>}
+          <BudgetEditor
+            budget={budget}
+            disabled={loadingBudget || savingBudget}
+            saving={savingBudget}
+            onSave={(draft) => onSaveBudget(network, draft)}
+          />
+          {budgetError && (
+            <div className="mt-3">
+              <Notice>{budgetError}</Notice>
+            </div>
+          )}
+          {budgetNotice && (
+            <div className="mt-3">
+              <Notice type="success">{budgetNotice}</Notice>
+            </div>
+          )}
         </Card>
+
         <Card inner scroll title="Payload board" badge={<Pill tone={payloadKind?.available ? "ok" : "neutral"}>{payloadKind ? (payloadKind.available ? "Available" : "Unavailable") : "None"}</Pill>}>
           <PayloadBoard board={board} kind={payloadKind} loading={loadingBoard} />
         </Card>
@@ -989,7 +988,7 @@ function EventStoreContent() {
   const [event, setEvent] = useState("");
   const [activation, setActivation] = useState("");
 
-  // Network-ID keyed states — no shared loading that can block sibling networks
+  // Network-ID keyed states
   const [observations, setObservations] = useState({});
   const [busyObservation, setBusyObservation] = useState({});
   const [observationErrors, setObservationErrors] = useState({});
@@ -1005,10 +1004,10 @@ function EventStoreContent() {
   const [wireErrors, setWireErrors] = useState({});
 
   const [budgets, setBudgets] = useState([]);
-  const [loadingBudgets, setLoadingBudgets] = useState(false);
+  const [loadingBudgets, setLoadingBudgets] = useState({});
+  const [savingBudgets, setSavingBudgets] = useState({});
   const [budgetErrors, setBudgetErrors] = useState({});
   const [budgetNotices, setBudgetNotices] = useState({});
-  const [budgetLoadError, setBudgetLoadError] = useState("");
 
   const [events, setEvents] = useState([]);
   const [networks, setNetworks] = useState([]);
@@ -1108,10 +1107,12 @@ function EventStoreContent() {
       observations[network.id]?.running === true,
   );
 
-  const anyNetworkLoading = Object.values(loadingObservations).some(Boolean) ||
+  const anyNetworkLoading =
+    Object.values(loadingObservations).some(Boolean) ||
     Object.values(loadingBoards).some(Boolean) ||
     Object.values(loadingWire).some(Boolean) ||
-    loadingBudgets;
+    Object.values(loadingBudgets).some(Boolean) ||
+    Object.values(savingBudgets).some(Boolean);
 
   const overviewBadge = (() => {
     if (!substrate || !event) return <Pill tone="warn">Missing context</Pill>;
@@ -1119,7 +1120,7 @@ function EventStoreContent() {
     if (!activationSelected) return <Pill tone="warn">Resolving event</Pill>;
     if (observationRunning) return <Pill tone="ok">Syncing</Pill>;
     if (anyNetworkLoading || loadingPayloads) return <Pill>Loading data</Pill>;
-    if (budgetLoadError) return <Pill tone="warn">Budget error</Pill>;
+    if (Object.values(budgetErrors).some(Boolean)) return <Pill tone="warn">Budget error</Pill>;
     if (error) return <Pill tone="warn">Partial</Pill>;
     return <Pill tone="ok">Ready</Pill>;
   })();
@@ -1135,7 +1136,6 @@ function EventStoreContent() {
 
   const clearActivationResources = useCallback(() => {
     payloadRequestRef.current += 1;
-    // Invalidate all per-network request tokens
     boardRequestRef.current = {};
     wireRequestRef.current = {};
     observationRequestRef.current = {};
@@ -1157,9 +1157,9 @@ function EventStoreContent() {
     setLogViewer(null);
     setBudgetErrors({});
     setBudgetNotices({});
-    setBudgetLoadError("");
     setLoadingPayloads(false);
-    setLoadingBudgets(false);
+    setLoadingBudgets({});
+    setSavingBudgets({});
   }, []);
 
   const clearScopeData = useCallback(() => {
@@ -1218,7 +1218,6 @@ function EventStoreContent() {
     }
   }, [isCurrentContext]);
 
-  // GET /networks — API-owned registry. Applied only while context is current.
   const loadNetworks = useCallback(async (name, record, activationValue) => {
     const generation = contextGenRef.current;
     const requestId = ++networkRequestRef.current;
@@ -1294,49 +1293,75 @@ function EventStoreContent() {
     }
   }, []);
 
-  // Activation-scoped budget (one call, mapped by network ID). Loading is shared
-  // because the endpoint returns the full activation budget set.
+  // Activation-scoped budget fetch.
+  // The endpoint returns the activation-wide budget set, but loading/errors
+  // are owned by each registered network.
   const loadBudgets = useCallback(async (name, activationValue) => {
+    const networkIds = networks
+      .map((network) => normalizeNetworkId(network?.id))
+      .filter(Boolean);
+
     if (!name || !/^\d+$/.test(String(activationValue))) {
       budgetRequestRef.current += 1;
-      setLoadingBudgets(false);
-      setBudgetLoadError("");
+      setLoadingBudgets({});
       return null;
     }
+
     const selected = String(activationValue);
     const generation = contextGenRef.current;
     const requestId = ++budgetRequestRef.current;
+
     const isCurrent = () =>
       requestId === budgetRequestRef.current &&
       generation === contextGenRef.current &&
       selectedSubstrateRef.current === name &&
       selectedActivationRef.current === selected;
 
-    setLoadingBudgets(true);
-    setBudgetLoadError("");
+    setLoadingBudgets((current) => {
+      const next = { ...current };
+      for (const id of networkIds) next[id] = true;
+      return next;
+    });
+
+    for (const id of networkIds) {
+      setBudgetErrors((current) => ({ ...current, [id]: "" }));
+    }
+
     try {
-      const body = await apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/budgets`);
+      const body = await apiRequest(
+        `/wallets/${enc(name)}/activations/${enc(selected)}/budgets`,
+      );
       if (!isCurrent()) return null;
+
       const rows = Array.isArray(body?.budgets) ? body.budgets : [];
-      const filtered = rows.filter((row) => row?.activation == null || String(row.activation) === selected);
+      const filtered = rows.filter(
+        (row) => row?.activation == null || String(row.activation) === selected,
+      );
       setBudgets(filtered);
       return filtered;
     } catch (err) {
       if (isCurrent()) {
         setBudgets([]);
         const message = err instanceof Error ? err.message : "API error";
-        setBudgetLoadError(`Unable to load network budgets: ${message}`);
-        setError(`Unable to load network budgets: ${message}`);
+        for (const id of networkIds) {
+          setBudgetErrors((current) => ({
+            ...current,
+            [id]: `Unable to load network budget: ${message}`,
+          }));
+        }
       }
       return null;
     } finally {
       if (requestId === budgetRequestRef.current) {
-        setLoadingBudgets(false);
+        setLoadingBudgets((current) => {
+          const next = { ...current };
+          for (const id of networkIds) next[id] = false;
+          return next;
+        });
       }
     }
-  }, []);
+  }, [networks]);
 
-  // Per-network payload-board loader. Each network settles its own loading state.
   const loadPayloadBoardForNetwork = useCallback(async (name, activationValue, network) => {
     const id = normalizeNetworkId(network?.id);
     if (!name || !id || !/^\d+$/.test(String(activationValue))) return;
@@ -1375,7 +1400,6 @@ function EventStoreContent() {
     }
   }, []);
 
-  // Per-network WirePackets loader.
   const loadWirePacketsForNetwork = useCallback(async (name, activationValue, network) => {
     const id = normalizeNetworkId(network?.id);
     if (!name || !id || !/^\d+$/.test(String(activationValue)) || !bitcoinNetwork(network)) return;
@@ -1414,7 +1438,6 @@ function EventStoreContent() {
     }
   }, []);
 
-  // Per-network observation status loader (GET only). Status is never set optimistically.
   const loadObservationForNetwork = useCallback(async (name, activationValue, network) => {
     const id = normalizeNetworkId(network?.id);
     if (!name || !id || !/^\d+$/.test(String(activationValue)) || !bitcoinNetwork(network)) return;
@@ -1459,19 +1482,16 @@ function EventStoreContent() {
     }
   }, []);
 
-  // After network registry is known, kick independent loaders for each registered network.
   const loadActivationResources = useCallback(
     (name, record, activationValue, networkRows, isCurrent) => {
       const selected = String(activationValue);
 
       void loadPayloadsForRecord(name, record, selected);
 
-      // Budget is activation-scoped (single call) then mapped by network ID.
       void (async () => {
         try {
           const budgetRows = await loadBudgets(name, selected);
           if (!isCurrent()) return;
-          // After budgets settle, start WirePackets for Bitcoin networks independently.
           if (budgetRows !== null) {
             for (const network of (networkRows || []).filter(bitcoinNetwork)) {
               void loadWirePacketsForNetwork(name, selected, network);
@@ -1488,7 +1508,6 @@ function EventStoreContent() {
         }
       })();
 
-      // Observation and payload-board are fully independent per network.
       for (const network of networkRows || []) {
         if (bitcoinNetwork(network)) {
           void loadObservationForNetwork(name, selected, network);
@@ -1528,7 +1547,6 @@ function EventStoreContent() {
     clearScopeData();
 
     try {
-      // 1. Substrate → persisted events (prerequisite)
       const eventRows = await loadEvents(substrate);
 
       if (bootId !== bootRequestRef.current) return;
@@ -1551,7 +1569,6 @@ function EventStoreContent() {
         return;
       }
 
-      // Deterministic default: first valid row.
       const matched = validEvents[0];
       const selectedRecord = String(matched.record);
       const selectedActivation = activationFromEvent(matched);
@@ -1562,12 +1579,10 @@ function EventStoreContent() {
       setEvent(selectedRecord);
       setActivation(selectedActivation);
 
-      // 2. Network registry (after event context is established)
       const networkRows = await loadNetworks(substrate, selectedRecord, selectedActivation);
 
       if (networkRows === null || bootId !== bootRequestRef.current) return;
 
-      // 3. Initialize network cards; their loaders progress independently.
       loadActivationResources(
         substrate,
         selectedRecord,
@@ -1638,8 +1653,6 @@ function EventStoreContent() {
 
       clearActivationResources();
 
-      // Re-use already-resolved network registry; loaders for the new activation
-      // start independently and will ignore results from the previous generation.
       loadActivationResources(name, nextRecord, nextActivation, networks, () =>
         isCurrentContext(name, nextRecord, nextActivation, generation),
       );
@@ -1654,7 +1667,6 @@ function EventStoreContent() {
     ],
   );
 
-  // WirePackets polling only for networks that are currently running.
   const runningBitcoinNetworkIds = useMemo(
     () =>
       JSON.stringify(
@@ -1697,7 +1709,7 @@ function EventStoreContent() {
             if (metadata?.activation != null && String(metadata.activation) !== selectedActivation) return;
             setWirePackets((current) => ({ ...current, [networkId]: metadata }));
           } catch {
-            // Poll failures stay local; do not surface as hard errors.
+            // Poll failures stay local.
           }
         }),
       );
@@ -1749,7 +1761,6 @@ function EventStoreContent() {
     };
   };
 
-  // GET .../observation — sole source of truth for the status shown in the card.
   const readObservationStatus = async (scope) => {
     const status = await apiRequest(scope.route);
     if (scope.stale()) return null;
@@ -1782,8 +1793,6 @@ function EventStoreContent() {
     }
   };
 
-  // POST (start) / DELETE (stop). Action responses are logged only; status is
-  // always re-read from GET so the UI never optimistically sets running/idle.
   const streamAction = async (action, network) => {
     const scope = observationScope(network);
     if (!scope.valid) return;
@@ -1811,7 +1820,7 @@ function EventStoreContent() {
   };
 
   const saveBudget = async (network, draft) => {
-    const id = network.id;
+    const id = normalizeNetworkId(network.id);
     const selectedSubstrate = substrate;
     const selectedActivation = String(activation);
     const generation = contextGenRef.current;
@@ -1819,12 +1828,18 @@ function EventStoreContent() {
       generation !== contextGenRef.current ||
       selectedSubstrateRef.current !== selectedSubstrate ||
       selectedActivationRef.current !== selectedActivation;
+
     setBudgetErrors((current) => ({ ...current, [id]: "" }));
     setBudgetNotices((current) => ({ ...current, [id]: "" }));
 
     const minEvents = Number(draft.min_events);
     const maxEvents = Number(draft.max_events);
-    if (!Number.isInteger(minEvents) || minEvents < 0 || !Number.isInteger(maxEvents) || maxEvents < 0) {
+    if (
+      !Number.isInteger(minEvents) ||
+      minEvents < 0 ||
+      !Number.isInteger(maxEvents) ||
+      maxEvents < 0
+    ) {
       setBudgetErrors((current) => ({
         ...current,
         [id]: "Min events and max events must be non-negative integers.",
@@ -1832,12 +1847,17 @@ function EventStoreContent() {
       return;
     }
 
+    setSavingBudgets((current) => ({ ...current, [id]: true }));
+
     try {
       await apiRequest(
         `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(id)}/budgets`,
         {
           method: "PUT",
-          body: JSON.stringify({ min_events: minEvents, max_events: maxEvents }),
+          body: JSON.stringify({
+            min_events: minEvents,
+            max_events: maxEvents,
+          }),
         },
       );
       if (stale()) return;
@@ -1851,8 +1871,14 @@ function EventStoreContent() {
       if (stale()) return;
       setBudgetErrors((current) => ({
         ...current,
-        [id]: err instanceof Error ? err.message : "Unable to save network budget.",
+        [id]: err instanceof Error
+          ? err.message
+          : "Unable to save network budget.",
       }));
+    } finally {
+      if (!stale()) {
+        setSavingBudgets((current) => ({ ...current, [id]: false }));
+      }
     }
   };
 
@@ -1942,12 +1968,8 @@ function EventStoreContent() {
         </header>
 
         {error && <Notice>{error}</Notice>}
-        {budgetLoadError && budgetLoadError !== error && (
-          <Notice>{budgetLoadError}</Notice>
-        )}
         {notice && <Notice type="success">{notice}</Notice>}
 
-        {/* Overview — event-level metadata only */}
         <Card
           defaultOpen
           title="Overview"
@@ -1976,7 +1998,6 @@ function EventStoreContent() {
           </div>
         </Card>
 
-        {/* Network cards render directly below Overview — primary structures */}
         {bitcoinSlots.map((slot, index) => {
           const id = slot.network?.id;
           return (
@@ -1996,7 +2017,8 @@ function EventStoreContent() {
               busy={id ? busyObservation[id] === true : false}
               results={(id && streamResults[id]) || []}
               loadingBoard={id ? loadingBoards[id] === true : false}
-              loadingBudget={loadingBudgets}
+              loadingBudget={id ? loadingBudgets[id] === true : false}
+              savingBudget={id ? savingBudgets[id] === true : false}
               loadingWire={id ? loadingWire[id] === true : false}
               loadingObservation={id ? loadingObservations[id] === true : false}
               budgetError={id ? budgetErrors[id] : ""}
