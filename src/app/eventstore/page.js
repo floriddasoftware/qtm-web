@@ -1880,7 +1880,29 @@ function EventStoreContent() {
           }
           badge={overviewBadge}
           className="w-full"
-        >
+        > 
+<div className="mt-3 space-y-1 px-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+  <div className="flex flex-wrap items-center gap-1.5">
+    <span className="rounded border border-zinc-200 px-1.5 py-0.5 font-semibold dark:border-zinc-700">
+      GET
+    </span>
+    <code className="break-all">
+      /wallets/:name/activations/:activation/budgets
+    </code>
+    <span>— List activation network budgets</span>
+  </div>
+
+  <div className="flex flex-wrap items-center gap-1.5">
+    <span className="rounded border border-zinc-200 px-1.5 py-0.5 font-semibold dark:border-zinc-700">
+      PUT
+    </span>
+    <code className="break-all">
+      /wallets/:name/activations/:activation/budgets/:network
+    </code>
+    <span>— Update network budget</span>
+  </div>
+</div>
+
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
             <Stat label="Substrate" value={substrate || "—"} wide />
             <Stat label="Event" value={event || "—"} wide />
@@ -1894,9 +1916,15 @@ function EventStoreContent() {
             {store?.directory && (
               <Stat label="Substrate directory" value={store.directory} wide />
             )}
-            {focusedEvent && (
-              <Stat label="Focused kind" value={money(focusedEvent.kind)} />
-            )}
+           {focusedEvent && (
+  <div className="col-span-full flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-xs text-zinc-500 dark:text-zinc-400">
+    <span className="font-medium">Focused event</span>
+    <span className="font-mono">{focusedEvent.record}</span>
+    {focusedEvent.kind != null && (
+      <span>· {String(focusedEvent.kind)}</span>
+    )}
+  </div>
+)}
           </div>
         </Card>
 
