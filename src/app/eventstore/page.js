@@ -158,6 +158,16 @@ function activationFromEvent(event) {
     : String(value);
 }
 
+// Record identifier: the API's `record` field, with the alternate names the
+// Network page also tolerates. Returns "" when the row carries none.
+function recordOf(row) {
+  for (const key of ["record", "record_name", "filename", "id"]) {
+    const value = row?.[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return "";
+}
+
 function compareEventRows(a, b) {
   const aa = activationFromEvent(a);
   const bb = activationFromEvent(b);
@@ -168,43 +178,45 @@ function compareEventRows(a, b) {
     const y = BigInt(bb);
     if (x !== y) return x < y ? -1 : 1;
   }
-  const ra = String(a.record);
-  const rb = String(b.record);
+  const ra = recordOf(a);
+  const rb = recordOf(b);
   return ra < rb ? -1 : ra > rb ? 1 : 0;
 }
 
-// Canonical EventStoreResponse.events -> PersistedEventSummary rows.
-// kind, record, activation, dimension, structural_value, depth_objects,
-// retained_mass, delta, tau, gross_work, net_work, commitment and coordinate
-// are preserved exactly as returned; nothing is fabricated.
+// Canonical EventStoreResponse.events, kept as permissively as the Network
+// page keeps it: every returned object row is retained for display. Rows are
+// never dropped for lacking a record or an activation; selection (below) is a
+// separate concern. Fields are preserved exactly as returned.
 function normalizePersistedEvents(response) {
-  if (!Array.isArray(response?.events)) {
+  const source = Array.isArray(response) ? response : response?.events;
+  if (!Array.isArray(source)) {
     throw new Error("The API response did not include a persisted events array.");
   }
 
   const rows = [];
-  for (const row of response.events) {
-    if (!row || typeof row !== "object") continue;
-    if (typeof row.record !== "string" || !row.record.trim()) continue;
+  for (const row of source) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+    const record = recordOf(row);
     const activation = activationFromEvent(row);
     rows.push({
       ...row,
-      kind: row.kind,
-      record: row.record,
-      activation: activation === null ? row.activation : activation,
+      ...(record ? { record } : {}),
+      ...(activation !== null ? { activation } : {}),
     });
   }
 
   return rows.sort(compareEventRows);
 }
 
+// Selection only: rows that identify a persisted record AND report an
+// activation (payloads/budgets/observation are activation-scoped).
 function selectableEventRows(rows) {
   const seen = new Set();
   const result = [];
 
   for (const row of Array.isArray(rows) ? rows : []) {
-    const record = typeof row?.record === "string" ? row.record : "";
-    if (!record.trim() || seen.has(record)) continue;
+    const record = recordOf(row);
+    if (!record || seen.has(record)) continue;
 
     const activation = activationFromEvent(row);
     if (activation === null) continue;
@@ -1644,7 +1656,7 @@ function EventStoreContent() {
         if (eventRows.length === 0) {
           setNotice("No persisted event records found for this substrate.");
         } else {
-          setError("Persisted event records contain no usable record identifier and activation.");
+          setError(`The API returned ${eventRows.length} persisted event row(s), but none reports both a record and an activation, so none can be selected. They are listed under Diagnostics.`);
         }
         return;
       }
