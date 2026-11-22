@@ -54,6 +54,14 @@ const QTM_STYLES = `
 
 const WIREPACKETS_POLL_MS = 2000;
 
+const EMPTY_HISTORY = Object.freeze({
+  substrate: "",
+  rows: [],
+  directory: "",
+  loading: false,
+  error: "",
+});
+
 async function apiRequest(path, options = {}) {
   let response;
   try {
@@ -102,7 +110,6 @@ function enc(value) {
 
 /* ───────────── Runtime call (mirrors callRuntime in src/app/page.js) ───────────── */
 
-// Native IPC entry point, present only inside a native shell.
 function nativeInvoke() {
   if (typeof window === "undefined") return null;
   return (
@@ -116,7 +123,6 @@ const NATIVE_COMMANDS = {
   listEvents: "qtm_events",
 };
 
-// Same route table entry as page.js: GET /wallets/:name/events
 const API_ROUTES = {
   listEvents: ({ name }) => ["GET", `/wallets/${enc(name)}/events`],
 };
@@ -158,12 +164,10 @@ function activationFromEvent(event) {
     : String(value);
 }
 
-// Record identifier: the API's `record` field, with the alternate names the
-// Network page also tolerates. Returns "" when the row carries none.
 function recordOf(row) {
   for (const key of ["record", "record_name", "filename", "id"]) {
     const value = row?.[key];
-    if (typeof value === "string" && value.trim()) return value;
+    if (typeof value === "string" && value.trim()) return value.trim();
   }
   return "";
 }
@@ -183,14 +187,10 @@ function compareEventRows(a, b) {
   return ra < rb ? -1 : ra > rb ? 1 : 0;
 }
 
-// Canonical EventStoreResponse.events, kept as permissively as the Network
-// page keeps it: every returned object row is retained for display. Rows are
-// never dropped for lacking a record or an activation; selection (below) is a
-// separate concern. Fields are preserved exactly as returned.
-function normalizePersistedEvents(response) {
+function normalizePersistedHistoryResponse(response) {
   const source = Array.isArray(response) ? response : response?.events;
   if (!Array.isArray(source)) {
-    throw new Error("The API response did not include a persisted events array.");
+    throw new Error("The runtime response did not include a persisted events array.");
   }
 
   const rows = [];
@@ -205,22 +205,27 @@ function normalizePersistedEvents(response) {
     });
   }
 
-  return rows.sort(compareEventRows);
+  const directory =
+    !Array.isArray(response) && typeof response?.directory === "string"
+      ? response.directory
+      : "";
+
+  return {
+    rows: rows.sort(compareEventRows),
+    directory,
+  };
 }
 
-// Selection only: rows that identify a persisted record AND report an
-// activation (payloads/budgets/observation are activation-scoped).
-function selectableEventRows(rows) {
+// Independent helper used only to populate selectable options without
+// altering or filtering the persisted history state.
+function extractSelectableEvents(rows) {
   const seen = new Set();
   const result = [];
 
   for (const row of Array.isArray(rows) ? rows : []) {
     const record = recordOf(row);
-    if (!record || seen.has(record)) continue;
-
     const activation = activationFromEvent(row);
-    if (activation === null) continue;
-
+    if (!record || activation === null || seen.has(record)) continue;
     seen.add(record);
     result.push({ ...row, record, activation });
   }
@@ -1038,7 +1043,7 @@ function NetworkCard({
         <Card
           inner
           defaultOpen
-          title={`Network budget · activation ${activation}`}
+          title={`Network budget · activation ${activation || "—"}`}
           badge={
             loadingBudget ? (
               <Pill>Loading</Pill>
@@ -1050,7 +1055,7 @@ function NetworkCard({
           <BudgetSummary budget={budget} />
           <BudgetEditor
             budget={budget}
-            disabled={loadingBudget || savingBudget}
+            disabled={loadingBudget || savingBudget || !/^\d+$/.test(String(activation))}
             saving={savingBudget}
             onSave={(draft) => onSaveBudget(network, draft)}
           />
@@ -1087,12 +1092,14 @@ function NetworkCard({
 
 function EventStoreContent() {
   const searchParams = useSearchParams();
-  const requestedSubstrate = (searchParams.get("substrate") || "").trim();
+  const substrate = (searchParams.get("substrate") || "").trim();
 
-  // Derived from the URL on every render so a substrate change re-runs the loader.
-  const substrate = requestedSubstrate;
-  const [event, setEvent] = useState("");
-  const [activation, setActivation] = useState("");
+  // Dedicated persisted history state populated directly from runtime responses.
+  const [persistedHistory, setPersistedHistory] = useState(EMPTY_HISTORY);
+
+  // Event selection state (decoupled from whether persisted history exists).
+  const [selectedEvent, setSelectedEvent] = useState("");
+  const [selectedActivation, setSelectedActivation] = useState("");
 
   // Network-ID keyed states
   const [observations, setObservations] = useState({});
@@ -1103,11 +1110,9 @@ function EventStoreContent() {
 
   const [boards, setBoards] = useState({});
   const [loadingBoards, setLoadingBoards] = useState({});
-  const [boardErrors, setBoardErrors] = useState({});
 
   const [wirePackets, setWirePackets] = useState({});
   const [loadingWire, setLoadingWire] = useState({});
-  const [wireErrors, setWireErrors] = useState({});
 
   const [budgets, setBudgets] = useState([]);
   const [loadingBudgets, setLoadingBudgets] = useState({});
@@ -1115,132 +1120,61 @@ function EventStoreContent() {
   const [budgetErrors, setBudgetErrors] = useState({});
   const [budgetNotices, setBudgetNotices] = useState({});
 
-  const [events, setEvents] = useState([]);
   const [networks, setNetworks] = useState([]);
   const [payloads, setPayloads] = useState([]);
-  const [loadingList, setLoadingList] = useState(false);
-
   const [loadingPayloads, setLoadingPayloads] = useState(false);
+
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [store, setStore] = useState(null);
   const [logViewer, setLogViewer] = useState(null);
 
-  const selectedSubstrateRef = useRef(requestedSubstrate);
+  // Substrate lock refs: every async operation verifies both substrate epoch and context generation.
+  const substrateEpochRef = useRef(0);
+  const lockedSubstrateRef = useRef("");
+  const contextGenRef = useRef(0);
   const selectedEventRef = useRef("");
   const selectedActivationRef = useRef("");
-  const contextGenRef = useRef(0);
+
+  const historyRequestRef = useRef(0);
+  const networkRequestRef = useRef(0);
   const payloadRequestRef = useRef(0);
   const boardRequestRef = useRef({});
   const wireRequestRef = useRef({});
-
   const budgetRequestRef = useRef(0);
   const observationRequestRef = useRef({});
-  const bootRequestRef = useRef(0);
-  const networkRequestRef = useRef(0);
 
-  const eventOptions = useMemo(
-    () =>
-      selectableEventRows(events).map((row) => {
-        const record = String(row.record);
-        const rowActivation = activationFromEvent(row);
-        const kind = row?.kind ? String(row.kind) : "";
-        return {
-          value: record,
-          label: `${kind ? `${kind} · ` : ""}Activation ${rowActivation} · ${record}`,
-        };
-      }),
-    [events],
+  const historyRows = useMemo(
+    () => (persistedHistory.substrate === substrate ? persistedHistory.rows : []),
+    [persistedHistory, substrate],
   );
 
-  const selectedEvents = useMemo(
-    () => events.filter((row) => activationFromEvent(row) === String(activation)),
-    [events, activation],
+  const historyDirectory = useMemo(
+    () => (persistedHistory.substrate === substrate ? persistedHistory.directory : ""),
+    [persistedHistory, substrate],
   );
 
-  const focusedEvent = useMemo(
-    () => events.find((row) => String(row?.record) === String(event)) || null,
-    [events, event],
+  const loadingHistory =
+    Boolean(substrate) &&
+    (persistedHistory.substrate !== substrate || persistedHistory.loading);
+
+  const isSubstrateLocked = useCallback(
+    (name, epoch) =>
+      Boolean(name) &&
+      epoch === substrateEpochRef.current &&
+      lockedSubstrateRef.current === name,
+    [],
   );
 
-  const retainedMass = useMemo(
-    () => selectedEvents.reduce((sum, row) => {
-      const value = row?.retained_mass ?? row?.heritage?.state?.retained_mass ?? "0";
-      return /^\d+$/.test(String(value)) ? sum + BigInt(value) : sum;
-    }, 0n),
-    [selectedEvents],
-  );
-
-  const payloadGroups = useMemo(() => {
-    const groups = new Map();
-    for (const payload of payloads) {
-      const id = payload.network.id;
-      if (!groups.has(id)) groups.set(id, { transit_inputs: [], exile_outputs: [], unclassified: [] });
-      groups.get(id)[payload.direction].push(payload);
-    }
-    return groups;
-  }, [payloads]);
-
-  const networkBudgetById = useMemo(() => {
-    const result = new Map();
-    for (const row of budgets) {
-      const network = normalizeNetwork(row.network);
-      if (network) result.set(network.id, row);
-    }
-    return result;
-  }, [budgets]);
-
-  // SegWit first, then Legacy, then other registered Bitcoin networks
-  const bitcoinSlots = useMemo(() => {
-    const buckets = { legacy: [], segwit: [], other: [] };
-    for (const network of networks) {
-      if (bitcoinNetwork(network)) buckets[bitcoinKind(network)].push(network);
-    }
-    const slots = [];
-    for (const kind of ["segwit", "legacy"]) {
-      if (buckets[kind].length === 0) slots.push({ kind, network: null });
-      else buckets[kind].forEach((network) => slots.push({ kind, network }));
-    }
-    buckets.other.forEach((network) => slots.push({ kind: "other", network }));
-    return slots;
-  }, [networks]);
-
-  const activationSelected = Boolean(substrate) && /^\d+$/.test(String(activation));
-
-  const observationRunning = networks.some(
-    (network) =>
-      bitcoinNetwork(network) &&
-      observations[network.id]?.running === true,
-  );
-
-  const anyNetworkLoading =
-    Object.values(loadingObservations).some(Boolean) ||
-    Object.values(loadingBoards).some(Boolean) ||
-    Object.values(loadingWire).some(Boolean) ||
-    Object.values(loadingBudgets).some(Boolean) ||
-    Object.values(savingBudgets).some(Boolean);
-
-  const overviewBadge = (() => {
-    if (!substrate || !event) return <Pill tone="warn">Missing context</Pill>;
-    if (loadingList) return <Pill>Loading</Pill>;
-    if (!activationSelected) return <Pill tone="warn">Resolving event</Pill>;
-    if (observationRunning) return <Pill tone="ok">Syncing</Pill>;
-    if (anyNetworkLoading || loadingPayloads) return <Pill>Loading data</Pill>;
-    if (Object.values(budgetErrors).some(Boolean)) return <Pill tone="warn">Budget error</Pill>;
-    if (error) return <Pill tone="warn">Partial</Pill>;
-    return <Pill tone="ok">Ready</Pill>;
-  })();
-
-  const isCurrentContext = useCallback((name, record, activationValue, generation) => {
-    return (
+  const isContextLocked = useCallback(
+    (name, record, activationValue, epoch, generation) =>
+      isSubstrateLocked(name, epoch) &&
       generation === contextGenRef.current &&
-      selectedSubstrateRef.current === name &&
       selectedEventRef.current === String(record) &&
-      selectedActivationRef.current === String(activationValue)
-    );
-  }, []);
+      selectedActivationRef.current === String(activationValue),
+    [isSubstrateLocked],
+  );
 
-  const clearActivationResources = useCallback(() => {
+  const clearActivationScopedState = useCallback(() => {
     payloadRequestRef.current += 1;
     boardRequestRef.current = {};
     wireRequestRef.current = {};
@@ -1257,8 +1191,6 @@ function EventStoreContent() {
     setLoadingObservations({});
     setLoadingBoards({});
     setLoadingWire({});
-    setBoardErrors({});
-    setWireErrors({});
     setStreamResults({});
     setLogViewer(null);
     setBudgetErrors({});
@@ -1268,460 +1200,479 @@ function EventStoreContent() {
     setSavingBudgets({});
   }, []);
 
-  const clearScopeData = useCallback(() => {
-    clearActivationResources();
-    setEvents([]);
-    setStore(null);
-    setEvent("");
-    setActivation("");
-    setNetworks([]);
-    networkRequestRef.current += 1;
-    selectedEventRef.current = "";
-    selectedActivationRef.current = "";
-  }, [clearActivationResources]);
-
-  const loadPayloadsForRecord = useCallback(async (name, record, activationValue) => {
-    const selectedActivation = String(activationValue);
-    const selectedRecord = String(record ?? "");
-    if (!name || !selectedRecord || !/^\d+$/.test(selectedActivation)) {
-      payloadRequestRef.current += 1;
-      setPayloads([]);
-      setLoadingPayloads(false);
-      return [];
-    }
-
-    const generation = contextGenRef.current;
-    const requestId = ++payloadRequestRef.current;
-    const isCurrent = () =>
-      requestId === payloadRequestRef.current &&
-      isCurrentContext(name, selectedRecord, selectedActivation, generation);
-
-    setLoadingPayloads(true);
-    try {
-      const body = await apiRequest(`/wallets/${enc(name)}/events/${enc(selectedRecord)}/payloads`);
-      if (!isCurrent()) return null;
-
-      const rows = Array.isArray(body?.payloads) ? body.payloads : [];
-      const unique = new Map();
-      rows.forEach((entry) => {
-        const normalized = normalizePayload(entry, selectedRecord);
-        if (!normalized) return;
-        const key = payloadRowKey(normalized);
-        if (!unique.has(key)) unique.set(key, normalized);
+  const clearSubstrateScopedState = useCallback(
+    (nextSubstrate = "") => {
+      clearActivationScopedState();
+      networkRequestRef.current += 1;
+      setNetworks([]);
+      setSelectedEvent("");
+      setSelectedActivation("");
+      selectedEventRef.current = "";
+      selectedActivationRef.current = "";
+      setPersistedHistory({
+        substrate: nextSubstrate,
+        rows: [],
+        directory: "",
+        loading: Boolean(nextSubstrate),
+        error: "",
       });
+    },
+    [clearActivationScopedState],
+  );
 
-      const collected = [...unique.values()];
-      setPayloads(collected);
-      return collected;
-    } catch (err) {
-      if (isCurrent()) {
-        setPayloads([]);
-        setError(`Unable to load payload records: ${err instanceof Error ? err.message : "unknown API error"}`);
-      }
-      return null;
-    } finally {
-      if (requestId === payloadRequestRef.current) setLoadingPayloads(false);
-    }
-  }, [isCurrentContext]);
-
-  const loadNetworks = useCallback(async (name, record, activationValue) => {
-    const generation = contextGenRef.current;
-    const requestId = ++networkRequestRef.current;
-    const isCurrent = () =>
-      requestId === networkRequestRef.current &&
-      isCurrentContext(name, record, activationValue, generation);
-
-    try {
-      const rows = await listNetworks();
-      if (!isCurrent()) return null;
-      setNetworks(rows);
-      return rows;
-    } catch (err) {
-      if (isCurrent()) {
-        setNetworks([]);
-        setError(
-          `Unable to load network registry: ${err instanceof Error ? err.message : "unknown API error"}`,
-        );
-      }
-      return null;
-    }
-  }, [isCurrentContext]);
-
-  // Persisted events: same runtime call as the Receive tab in src/app/page.js.
-  // Returns the normalized rows, or null when the request failed or is stale.
-  // A valid empty response ({ events: [] }) returns [] and is not an error.
-  const loadEvents = useCallback(async (name, bootId) => {
-    const isCurrent = () =>
-      bootId === bootRequestRef.current &&
-      selectedSubstrateRef.current === name;
-
+  // Always queries the runtime for persisted history of `name`.
+  const fetchRuntimeHistory = useCallback(async (name, epoch) => {
     if (!name) {
-      setEvents([]);
-      setStore(null);
-      return [];
+      setPersistedHistory(EMPTY_HISTORY);
+      return null;
     }
 
+    const requestId = ++historyRequestRef.current;
+    setPersistedHistory((current) => ({
+      substrate: name,
+      rows: current.substrate === name ? current.rows : [],
+      directory: current.substrate === name ? current.directory : "",
+      loading: true,
+      error: "",
+    }));
+
     try {
-      const data = await callRuntime("listEvents", { name });
-      if (!isCurrent()) return null;
-
-      const records = normalizePersistedEvents(data);
-
-      setEvents(records);
-      setStore(data);
-      return records;
-    } catch (err) {
-      if (isCurrent()) {
-        setEvents([]);
-        setPayloads([]);
-        setStore(null);
-        setError(
-          err instanceof Error && err.message
-            ? err.message
-            : "Unable to read persisted events.",
-        );
+      const response = await callRuntime("listEvents", { name });
+      if (requestId !== historyRequestRef.current || !isSubstrateLocked(name, epoch)) {
+        return null;
       }
-      return null;
-    }
-  }, []);
 
-  // Activation-scoped budget fetch.
-  // The endpoint returns the activation-wide budget set, but loading/errors
-  // are owned by each registered network.
-  const loadBudgets = useCallback(async (name, activationValue) => {
-    const networkIds = networks
-      .map((network) => normalizeNetworkId(network?.id))
-      .filter(Boolean);
-
-    if (!name || !/^\d+$/.test(String(activationValue))) {
-      budgetRequestRef.current += 1;
-      setLoadingBudgets({});
-      return null;
-    }
-
-    const selected = String(activationValue);
-    const generation = contextGenRef.current;
-    const requestId = ++budgetRequestRef.current;
-
-    const isCurrent = () =>
-      requestId === budgetRequestRef.current &&
-      generation === contextGenRef.current &&
-      selectedSubstrateRef.current === name &&
-      selectedActivationRef.current === selected;
-
-    setLoadingBudgets((current) => {
-      const next = { ...current };
-      for (const id of networkIds) next[id] = true;
-      return next;
-    });
-
-    for (const id of networkIds) {
-      setBudgetErrors((current) => ({ ...current, [id]: "" }));
-    }
-
-    try {
-      const body = await apiRequest(
-        `/wallets/${enc(name)}/activations/${enc(selected)}/budgets`,
-      );
-      if (!isCurrent()) return null;
-
-      const rows = Array.isArray(body?.budgets) ? body.budgets : [];
-      const filtered = rows.filter(
-        (row) => row?.activation == null || String(row.activation) === selected,
-      );
-      setBudgets(filtered);
-      return filtered;
+      const normalized = normalizePersistedHistoryResponse(response);
+      setPersistedHistory({
+        substrate: name,
+        rows: normalized.rows,
+        directory: normalized.directory,
+        loading: false,
+        error: "",
+      });
+      return normalized.rows;
     } catch (err) {
-      if (isCurrent()) {
-        setBudgets([]);
-        const message = err instanceof Error ? err.message : "API error";
-        for (const id of networkIds) {
-          setBudgetErrors((current) => ({
-            ...current,
-            [id]: `Unable to load network budget: ${message}`,
-          }));
+      if (requestId !== historyRequestRef.current || !isSubstrateLocked(name, epoch)) {
+        return null;
+      }
+
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : "Unable to read persisted events from the runtime.";
+
+      setPersistedHistory({
+        substrate: name,
+        rows: [],
+        directory: "",
+        loading: false,
+        error: message,
+      });
+      setError(message);
+      return null;
+    }
+  }, [isSubstrateLocked]);
+
+  const loadPayloadsForRecord = useCallback(
+    async (name, record, activationValue, epoch, generation) => {
+      const actStr = String(activationValue ?? "");
+      const recStr = String(record ?? "");
+      if (!name || !recStr || !/^\d+$/.test(actStr)) {
+        payloadRequestRef.current += 1;
+        setPayloads([]);
+        setLoadingPayloads(false);
+        return [];
+      }
+
+      const requestId = ++payloadRequestRef.current;
+      const current = () =>
+        requestId === payloadRequestRef.current &&
+        isContextLocked(name, recStr, actStr, epoch, generation);
+
+      setLoadingPayloads(true);
+      try {
+        const body = await apiRequest(
+          `/wallets/${enc(name)}/events/${enc(recStr)}/payloads`,
+        );
+        if (!current()) return null;
+
+        const rows = Array.isArray(body?.payloads) ? body.payloads : [];
+        const unique = new Map();
+        rows.forEach((entry) => {
+          const normalized = normalizePayload(entry, recStr);
+          if (!normalized) return;
+          const key = payloadRowKey(normalized);
+          if (!unique.has(key)) unique.set(key, normalized);
+        });
+
+        const collected = [...unique.values()];
+        setPayloads(collected);
+        return collected;
+      } catch (err) {
+        if (current()) {
+          setPayloads([]);
+          setError(
+            `Unable to load payload records: ${
+              err instanceof Error ? err.message : "unknown API error"
+            }`,
+          );
+        }
+        return null;
+      } finally {
+        if (requestId === payloadRequestRef.current) {
+          setLoadingPayloads(false);
         }
       }
-      return null;
-    } finally {
-      if (requestId === budgetRequestRef.current) {
-        setLoadingBudgets((current) => {
-          const next = { ...current };
-          for (const id of networkIds) next[id] = false;
-          return next;
-        });
+    },
+    [isContextLocked],
+  );
+
+  const loadNetworksForContext = useCallback(
+    async (name, record, activationValue, epoch, generation) => {
+      const requestId = ++networkRequestRef.current;
+      const current = () =>
+        requestId === networkRequestRef.current &&
+        isContextLocked(name, record, activationValue, epoch, generation);
+
+      try {
+        const rows = await listNetworks();
+        if (!current()) return null;
+        setNetworks(rows);
+        return rows;
+      } catch (err) {
+        if (current()) {
+          setNetworks([]);
+          setError(
+            `Unable to load network registry: ${
+              err instanceof Error ? err.message : "unknown API error"
+            }`,
+          );
+        }
+        return null;
       }
-    }
-  }, [networks]);
+    },
+    [isContextLocked],
+  );
 
-  const loadPayloadBoardForNetwork = useCallback(async (name, activationValue, network) => {
-    const id = normalizeNetworkId(network?.id);
-    if (!name || !id || !/^\d+$/.test(String(activationValue))) return;
+  const loadBudgetsForContext = useCallback(
+    async (name, record, activationValue, networkRows, epoch, generation) => {
+      const actStr = String(activationValue ?? "");
+      const networkIds = (networkRows || [])
+        .map((network) => normalizeNetworkId(network?.id))
+        .filter(Boolean);
 
-    const selected = String(activationValue);
-    const generation = contextGenRef.current;
-    const requestId = (boardRequestRef.current[id] = (boardRequestRef.current[id] || 0) + 1);
-
-    const isCurrent = () =>
-      boardRequestRef.current[id] === requestId &&
-      generation === contextGenRef.current &&
-      selectedSubstrateRef.current === name &&
-      selectedActivationRef.current === selected;
-
-    setLoadingBoards((c) => ({ ...c, [id]: true }));
-    setBoardErrors((c) => ({ ...c, [id]: "" }));
-
-    try {
-      const body = await apiRequest(
-        `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(id)}/payload-board`,
-      );
-      if (!isCurrent()) return;
-      if (body?.activation != null && String(body.activation) !== selected) return;
-      setBoards((c) => ({ ...c, [id]: body }));
-    } catch (err) {
-      if (isCurrent()) {
-        setBoardErrors((c) => ({
-          ...c,
-          [id]: err instanceof Error ? err.message : "Unable to load payload board.",
-        }));
+      if (!name || !/^\d+$/.test(actStr)) {
+        budgetRequestRef.current += 1;
+        setLoadingBudgets({});
+        return null;
       }
-    } finally {
-      if (isCurrent()) {
-        setLoadingBoards((c) => ({ ...c, [id]: false }));
+
+      const requestId = ++budgetRequestRef.current;
+      const current = () =>
+        requestId === budgetRequestRef.current &&
+        isContextLocked(name, record, actStr, epoch, generation);
+
+      setLoadingBudgets((prev) => {
+        const next = { ...prev };
+        for (const id of networkIds) next[id] = true;
+        return next;
+      });
+      setBudgetErrors((prev) => {
+        const next = { ...prev };
+        for (const id of networkIds) next[id] = "";
+        return next;
+      });
+
+      try {
+        const body = await apiRequest(
+          `/wallets/${enc(name)}/activations/${enc(actStr)}/budgets`,
+        );
+        if (!current()) return null;
+
+        const rows = Array.isArray(body?.budgets) ? body.budgets : [];
+        const filtered = rows.filter(
+          (row) => row?.activation == null || String(row.activation) === actStr,
+        );
+        setBudgets(filtered);
+        return filtered;
+      } catch (err) {
+        if (current()) {
+          setBudgets([]);
+          const message = err instanceof Error ? err.message : "API error";
+          setBudgetErrors((prev) => {
+            const next = { ...prev };
+            for (const id of networkIds) {
+              next[id] = `Unable to load network budget: ${message}`;
+            }
+            return next;
+          });
+        }
+        return null;
+      } finally {
+        if (requestId === budgetRequestRef.current) {
+          setLoadingBudgets((prev) => {
+            const next = { ...prev };
+            for (const id of networkIds) next[id] = false;
+            return next;
+          });
+        }
       }
-    }
-  }, []);
+    },
+    [isContextLocked],
+  );
 
-  const loadWirePacketsForNetwork = useCallback(async (name, activationValue, network) => {
-    const id = normalizeNetworkId(network?.id);
-    if (!name || !id || !/^\d+$/.test(String(activationValue)) || !bitcoinNetwork(network)) return;
+  const loadPayloadBoardForNetwork = useCallback(
+    async (name, record, activationValue, network, epoch, generation) => {
+      const id = normalizeNetworkId(network?.id);
+      const actStr = String(activationValue ?? "");
+      if (!name || !id || !/^\d+$/.test(actStr)) return;
 
-    const selected = String(activationValue);
-    const generation = contextGenRef.current;
-    const requestId = (wireRequestRef.current[id] = (wireRequestRef.current[id] || 0) + 1);
+      const requestId = (boardRequestRef.current[id] =
+        (boardRequestRef.current[id] || 0) + 1);
+      const current = () =>
+        boardRequestRef.current[id] === requestId &&
+        isContextLocked(name, record, actStr, epoch, generation);
 
-    const isCurrent = () =>
-      wireRequestRef.current[id] === requestId &&
-      generation === contextGenRef.current &&
-      selectedSubstrateRef.current === name &&
-      selectedActivationRef.current === selected;
-
-    setLoadingWire((c) => ({ ...c, [id]: true }));
-    setWireErrors((c) => ({ ...c, [id]: "" }));
-
-    try {
-      const metadata = await apiRequest(
-        `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(id)}/wirepackets`,
-      );
-      if (!isCurrent()) return;
-      if (metadata?.activation != null && String(metadata.activation) !== selected) return;
-      setWirePackets((c) => ({ ...c, [id]: metadata }));
-    } catch (err) {
-      if (isCurrent()) {
-        setWireErrors((c) => ({
-          ...c,
-          [id]: err instanceof Error ? err.message : "Unable to load WirePackets.",
-        }));
+      setLoadingBoards((c) => ({ ...c, [id]: true }));
+      try {
+        const body = await apiRequest(
+          `/wallets/${enc(name)}/activations/${enc(actStr)}/networks/${enc(id)}/payload-board`,
+        );
+        if (!current()) return;
+        if (body?.activation != null && String(body.activation) !== actStr) return;
+        setBoards((c) => ({ ...c, [id]: body }));
+      } catch {
+        // Error surfaced via board response or overview state if needed.
+      } finally {
+        if (boardRequestRef.current[id] === requestId) {
+          setLoadingBoards((c) => ({ ...c, [id]: false }));
+        }
       }
-    } finally {
-      if (isCurrent()) {
-        setLoadingWire((c) => ({ ...c, [id]: false }));
+    },
+    [isContextLocked],
+  );
+
+  const loadWirePacketsForNetwork = useCallback(
+    async (name, record, activationValue, network, epoch, generation) => {
+      const id = normalizeNetworkId(network?.id);
+      const actStr = String(activationValue ?? "");
+      if (!name || !id || !/^\d+$/.test(actStr) || !bitcoinNetwork(network)) return;
+
+      const requestId = (wireRequestRef.current[id] =
+        (wireRequestRef.current[id] || 0) + 1);
+      const current = () =>
+        wireRequestRef.current[id] === requestId &&
+        isContextLocked(name, record, actStr, epoch, generation);
+
+      setLoadingWire((c) => ({ ...c, [id]: true }));
+      try {
+        const metadata = await apiRequest(
+          `/wallets/${enc(name)}/activations/${enc(actStr)}/networks/${enc(id)}/wirepackets`,
+        );
+        if (!current()) return;
+        if (metadata?.activation != null && String(metadata.activation) !== actStr) return;
+        setWirePackets((c) => ({ ...c, [id]: metadata }));
+      } catch {
+        // Handled per card / poll.
+      } finally {
+        if (wireRequestRef.current[id] === requestId) {
+          setLoadingWire((c) => ({ ...c, [id]: false }));
+        }
       }
-    }
-  }, []);
+    },
+    [isContextLocked],
+  );
 
-  const loadObservationForNetwork = useCallback(async (name, activationValue, network) => {
-    const id = normalizeNetworkId(network?.id);
-    if (!name || !id || !/^\d+$/.test(String(activationValue)) || !bitcoinNetwork(network)) return;
+  const loadObservationForNetwork = useCallback(
+    async (name, record, activationValue, network, epoch, generation) => {
+      const id = normalizeNetworkId(network?.id);
+      const actStr = String(activationValue ?? "");
+      if (!name || !id || !/^\d+$/.test(actStr) || !bitcoinNetwork(network)) return;
 
-    const selected = String(activationValue);
-    const generation = contextGenRef.current;
-    const requestId = (observationRequestRef.current[id] = (observationRequestRef.current[id] || 0) + 1);
+      const requestId = (observationRequestRef.current[id] =
+        (observationRequestRef.current[id] || 0) + 1);
+      const current = () =>
+        observationRequestRef.current[id] === requestId &&
+        isContextLocked(name, record, actStr, epoch, generation);
 
-    const isCurrent = () =>
-      observationRequestRef.current[id] === requestId &&
-      generation === contextGenRef.current &&
-      selectedSubstrateRef.current === name &&
-      selectedActivationRef.current === selected;
+      setLoadingObservations((c) => ({ ...c, [id]: true }));
+      setObservationErrors((c) => ({ ...c, [id]: "" }));
 
-    setLoadingObservations((c) => ({ ...c, [id]: true }));
-    setObservationErrors((c) => ({ ...c, [id]: "" }));
+      try {
+        const status = await apiRequest(
+          `/wallets/${enc(name)}/activations/${enc(actStr)}/networks/${enc(id)}/observation`,
+        );
+        if (!current()) return;
+        if (!observationMatches(status, id, actStr)) {
+          setObservationErrors((c) => ({
+            ...c,
+            [id]: "Observation status response did not match this network.",
+          }));
+          return;
+        }
+        setObservations((c) => ({ ...c, [id]: status }));
+      } catch (err) {
+        if (current()) {
+          setObservationErrors((c) => ({
+            ...c,
+            [id]:
+              err instanceof Error
+                ? err.message
+                : "Unable to load observation status.",
+          }));
+        }
+      } finally {
+        if (observationRequestRef.current[id] === requestId) {
+          setLoadingObservations((c) => ({ ...c, [id]: false }));
+        }
+      }
+    },
+    [isContextLocked],
+  );
 
-    try {
-      const status = await apiRequest(
-        `/wallets/${enc(name)}/activations/${enc(selected)}/networks/${enc(id)}/observation`,
-      );
-      if (!isCurrent()) return;
-      if (!observationMatches(status, id, selected)) {
-        setObservationErrors((c) => ({
-          ...c,
-          [id]: "Observation status response did not match this network.",
-        }));
+  const hydrateActivationContext = useCallback(
+    async (name, record, activationValue, epoch, generation, existingNetworks = null) => {
+      clearActivationScopedState();
+      selectedEventRef.current = String(record);
+      selectedActivationRef.current = String(activationValue);
+      setSelectedEvent(String(record));
+      setSelectedActivation(String(activationValue));
+
+      const networkRows =
+        existingNetworks ??
+        (await loadNetworksForContext(name, record, activationValue, epoch, generation));
+
+      if (!networkRows || !isContextLocked(name, record, activationValue, epoch, generation)) {
         return;
       }
-      setObservations((c) => ({ ...c, [id]: status }));
-    } catch (err) {
-      if (isCurrent()) {
-        setObservationErrors((c) => ({
-          ...c,
-          [id]: err instanceof Error ? err.message : "Unable to load observation status.",
-        }));
-      }
-    } finally {
-      if (isCurrent()) {
-        setLoadingObservations((c) => ({ ...c, [id]: false }));
-      }
-    }
-  }, []);
 
-  const loadActivationResources = useCallback(
-    (name, record, activationValue, networkRows, isCurrent) => {
-      const selected = String(activationValue);
-
-      void loadPayloadsForRecord(name, record, selected);
+      void loadPayloadsForRecord(name, record, activationValue, epoch, generation);
 
       void (async () => {
-        try {
-          const budgetRows = await loadBudgets(name, selected);
-          if (!isCurrent()) return;
-          if (budgetRows !== null) {
-            for (const network of (networkRows || []).filter(bitcoinNetwork)) {
-              void loadWirePacketsForNetwork(name, selected, network);
-            }
-          }
-        } catch (err) {
-          if (isCurrent()) {
-            setError(
-              err instanceof Error
-                ? `Unable to load activation resources: ${err.message}`
-                : "Unable to load activation resources.",
+        const budgetRows = await loadBudgetsForContext(
+          name,
+          record,
+          activationValue,
+          networkRows,
+          epoch,
+          generation,
+        );
+        if (
+          budgetRows !== null &&
+          isContextLocked(name, record, activationValue, epoch, generation)
+        ) {
+          for (const network of networkRows.filter(bitcoinNetwork)) {
+            void loadWirePacketsForNetwork(
+              name,
+              record,
+              activationValue,
+              network,
+              epoch,
+              generation,
             );
           }
         }
       })();
 
-      for (const network of networkRows || []) {
+      for (const network of networkRows) {
         if (bitcoinNetwork(network)) {
-          void loadObservationForNetwork(name, selected, network);
+          void loadObservationForNetwork(
+            name,
+            record,
+            activationValue,
+            network,
+            epoch,
+            generation,
+          );
         }
-        void loadPayloadBoardForNetwork(name, selected, network);
+        void loadPayloadBoardForNetwork(
+          name,
+          record,
+          activationValue,
+          network,
+          epoch,
+          generation,
+        );
       }
     },
     [
+      clearActivationScopedState,
+      isContextLocked,
+      loadNetworksForContext,
       loadPayloadsForRecord,
-      loadBudgets,
+      loadBudgetsForContext,
       loadWirePacketsForNetwork,
       loadObservationForNetwork,
       loadPayloadBoardForNetwork,
     ],
   );
 
-  const loadInitial = useCallback(async () => {
-    const bootId = ++bootRequestRef.current;
+  // Substrate change effect: locks substrate, always calls runtime for events,
+  // and populates persistedHistory directly from the runtime response.
+  useEffect(() => {
+    const epoch = ++substrateEpochRef.current;
+    const generation = ++contextGenRef.current;
+    lockedSubstrateRef.current = substrate;
 
-    setLoadingList(true);
     setError("");
     setNotice("");
 
     if (!substrate) {
-      clearScopeData();
-      setNetworks([]);
-      setLoadingList(false);
+      clearSubstrateScopedState("");
       setError("Event Store requires a substrate query parameter.");
       return;
     }
 
-    selectedSubstrateRef.current = substrate;
-    selectedActivationRef.current = "";
-    selectedEventRef.current = "";
-    contextGenRef.current += 1;
+    clearSubstrateScopedState(substrate);
 
-    // Clears stale events from the previous substrate before the new request.
-    clearScopeData();
+    void (async () => {
+      const rows = await fetchRuntimeHistory(substrate, epoch);
+      if (!rows || !isSubstrateLocked(substrate, epoch)) return;
 
-    try {
-      const eventRows = await loadEvents(substrate, bootId);
-
-      if (bootId !== bootRequestRef.current) return;
-      if (eventRows === null) return;
-
-      const validEvents = selectableEventRows(eventRows);
-
-      if (validEvents.length === 0) {
-        setNetworks([]);
-        setEvent("");
-        setActivation("");
-        selectedEventRef.current = "";
-        selectedActivationRef.current = "";
-        if (eventRows.length === 0) {
-          setNotice("No persisted event records found for this substrate.");
-        } else {
-          setError(`The API returned ${eventRows.length} persisted event row(s), but none reports both a record and an activation, so none can be selected. They are listed under Diagnostics.`);
-        }
+      if (rows.length === 0) {
+        setNotice("No persisted event records found for this substrate.");
         return;
       }
 
-      const matched = validEvents[0];
-      const selectedRecord = String(matched.record);
-      const selectedActivation = activationFromEvent(matched);
-
-      selectedEventRef.current = selectedRecord;
-      selectedActivationRef.current = selectedActivation;
-
-      setEvent(selectedRecord);
-      setActivation(selectedActivation);
-
-      const networkRows = await loadNetworks(substrate, selectedRecord, selectedActivation);
-
-      if (networkRows === null || bootId !== bootRequestRef.current) return;
-
-      loadActivationResources(
-        substrate,
-        selectedRecord,
-        selectedActivation,
-        networkRows,
-        () =>
-          bootId === bootRequestRef.current &&
-          selectedSubstrateRef.current === substrate &&
-          selectedEventRef.current === selectedRecord &&
-          selectedActivationRef.current === selectedActivation,
-      );
-    } catch (err) {
-      if (bootId !== bootRequestRef.current) return;
-
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to load Event Store.",
-      );
-    } finally {
-      if (bootId === bootRequestRef.current) {
-        setLoadingList(false);
+      const selectable = extractSelectableEvents(rows);
+      if (selectable.length === 0) {
+        setNotice(
+          "Persisted history loaded; select or provide an activation-scoped event to inspect network resources.",
+        );
+        return;
       }
-    }
+
+      const initial = selectable[0];
+      await hydrateActivationContext(
+        substrate,
+        initial.record,
+        initial.activation,
+        epoch,
+        generation,
+      );
+    })();
   }, [
     substrate,
-    clearScopeData,
-    loadEvents,
-    loadNetworks,
-    loadActivationResources,
+    clearSubstrateScopedState,
+    fetchRuntimeHistory,
+    isSubstrateLocked,
+    hydrateActivationContext,
   ]);
 
-  useEffect(() => {
-    loadInitial();
-  }, [loadInitial]);
-
+  // Event selector only updates the chosen event/activation context when an
+  // option is explicitly chosen; it never gates or overwrites persistedHistory.
   const handleSelectEvent = useCallback(
     (value) => {
       const requested = String(value ?? "");
-      const row = selectableEventRows(events).find(
-        (candidate) => String(candidate.record) === requested,
-      );
-      if (!row) return;
+      if (!requested) return;
 
-      const nextRecord = String(row.record);
-      const nextActivation = activationFromEvent(row);
-      if (nextActivation === null) return;
+      const candidate = extractSelectableEvents(historyRows).find(
+        (row) => String(row.record) === requested,
+      );
+      if (!candidate) return;
+
+      const nextRecord = String(candidate.record);
+      const nextActivation = String(candidate.activation);
 
       if (
         nextRecord === selectedEventRef.current &&
@@ -1730,34 +1681,132 @@ function EventStoreContent() {
         return;
       }
 
-      const name = substrate;
-      if (!name || selectedSubstrateRef.current !== name) return;
+      const name = lockedSubstrateRef.current;
+      const epoch = substrateEpochRef.current;
+      if (!isSubstrateLocked(name, epoch)) return;
 
-      contextGenRef.current += 1;
-      const generation = contextGenRef.current;
-      selectedEventRef.current = nextRecord;
-      selectedActivationRef.current = nextActivation;
-
-      setEvent(nextRecord);
-      setActivation(nextActivation);
+      const generation = ++contextGenRef.current;
       setError("");
       setNotice("");
 
-      clearActivationResources();
-
-      loadActivationResources(name, nextRecord, nextActivation, networks, () =>
-        isCurrentContext(name, nextRecord, nextActivation, generation),
+      void hydrateActivationContext(
+        name,
+        nextRecord,
+        nextActivation,
+        epoch,
+        generation,
+        networks.length > 0 ? networks : null,
       );
     },
-    [
-      events,
-      substrate,
-      networks,
-      clearActivationResources,
-      loadActivationResources,
-      isCurrentContext,
-    ],
+    [historyRows, isSubstrateLocked, hydrateActivationContext, networks],
   );
+
+  const eventOptions = useMemo(
+    () =>
+      extractSelectableEvents(historyRows).map((row) => {
+        const record = String(row.record);
+        const rowActivation = activationFromEvent(row);
+        const kind = row?.kind ? String(row.kind) : "";
+        return {
+          value: record,
+          label: `${kind ? `${kind} · ` : ""}Activation ${rowActivation} · ${record}`,
+        };
+      }),
+    [historyRows],
+  );
+
+  const selectedEvents = useMemo(
+    () =>
+      /^\d+$/.test(String(selectedActivation))
+        ? historyRows.filter(
+            (row) => activationFromEvent(row) === String(selectedActivation),
+          )
+        : [],
+    [historyRows, selectedActivation],
+  );
+
+  const focusedEvent = useMemo(
+    () =>
+      historyRows.find(
+        (row) => String(row?.record ?? "") === String(selectedEvent),
+      ) || null,
+    [historyRows, selectedEvent],
+  );
+
+  const retainedMass = useMemo(
+    () =>
+      selectedEvents.reduce((sum, row) => {
+        const value =
+          row?.retained_mass ?? row?.heritage?.state?.retained_mass ?? "0";
+        return /^\d+$/.test(String(value)) ? sum + BigInt(value) : sum;
+      }, 0n),
+    [selectedEvents],
+  );
+
+  const payloadGroups = useMemo(() => {
+    const groups = new Map();
+    for (const payload of payloads) {
+      const id = payload.network.id;
+      if (!groups.has(id)) {
+        groups.set(id, {
+          transit_inputs: [],
+          exile_outputs: [],
+          unclassified: [],
+        });
+      }
+      groups.get(id)[payload.direction].push(payload);
+    }
+    return groups;
+  }, [payloads]);
+
+  const networkBudgetById = useMemo(() => {
+    const result = new Map();
+    for (const row of budgets) {
+      const network = normalizeNetwork(row.network);
+      if (network) result.set(network.id, row);
+    }
+    return result;
+  }, [budgets]);
+
+  const bitcoinSlots = useMemo(() => {
+    const buckets = { legacy: [], segwit: [], other: [] };
+    for (const network of networks) {
+      if (bitcoinNetwork(network)) buckets[bitcoinKind(network)].push(network);
+    }
+    const slots = [];
+    for (const kind of ["segwit", "legacy"]) {
+      if (buckets[kind].length === 0) slots.push({ kind, network: null });
+      else buckets[kind].forEach((network) => slots.push({ kind, network }));
+    }
+    buckets.other.forEach((network) => slots.push({ kind: "other", network }));
+    return slots;
+  }, [networks]);
+
+  const activationSelected =
+    Boolean(substrate) && /^\d+$/.test(String(selectedActivation));
+
+  const observationRunning = networks.some(
+    (network) =>
+      bitcoinNetwork(network) && observations[network.id]?.running === true,
+  );
+
+  const anyNetworkLoading =
+    Object.values(loadingObservations).some(Boolean) ||
+    Object.values(loadingBoards).some(Boolean) ||
+    Object.values(loadingWire).some(Boolean) ||
+    Object.values(loadingBudgets).some(Boolean) ||
+    Object.values(savingBudgets).some(Boolean);
+
+  const overviewBadge = (() => {
+    if (!substrate) return <Pill tone="warn">Missing substrate</Pill>;
+    if (loadingHistory) return <Pill>Loading history</Pill>;
+    if (!activationSelected) return <Pill tone="neutral">History only</Pill>;
+    if (observationRunning) return <Pill tone="ok">Syncing</Pill>;
+    if (anyNetworkLoading || loadingPayloads) return <Pill>Loading data</Pill>;
+    if (Object.values(budgetErrors).some(Boolean)) return <Pill tone="warn">Budget error</Pill>;
+    if (error || persistedHistory.error) return <Pill tone="warn">Partial</Pill>;
+    return <Pill tone="ok">Ready</Pill>;
+  })();
 
   const runningBitcoinNetworkIds = useMemo(
     () =>
@@ -1771,13 +1820,15 @@ function EventStoreContent() {
   );
 
   useEffect(() => {
-    if (!substrate || !/^\d+$/.test(String(activation))) return;
+    if (!substrate || !/^\d+$/.test(String(selectedActivation))) return;
 
     const networkIds = JSON.parse(runningBitcoinNetworkIds);
     if (!networkIds.length) return;
 
-    const selectedSubstrate = substrate;
-    const selectedActivation = String(activation);
+    const activeSubstrate = substrate;
+    const activeActivation = String(selectedActivation);
+    const activeEvent = selectedEventRef.current;
+    const epoch = substrateEpochRef.current;
     const generation = contextGenRef.current;
 
     let cancelled = false;
@@ -1788,17 +1839,26 @@ function EventStoreContent() {
         networkIds.map(async (networkId) => {
           try {
             const metadata = await apiRequest(
-              `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(networkId)}/wirepackets`,
+              `/wallets/${enc(activeSubstrate)}/activations/${enc(activeActivation)}/networks/${enc(networkId)}/wirepackets`,
             );
             if (
               cancelled ||
-              generation !== contextGenRef.current ||
-              selectedSubstrateRef.current !== selectedSubstrate ||
-              selectedActivationRef.current !== selectedActivation
+              !isContextLocked(
+                activeSubstrate,
+                activeEvent,
+                activeActivation,
+                epoch,
+                generation,
+              )
             ) {
               return;
             }
-            if (metadata?.activation != null && String(metadata.activation) !== selectedActivation) return;
+            if (
+              metadata?.activation != null &&
+              String(metadata.activation) !== activeActivation
+            ) {
+              return;
+            }
             setWirePackets((current) => ({ ...current, [networkId]: metadata }));
           } catch {
             // Poll failures stay local.
@@ -1817,7 +1877,12 @@ function EventStoreContent() {
       cancelled = true;
       if (timeoutId !== null) window.clearTimeout(timeoutId);
     };
-  }, [substrate, activation, runningBitcoinNetworkIds]);
+  }, [
+    substrate,
+    selectedActivation,
+    runningBitcoinNetworkIds,
+    isContextLocked,
+  ]);
 
   const appendStreamResult = (networkId, label, body) => {
     setStreamResults((current) => ({
@@ -1836,20 +1901,28 @@ function EventStoreContent() {
 
   const observationScope = (network) => {
     const id = normalizeNetworkId(network?.id);
-    const selectedSubstrate = substrate;
-    const selectedActivation = String(activation);
-    const selectedRecord = selectedEventRef.current;
+    const activeSubstrate = substrate;
+    const activeActivation = String(selectedActivation);
+    const activeEvent = selectedEventRef.current;
+    const epoch = substrateEpochRef.current;
     const generation = contextGenRef.current;
+
     return {
       id,
-      valid: Boolean(id) && Boolean(selectedSubstrate) && /^\d+$/.test(selectedActivation),
-      route: `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(id)}/observation`,
-      activation: selectedActivation,
+      valid:
+        Boolean(id) &&
+        Boolean(activeSubstrate) &&
+        /^\d+$/.test(activeActivation),
+      route: `/wallets/${enc(activeSubstrate)}/activations/${enc(activeActivation)}/networks/${enc(id)}/observation`,
+      activation: activeActivation,
       stale: () =>
-        generation !== contextGenRef.current ||
-        selectedSubstrateRef.current !== selectedSubstrate ||
-        selectedEventRef.current !== selectedRecord ||
-        selectedActivationRef.current !== selectedActivation,
+        !isContextLocked(
+          activeSubstrate,
+          activeEvent,
+          activeActivation,
+          epoch,
+          generation,
+        ),
     };
   };
 
@@ -1875,7 +1948,10 @@ function EventStoreContent() {
       if (!scope.stale()) {
         setObservationErrors((current) => ({
           ...current,
-          [id]: err instanceof Error ? err.message : "Unable to retrieve bit-miner process status.",
+          [id]:
+            err instanceof Error
+              ? err.message
+              : "Unable to retrieve bit-miner process status.",
         }));
       }
     } finally {
@@ -1892,16 +1968,27 @@ function EventStoreContent() {
     setBusyObservation((current) => ({ ...current, [id]: true }));
     setObservationErrors((current) => ({ ...current, [id]: "" }));
     try {
-      const result = await apiRequest(scope.route, { method: action === "start" ? "POST" : "DELETE" });
+      const result = await apiRequest(scope.route, {
+        method: action === "start" ? "POST" : "DELETE",
+      });
       if (scope.stale()) return;
       appendStreamResult(id, `${action.toUpperCase()} observation response`, result);
 
       const status = await readObservationStatus(scope);
       if (status === null) return;
-      appendStreamResult(id, action === "start" ? "Initial process status" : "Process status after stop", status);
+      appendStreamResult(
+        id,
+        action === "start" ? "Initial process status" : "Process status after stop",
+        status,
+      );
     } catch (err) {
       if (scope.stale()) return;
-      const failure = { error: err instanceof Error ? err.message : "Bitcoin bit-miner request failed." };
+      const failure = {
+        error:
+          err instanceof Error
+            ? err.message
+            : "Bitcoin bit-miner request failed.",
+      };
       appendStreamResult(id, `${action.toUpperCase()} request error`, failure);
       setObservationErrors((current) => ({ ...current, [id]: failure.error }));
     } finally {
@@ -1913,13 +2000,22 @@ function EventStoreContent() {
 
   const saveBudget = async (network, draft) => {
     const id = normalizeNetworkId(network.id);
-    const selectedSubstrate = substrate;
-    const selectedActivation = String(activation);
+    const activeSubstrate = substrate;
+    const activeActivation = String(selectedActivation);
+    const activeEvent = selectedEventRef.current;
+    const epoch = substrateEpochRef.current;
     const generation = contextGenRef.current;
+
+    if (!/^\d+$/.test(activeActivation)) return;
+
     const stale = () =>
-      generation !== contextGenRef.current ||
-      selectedSubstrateRef.current !== selectedSubstrate ||
-      selectedActivationRef.current !== selectedActivation;
+      !isContextLocked(
+        activeSubstrate,
+        activeEvent,
+        activeActivation,
+        epoch,
+        generation,
+      );
 
     setBudgetErrors((current) => ({ ...current, [id]: "" }));
     setBudgetNotices((current) => ({ ...current, [id]: "" }));
@@ -1943,7 +2039,7 @@ function EventStoreContent() {
 
     try {
       await apiRequest(
-        `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(id)}/budgets`,
+        `/wallets/${enc(activeSubstrate)}/activations/${enc(activeActivation)}/networks/${enc(id)}/budgets`,
         {
           method: "PUT",
           body: JSON.stringify({
@@ -1953,7 +2049,14 @@ function EventStoreContent() {
         },
       );
       if (stale()) return;
-      await loadBudgets(selectedSubstrate, selectedActivation);
+      await loadBudgetsForContext(
+        activeSubstrate,
+        activeEvent,
+        activeActivation,
+        networks,
+        epoch,
+        generation,
+      );
       if (stale()) return;
       setBudgetNotices((current) => ({
         ...current,
@@ -1963,9 +2066,10 @@ function EventStoreContent() {
       if (stale()) return;
       setBudgetErrors((current) => ({
         ...current,
-        [id]: err instanceof Error
-          ? err.message
-          : "Unable to save network budget.",
+        [id]:
+          err instanceof Error
+            ? err.message
+            : "Unable to save network budget.",
       }));
     } finally {
       if (!stale()) {
@@ -1977,25 +2081,34 @@ function EventStoreContent() {
   const activeLogViewer =
     logViewer &&
     logViewer.substrate === substrate &&
-    logViewer.activation === String(activation) &&
+    logViewer.activation === String(selectedActivation) &&
     bitcoinSlots.some((slot) => slot.network?.id === logViewer.network)
       ? logViewer
       : null;
 
   const openBitMinerLogs = (network) => {
-    if (!substrate || !network?.id || !/^\d+$/.test(String(activation))) return;
-    setLogViewer({ substrate, activation: String(activation), network: network.id });
+    if (!substrate || !network?.id || !/^\d+$/.test(String(selectedActivation))) {
+      return;
+    }
+    setLogViewer({
+      substrate,
+      activation: String(selectedActivation),
+      network: network.id,
+    });
   };
 
   const closeBitMinerLogs = useCallback(() => setLogViewer(null), []);
 
   const eventsEmptyText = substrate
-    ? "No persisted event records were returned."
+    ? loadingHistory
+      ? "Loading persisted events from runtime…"
+      : "No persisted event records were returned."
     : "A substrate must be supplied by the parent route.";
 
-  const eventPlaceholder =
-    eventOptions.length === 0
-      ? "No persisted events"
+  const eventPlaceholder = loadingHistory
+    ? "Loading events…"
+    : eventOptions.length === 0
+      ? "No selectable events"
       : "Select an event";
 
   const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
@@ -2037,11 +2150,11 @@ function EventStoreContent() {
               <select
                 aria-label="Select persisted event"
                 className={INPUT}
-                value={event}
-                disabled={!substrate || eventOptions.length === 0}
+                value={selectedEvent}
+                disabled={!substrate || loadingHistory || eventOptions.length === 0}
                 onChange={(changeEvent) => handleSelectEvent(changeEvent.target.value)}
               >
-                {!event && (
+                {!selectedEvent && (
                   <option value="" disabled>
                     {eventPlaceholder}
                   </option>
@@ -2064,7 +2177,7 @@ function EventStoreContent() {
           title="Overview"
           subtitle={
             substrate
-              ? `${substrate} · Event ${event || "—"}`
+              ? `${substrate} · Event ${selectedEvent || "—"}`
               : "No context from parent route"
           }
           badge={overviewBadge}
@@ -2072,14 +2185,14 @@ function EventStoreContent() {
         >
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
             <Stat label="Substrate" value={substrate || "—"} wide />
-            <Stat label="Event" value={event || "—"} wide />
-            <Stat label="Activation" value={activation || "—"} />
+            <Stat label="Event" value={selectedEvent || "—"} wide />
+            <Stat label="Activation" value={selectedActivation || "—"} />
             <Stat label="Events (activation)" value={selectedEvents.length} />
-            <Stat label="All events" value={events.length} />
+            <Stat label="All events" value={historyRows.length} />
             <Stat label="Retained mass" value={retainedMass.toString()} />
             <Stat label="API base" value={API_BASE} wide />
-            {store?.directory && (
-              <Stat label="Substrate directory" value={store.directory} wide />
+            {historyDirectory && (
+              <Stat label="Substrate directory" value={historyDirectory} wide />
             )}
             {focusedEvent && (
               <Stat label="Focused kind" value={money(focusedEvent.kind)} />
@@ -2096,7 +2209,7 @@ function EventStoreContent() {
               network={slot.network}
               defaultOpen={index === 0}
               index={index}
-              activation={activation}
+              activation={selectedActivation}
               budgetRow={id ? networkBudgetById.get(id) : undefined}
               group={(id && payloadGroups.get(id)) || emptyGroup}
               board={id ? boards[id] : undefined}
@@ -2154,10 +2267,11 @@ function EventStoreContent() {
         <SectionHeading title="Diagnostics" />
 
         <Card
+          defaultOpen
           scroll
           title="Persisted event records"
-          subtitle="GET /wallets/:name/events"
-          badge={<Pill>{events.length}</Pill>}
+          subtitle="Runtime listEvents / GET /wallets/:name/events"
+          badge={<Pill>{historyRows.length}</Pill>}
           className="w-full"
         >
           <div className="hidden overflow-x-auto rounded-xl border border-zinc-200 lg:block dark:border-zinc-800">
@@ -2180,13 +2294,17 @@ function EventStoreContent() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                {events.map((row, index) => {
+                {historyRows.map((row, index) => {
                   const state = row?.heritage?.state;
-                  const isFocused = String(row?.record) === String(event);
+                  const isFocused =
+                    Boolean(selectedEvent) &&
+                    String(row?.record ?? "") === String(selectedEvent);
                   return (
                     <tr
-                      key={`${row?.record}-${index}`}
-                      className={`align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/50 ${isFocused ? "bg-emerald-50/60 dark:bg-emerald-950/30" : ""}`}
+                      key={`${row?.record ?? "row"}-${index}`}
+                      className={`align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/50 ${
+                        isFocused ? "bg-emerald-50/60 dark:bg-emerald-950/30" : ""
+                      }`}
                     >
                       <td className="whitespace-nowrap px-4 py-3 font-mono">
                         {activationFromEvent(row) ?? money(row?.activation)}
@@ -2194,7 +2312,11 @@ function EventStoreContent() {
                       <td className="px-4 py-3">{money(row?.kind)}</td>
                       <td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">
                         {money(row?.record)}
-                        {isFocused && <span className="ml-2 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">focused</span>}
+                        {isFocused && (
+                          <span className="ml-2 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
+                            focused
+                          </span>
+                        )}
                       </td>
                       <td className="break-all px-4 py-3 font-mono">
                         {money(row?.dimension ?? state?.dimension)}
@@ -2209,7 +2331,7 @@ function EventStoreContent() {
                     </tr>
                   );
                 })}
-                {events.length === 0 && (
+                {historyRows.length === 0 && (
                   <tr>
                     <td
                       colSpan={7}
@@ -2224,13 +2346,17 @@ function EventStoreContent() {
           </div>
 
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:hidden">
-            {events.map((row, index) => {
+            {historyRows.map((row, index) => {
               const state = row?.heritage?.state;
-              const isFocused = String(row?.record) === String(event);
+              const isFocused =
+                Boolean(selectedEvent) &&
+                String(row?.record ?? "") === String(selectedEvent);
               return (
                 <article
-                  key={`${row?.record}-card-${index}`}
-                  className={`${INNER} p-3 ${isFocused ? "ring-2 ring-emerald-400/60" : ""}`}
+                  key={`${row?.record ?? "row"}-card-${index}`}
+                  className={`${INNER} p-3 ${
+                    isFocused ? "ring-2 ring-emerald-400/60" : ""
+                  }`}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <h4 className="min-w-0 break-all text-sm font-semibold">
@@ -2242,7 +2368,11 @@ function EventStoreContent() {
                   </div>
                   <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">
                     {money(row?.record)}
-                    {isFocused && <span className="ml-2 text-[10px] font-semibold text-emerald-600">focused</span>}
+                    {isFocused && (
+                      <span className="ml-2 text-[10px] font-semibold text-emerald-600">
+                        focused
+                      </span>
+                    )}
                   </p>
                   <div className="mt-3">
                     <Fields min="7rem">
@@ -2263,7 +2393,7 @@ function EventStoreContent() {
                 </article>
               );
             })}
-            {events.length === 0 && (
+            {historyRows.length === 0 && (
               <p className="col-span-full rounded-xl border border-zinc-200 p-4 text-sm text-zinc-500 dark:border-zinc-800">
                 {eventsEmptyText}
               </p>
