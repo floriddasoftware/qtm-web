@@ -1312,11 +1312,11 @@ const loadEvents = useCallback(async (name) => {
   if (!name) {
     setEvents([]);
     setStore(null);
-    return null;
+    return [];
   }
 
   try {
-    const data = await apiRequest(
+    const response = await apiRequest(
       `/wallets/${enc(name)}/events`,
     );
 
@@ -1324,19 +1324,25 @@ const loadEvents = useCallback(async (name) => {
       return null;
     }
 
-    const records = eventRecordsOf(data).map((row) => {
-      const record = recordNameOf(row);
-      const activation = activationFromEvent(row);
+    const persistedEvents = Array.isArray(response?.events)
+      ? response.events
+      : [];
 
-      return {
+    const records = persistedEvents
+      .filter(
+        (row) =>
+          row &&
+          typeof row.record === "string" &&
+          /^\d+$/.test(String(row.activation)),
+      )
+      .map((row) => ({
         ...row,
-        record,
-        activation,
-      };
-    });
+        record: row.record,
+        activation: String(row.activation),
+      }));
 
     setEvents(records);
-    setStore(data);
+    setStore(response);
 
     return records;
   } catch (err) {
@@ -1347,7 +1353,7 @@ const loadEvents = useCallback(async (name) => {
       setError(
         err instanceof Error
           ? err.message
-          : "Unable to load persisted events.",
+          : "Unable to read persisted events.",
       );
     }
 
