@@ -130,6 +130,13 @@ function normalizeNetworkId(value) {
   return String(value).trim();
 }
 
+function observationMatches(status, networkId, activationValue) {
+  if (!status || typeof status !== "object") return false;
+  if (status.network != null && normalizeNetworkId(status.network) !== networkId) return false;
+  if (status.activation != null && String(status.activation) !== String(activationValue)) return false;
+  return true;
+}
+
 function normalizeNetwork(network) {
   const id = normalizeNetworkId(network?.id);
   if (!id) return null;
@@ -668,23 +675,53 @@ function BitMinerLogPopup({ substrate, activation, network, running, onClose, on
   );
 }
 
-function StreamBody({ status, busy, results, network, onAction, onRefresh, onViewLogs }) {
+function StreamBody({ status, busy, results, network, actionError, onAction, onRefresh, onViewLogs }) {
+  const known = typeof status?.running === "boolean";
   const running = status?.running === true;
+  const observedAt =
+    status?.runtime?.unix_seconds != null
+      ? new Date(Number(status.runtime.unix_seconds) * 1000).toLocaleString()
+      : null;
+  const clips = Array.isArray(status?.clips) ? status.clips : [];
+  const eventPath = status?.event_path ?? status?.path;
   return (
     <div className="space-y-3">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <Pill tone={running ? "ok" : "warn"}>{running ? "Running" : status?.running === false ? "Stopped" : "Unknown"}</Pill>
-        {status?.pid && <span className="text-xs text-zinc-500">PID {status.pid}</span>}
-        {status?.submissions != null && <span className="text-xs text-zinc-500">Submissions {status.submissions}</span>}
+        <Pill tone={running ? "ok" : known ? "neutral" : "warn"}>{running ? "Running" : known ? "Idle" : "Unknown"}</Pill>
+        {status?.pid != null && <span className="text-xs text-zinc-500">PID {status.pid}</span>}
       </div>
+      {status && (
+        <Fields min="7rem">
+          <Field label="Process">{running ? "Running" : known ? "Not running" : "Not reported"}</Field>
+          <Field label="PID">{money(status.pid)}</Field>
+          <Field label="Activation">{money(status.activation)}</Field>
+          <Field label="Network"><span className="break-all font-mono text-xs">{money(status.network)}</span></Field>
+          <Field label="Status read">{money(observedAt)}</Field>
+        </Fields>
+      )}
       <div className="grid grid-cols-3 gap-2">
         <button type="button" className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`} disabled={busy || running} onClick={() => onAction("start", network)}>{busy ? "Working…" : "Start"}</button>
         <button type="button" className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`} disabled={busy} onClick={() => onRefresh(network)}>Refresh</button>
         <button type="button" className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`} disabled={busy || !running} onClick={() => onAction("stop", network)}>Stop</button>
       </div>
+      {actionError && <Notice>{actionError}</Notice>}
       {status?.error && <Notice>{status.error}</Notice>}
-      {status?.path && <p className="break-all font-mono text-[10px] text-zinc-500">Event path: {status.path}</p>}
+      {eventPath && <p className="break-all font-mono text-[10px] text-zinc-500">Event path: {eventPath}</p>}
       {status?.log_path && <p className="break-all font-mono text-[10px] text-zinc-500">Process log: {status.log_path}</p>}
+      {clips.length > 0 && (
+        <div>
+          <h5 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Observation clips</h5>
+          <ul className="mt-1 space-y-1">
+            {clips.map((clip, index) => (
+              <li key={`${clip?.substrate}-${index}`} className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                <span className="break-all font-mono">{money(clip?.substrate)}</span>
+                <Pill tone={clip?.active ? "ok" : "neutral"}>{clip?.active ? "Active" : "Inactive"}</Pill>
+                {clip?.direction && <span>{clip.direction}</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <div>
         <div className="flex items-center justify-between">
           <h5 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">BitMiner responses</h5>
@@ -703,7 +740,7 @@ function StreamBody({ status, busy, results, network, onAction, onRefresh, onVie
               <pre className="overflow-x-auto whitespace-pre-wrap break-all text-[10px] leading-4 text-zinc-700 dark:text-zinc-300">{JSON.stringify(entry.body, null, 2)}</pre>
             </div>
           ))}
-          {results.length === 0 && <p className="py-2 text-xs text-zinc-500">Start bit-miner to launch its window loop. Refresh checks process status without adding another response entry.</p>}
+          {results.length === 0 && <p className="py-2 text-xs text-zinc-500">Start bit-miner to launch its window loop. Refresh reads the API process status without adding another response entry.</p>}
         </div>
       </div>
     </div>
@@ -859,7 +896,7 @@ function PayloadRecordsBody({ group }) {
 
 function NetworkCard({
   kind, network, defaultOpen, index, activation, budgetRow, group, board, wire,
-  observation, busy, results, loadingBoards, loadingBudgets, loadingWire,
+  observation, observationError, busy, results, loadingBoards, loadingBudgets, loadingWire,
   budgetError, budgetNotice, onSaveBudget, onStreamAction, onRefreshStream, onViewLogs,
 }) {
   const meta = BITCOIN_KINDS[kind];
@@ -873,6 +910,10 @@ function NetworkCard({
     );
   }
 
+  const status =
+    observation && (observation.network == null || normalizeNetworkId(observation.network) === network.id)
+      ? observation
+      : undefined;
   const budget = budgetRow?.budget || null;
   const configured = Boolean(budgetRow?.configured && budget);
   const payloadKind = ownPayloadKind(board, network);
@@ -894,8 +935,8 @@ function NetworkCard({
         <Card inner scroll title="Payload board" badge={<Pill tone={payloadKind?.available ? "ok" : "neutral"}>{payloadKind ? (payloadKind.available ? "Available" : "Unavailable") : "None"}</Pill>}>
           <PayloadBoard board={board} kind={payloadKind} loading={loadingBoards} />
         </Card>
-        <Card inner title="Bit-miner" badge={<Pill tone={observation?.running === true ? "ok" : "neutral"}>{observation?.running === true ? "Running" : "Idle"}</Pill>}>
-          <StreamBody status={observation} busy={busy} results={results} network={network} onAction={onStreamAction} onRefresh={onRefreshStream} onViewLogs={onViewLogs} />
+        <Card inner title="Bit-miner" badge={<Pill tone={status?.running === true ? "ok" : "neutral"}>{status?.running === true ? "Running" : status?.running === false ? "Idle" : "Unknown"}</Pill>}>
+          <StreamBody status={status} busy={busy} results={results} network={network} actionError={observationError} onAction={onStreamAction} onRefresh={onRefreshStream} onViewLogs={onViewLogs} />
         </Card>
         <Card inner title="Wirepackets file" badge={<Pill tone={wire?.exists ? "ok" : "neutral"}>{wire?.exists ? "Present" : "None"}</Pill>}>
           <WirePacketsBody metadata={wire} loading={loadingWire} />
@@ -941,6 +982,7 @@ function EventStoreContent() {
   const [wirePackets, setWirePackets] = useState({});
   const [observations, setObservations] = useState({});
   const [busyObservation, setBusyObservation] = useState({});
+  const [observationErrors, setObservationErrors] = useState({});
   const [streamResults, setStreamResults] = useState({});
   const [loadingList, setLoadingList] = useState(false);
   const [loadingEvents, setLoadingEvents] = useState(false);
@@ -1090,6 +1132,7 @@ function EventStoreContent() {
     setWirePackets({});
     setObservations({});
     setBusyObservation({});
+    setObservationErrors({});
     setStreamResults({});
     setLogViewer(null);
     setBudgetErrors({});
@@ -1413,14 +1456,23 @@ function EventStoreContent() {
       if (!isCurrent()) return null;
 
       const next = {};
+      const nextErrors = {};
       results.forEach((result, index) => {
-        if (result.status !== "fulfilled") return;
-        const status = result.value;
-        if (status?.activation != null && String(status.activation) !== selected) return;
-        next[btcNetworks[index].id] = status;
+        const id = btcNetworks[index].id;
+        if (result.status !== "fulfilled") {
+          nextErrors[id] = `Unable to load observation status: ${result.reason instanceof Error ? result.reason.message : "API error"}`;
+          return;
+        }
+        if (!observationMatches(result.value, id, selected)) {
+          nextErrors[id] = "Observation status response did not match this network.";
+          return;
+        }
+        next[id] = result.value;
+        nextErrors[id] = "";
       });
 
       setObservations(next);
+      setObservationErrors((current) => ({ ...current, ...nextErrors }));
       return next;
     } finally {
       if (requestId === observationRequestRef.current) {
@@ -1694,63 +1746,81 @@ function EventStoreContent() {
     }));
   };
 
-  const refreshStream = async (network) => {
-    const id = network.id;
+  const observationScope = (network) => {
+    const id = normalizeNetworkId(network?.id);
     const selectedSubstrate = substrate;
     const selectedActivation = String(activation);
+    const selectedRecord = selectedEventRef.current;
     const generation = contextGenRef.current;
-    const stale = () =>
-      generation !== contextGenRef.current ||
-      selectedSubstrateRef.current !== selectedSubstrate ||
-      selectedActivationRef.current !== selectedActivation;
-    const route = `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(id)}/observation`;
+    return {
+      id,
+      valid: Boolean(id) && Boolean(selectedSubstrate) && /^\d+$/.test(selectedActivation),
+      route: `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(id)}/observation`,
+      activation: selectedActivation,
+      stale: () =>
+        generation !== contextGenRef.current ||
+        selectedSubstrateRef.current !== selectedSubstrate ||
+        selectedEventRef.current !== selectedRecord ||
+        selectedActivationRef.current !== selectedActivation,
+    };
+  };
+
+  // GET .../observation — the only source of the status shown in the card.
+  const readObservationStatus = async (scope) => {
+    const status = await apiRequest(scope.route);
+    if (scope.stale()) return null;
+    if (!observationMatches(status, scope.id, scope.activation)) {
+      throw new Error("Observation status response did not match this network.");
+    }
+    setObservations((current) => ({ ...current, [scope.id]: status }));
+    return status;
+  };
+
+  const refreshStream = async (network) => {
+    const scope = observationScope(network);
+    if (!scope.valid) return;
+    const { id } = scope;
     setBusyObservation((current) => ({ ...current, [id]: true }));
+    setObservationErrors((current) => ({ ...current, [id]: "" }));
     try {
-      const status = await apiRequest(route);
-      if (stale()) return;
-      setObservations((current) => ({ ...current, [id]: status }));
+      await readObservationStatus(scope);
     } catch (err) {
-      if (!stale()) {
-        setError(err instanceof Error ? err.message : "Unable to retrieve bit-miner process status.");
+      if (!scope.stale()) {
+        setObservationErrors((current) => ({
+          ...current,
+          [id]: err instanceof Error ? err.message : "Unable to retrieve bit-miner process status.",
+        }));
       }
     } finally {
-      if (!stale()) {
+      if (!scope.stale()) {
         setBusyObservation((current) => ({ ...current, [id]: false }));
       }
     }
   };
 
+  // POST (start) / DELETE (stop) return action responses without a `running`
+  // flag, so they are logged only; the card status is re-read with GET.
   const streamAction = async (action, network) => {
-    const id = network.id;
-    const selectedSubstrate = substrate;
-    const selectedActivation = String(activation);
-    const generation = contextGenRef.current;
-    const stale = () =>
-      generation !== contextGenRef.current ||
-      selectedSubstrateRef.current !== selectedSubstrate ||
-      selectedActivationRef.current !== selectedActivation;
-    const route = `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(id)}/observation`;
+    const scope = observationScope(network);
+    if (!scope.valid) return;
+    const { id } = scope;
     setBusyObservation((current) => ({ ...current, [id]: true }));
+    setObservationErrors((current) => ({ ...current, [id]: "" }));
     try {
-      const result = await apiRequest(route, { method: action === "start" ? "POST" : "DELETE" });
-      if (stale()) return;
+      const result = await apiRequest(scope.route, { method: action === "start" ? "POST" : "DELETE" });
+      if (scope.stale()) return;
       appendStreamResult(id, `${action.toUpperCase()} observation response`, result);
-      setObservations((current) => ({ ...current, [id]: result }));
 
-      if (action === "start") {
-        const status = await apiRequest(route);
-        if (stale()) return;
-        appendStreamResult(id, "Initial process status", status);
-        setObservations((current) => ({ ...current, [id]: status }));
-      }
-      setNotice(result?.message || `Bitcoin bit-miner ${action} request completed.`);
+      const status = await readObservationStatus(scope);
+      if (status === null) return;
+      appendStreamResult(id, action === "start" ? "Initial process status" : "Process status after stop", status);
     } catch (err) {
-      if (stale()) return;
+      if (scope.stale()) return;
       const failure = { error: err instanceof Error ? err.message : "Bitcoin bit-miner request failed." };
       appendStreamResult(id, `${action.toUpperCase()} request error`, failure);
-      setError(failure.error);
+      setObservationErrors((current) => ({ ...current, [id]: failure.error }));
     } finally {
-      if (!stale()) {
+      if (!scope.stale()) {
         setBusyObservation((current) => ({ ...current, [id]: false }));
       }
     }
@@ -1936,6 +2006,7 @@ function EventStoreContent() {
               board={id ? boards[id] : undefined}
               wire={id ? wirePackets[id] : undefined}
               observation={id ? observations[id] : undefined}
+              observationError={id ? observationErrors[id] : ""}
               busy={id ? busyObservation[id] === true : false}
               results={(id && streamResults[id]) || []}
               loadingBoards={loadingBoards}
