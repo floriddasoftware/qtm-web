@@ -647,21 +647,53 @@ function BitMinerLogPopup({ substrate, activation, network, running, onClose, on
           </div>
         </div>
 
+       
         <div className="relative flex min-h-0 flex-1 flex-col bg-zinc-950">
-          {error && <div role="alert" className="shrink-0 break-words border-b border-red-900/60 bg-red-950 px-4 py-2 text-xs leading-5 text-red-200">{error}{hasLog ? " Showing the last output received." : ""}</div></div>}
-          <div ref={scrollRef} onScroll={handleScroll} tabIndex={0} aria-label="Bit-miner process log output" className="min-h-[16rem] flex-1 overflow-auto overscroll-contain px-4 py-3 sm:px-5">
+          {error && (
+            <div
+              role="alert"
+              className="shrink-0 break-words border-b border-red-900/60 bg-red-950 px-4 py-2 text-xs leading-5 text-red-200"
+            >
+              {error}
+              {hasLog ? " Showing the last output received." : ""}
+            </div>
+          )}
+
+          <div
+            ref={scrollRef}
+            onScroll={handleScroll}
+            tabIndex={0}
+            aria-label="Bit-miner process log output"
+            className="min-h-[16rem] flex-1 overflow-auto overscroll-contain px-4 py-3 sm:px-5"
+          >
             {loading && log === null ? (
               <p className="text-xs text-zinc-400">Loading log…</p>
             ) : hasLog ? (
-              <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-zinc-100 sm:text-xs">{log}</pre>
+              <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-zinc-100 sm:text-xs">
+                {log}
+              </pre>
             ) : error && log === null ? (
-              <p className="text-xs text-zinc-400">The log could not be loaded.</p>
+              <p className="text-xs text-zinc-400">
+                The log could not be loaded.
+              </p>
             ) : (
-              <p className="text-xs text-zinc-400">No log output yet. Output appears here once the bit-miner process writes to its log.</p>
+              <p className="text-xs text-zinc-400">
+                No log output yet. Output appears here once the bit-miner process writes to its log.
+              </p>
             )}
           </div>
-          {!pinned && hasLog && <button type="button" onClick={jumpToLatest} className="absolute bottom-3 right-4 rounded-full border border-zinc-600 bg-zinc-800/95 px-3 py-1.5 text-[11px] font-medium text-zinc-100 shadow-lg transition hover:bg-zinc-700">Jump to latest ↓</button>}
+
+          {!pinned && hasLog && (
+            <button
+              type="button"
+              onClick={jumpToLatest}
+              className="absolute bottom-3 right-4 rounded-full border border-zinc-600 bg-zinc-800/95 px-3 py-1.5 text-[11px] font-medium text-zinc-100 shadow-lg transition hover:bg-zinc-700"
+            >
+              Jump to latest ↓
+            </button>
+          )}
         </div>
+
 
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 px-4 py-2.5 text-[10px] text-zinc-500 sm:px-5 dark:border-zinc-800 dark:text-zinc-400">
           <span>{updatedAt ? `Updated ${updatedAt.toLocaleTimeString()}` : "Waiting for first response…"}</span>
