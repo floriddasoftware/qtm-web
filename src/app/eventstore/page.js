@@ -1012,7 +1012,7 @@ function EventStoreContent() {
   const [networks, setNetworks] = useState([]);
   const [payloads, setPayloads] = useState([]);
   const [loadingList, setLoadingList] = useState(false);
-  const [loadingEvents, setLoadingEvents] = useState(false);
+
   const [loadingPayloads, setLoadingPayloads] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -1026,7 +1026,7 @@ function EventStoreContent() {
   const payloadRequestRef = useRef(0);
   const boardRequestRef = useRef({});
   const wireRequestRef = useRef({});
-  const eventsRequestRef = useRef(0);
+
   const budgetRequestRef = useRef(0);
   const observationRequestRef = useRef({});
   const bootRequestRef = useRef(0);
@@ -1240,57 +1240,47 @@ function EventStoreContent() {
     }
   }, [isCurrentContext]);
 
-  const loadEvents = useCallback(async (name) => {
-    if (!name) {
-      eventsRequestRef.current += 1;
-      setLoadingEvents(false);
+const loadEvents = useCallback(async (name) => {
+  if (!name) {
+    setEvents([]);
+    setStore(null);
+    return null;
+  }
+
+  setError("");
+
+  try {
+    const eventBody = await apiRequest(
+      `/wallets/${enc(name)}/events`,
+    );
+
+    if (selectedSubstrateRef.current !== name) {
+      return null;
+    }
+
+    const nextEvents = Array.isArray(eventBody?.events)
+      ? eventBody.events
+      : [];
+
+    setEvents(nextEvents);
+    setStore(eventBody);
+
+    return nextEvents;
+  } catch (err) {
+    if (selectedSubstrateRef.current === name) {
       setEvents([]);
+      setPayloads([]);
       setStore(null);
-      return null;
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load events.",
+      );
     }
 
-    const requestId = ++eventsRequestRef.current;
-    setLoadingEvents(true);
-    setError("");
-
-    try {
-      const eventBody = await apiRequest(`/wallets/${enc(name)}/events`);
-
-      if (
-        requestId !== eventsRequestRef.current ||
-        selectedSubstrateRef.current !== name
-      ) {
-        return null;
-      }
-
-      const nextEvents = Array.isArray(eventBody?.events)
-        ? eventBody.events
-        : [];
-
-      setEvents(nextEvents);
-      setStore(eventBody);
-      return nextEvents;
-    } catch (err) {
-      if (
-        requestId === eventsRequestRef.current &&
-        selectedSubstrateRef.current === name
-      ) {
-        setEvents([]);
-        setPayloads([]);
-        setStore(null);
-        setError(
-          err instanceof Error
-            ? err.message
-            : "Unable to load events.",
-        );
-      }
-      return null;
-    } finally {
-      if (requestId === eventsRequestRef.current) {
-        setLoadingEvents(false);
-      }
-    }
-  }, []);
+    return null;
+  }
+}, []);
 
   // Activation-scoped budget fetch.
   // The endpoint returns the activation-wide budget set, but loading/errors
@@ -1896,19 +1886,16 @@ function EventStoreContent() {
 
   const closeBitMinerLogs = useCallback(() => setLogViewer(null), []);
 
-  const eventsEmptyText = loadingEvents
-    ? "Loading persisted events…"
-    : substrate
-      ? "No persisted event records were returned."
-      : "A substrate must be supplied by the parent route.";
+const eventsEmptyText = substrate
+  ? "No persisted event records were returned."
+  : "A substrate must be supplied by the parent route.";
 
-  const eventPlaceholder = loadingList || loadingEvents
-    ? "Loading events…"
-    : eventOptions.length === 0
-      ? "No persisted events"
-      : "Select an event";
-
-  const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
+const eventPlaceholder =
+  eventOptions.length === 0
+    ? "No persisted events"
+    : "Select an event";
+    
+const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
 
   return (
     <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
@@ -1948,7 +1935,7 @@ function EventStoreContent() {
                 aria-label="Select persisted event"
                 className={INPUT}
                 value={event}
-                disabled={!substrate || loadingList || eventOptions.length === 0}
+               disabled={!substrate || eventOptions.length === 0}
                 onChange={(changeEvent) => handleSelectEvent(changeEvent.target.value)}
               >
                 {!event && (
