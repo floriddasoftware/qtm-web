@@ -109,6 +109,22 @@ function activationFromEvent(event) {
     : String(value);
 }
 
+// Persisted rows that can safely become the active context: a non-empty record
+// identifier and a valid numeric activation. Duplicate record identifiers are
+// collapsed (first occurrence wins) so a dropdown value is never ambiguous.
+function selectableEventRows(rows) {
+  const seen = new Set();
+  const result = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const record = String(row?.record ?? "");
+    if (record.trim() === "" || seen.has(record)) continue;
+    if (activationFromEvent(row) === null) continue;
+    seen.add(record);
+    result.push(row);
+  }
+  return result;
+}
+
 function normalizeNetwork(network) {
   if (!network || typeof network.id !== "string") return null;
   return {
@@ -215,17 +231,6 @@ function money(value) {
 
 function flag(value) {
   return value == null ? "Not reported" : value ? "Yes" : "No";
-}
-
-function eventOptionLabel(row) {
-  const record = String(row?.record ?? "");
-  const kind = row?.kind ? String(row.kind) : "";
-  const act = activationFromEvent(row);
-  const parts = [];
-  if (kind) parts.push(kind);
-  if (act != null) parts.push(`act ${act}`);
-  if (record) parts.push(record);
-  return parts.length > 0 ? parts.join(" · ") : "Unknown event";
 }
 
 /* ───────────────────────── UI primitives ───────────────────────── */
@@ -891,11 +896,17 @@ function NetworkCard({
 /* ───────────────────────── Page ─────────────────────────
  *
  * Entry contract (from parent route):
- *   substrate — search param, required
+ *   substrate — search param, required (the only accepted parameter)
  *
- * The Event Store is a receiver. It does not discover substrates.
- * Persisted events are loaded from GET /wallets/:name/events.
- * The native event dropdown switches event + activation context instantly.
+ * The Event Store is a receiver. It does not discover substrates,
+ * list wallets, or fall back to a first substrate.
+ *
+ * Persisted event records are resolved internally from the substrate
+ * (GET /wallets/:name/events) and exposed through a native <select>.
+ * The active scope is { substrate, event, activation }. Activation-scoped
+ * resources (budgets, boards, observation, wirepackets) use the numeric
+ * activation derived from the selected persisted event; event-scoped
+ * resources (payloads) use the selected event's record.
  */
 
 function EventStoreContent() {
@@ -929,19 +940,32 @@ function EventStoreContent() {
   const [budgetLoadError, setBudgetLoadError] = useState("");
   const [store, setStore] = useState(null);
   const [logViewer, setLogViewer] = useState(null);
-  const [refreshStage, setRefreshStage] = useState("");
-  const [refreshLog, setRefreshLog] = useState([]);
 
   const selectedSubstrateRef = useRef(requestedSubstrate);
-  const selectedActivationRef = useRef("");
   const selectedEventRef = useRef("");
+  const selectedActivationRef = useRef("");
+  const contextGenRef = useRef(0);
   const payloadRequestRef = useRef(0);
   const boardRequestRef = useRef(0);
   const wireRequestRef = useRef(0);
   const eventsRequestRef = useRef(0);
   const budgetRequestRef = useRef(0);
+  const observationRequestRef = useRef(0);
   const bootRequestRef = useRef(0);
-  const contextGenRef = useRef(0);
+
+  const eventOptions = useMemo(
+    () =>
+      selectableEventRows(events).map((row) => {
+        const record = String(row.record);
+        const rowActivation = activationFromEvent(row);
+        const kind = row?.kind ? String(row.kind) : "";
+        return {
+          value: record,
+          label: `${kind ? `${kind} · ` : ""}Activation ${rowActivation} · ${record}`,
+        };
+      }),
+    [events],
+  );
 
   const selectedEvents = useMemo(
     () => events.filter((row) => activationFromEvent(row) === String(activation)),
@@ -1002,18 +1026,6 @@ function EventStoreContent() {
     return slots;
   }, [renderedNetworks]);
 
-  const eventOptions = useMemo(() => {
-    const seen = new Set();
-    const options = [];
-    for (const row of events) {
-      const record = String(row?.record ?? "");
-      if (!record || seen.has(record)) continue;
-      seen.add(record);
-      options.push({ record, row });
-    }
-    return options;
-  }, [events]);
-
   const configuredCount = budgets.filter(
     (row) => row.configured && row.budget,
   ).length;
@@ -1036,10 +1048,9 @@ function EventStoreContent() {
   const anyLoading = requiredScopeLoading || loadingPayloads;
 
   const overviewBadge = (() => {
-    if (!substrate) return <Pill tone="warn">Missing substrate</Pill>;
+    if (!substrate || !event) return <Pill tone="warn">Missing context</Pill>;
     if (loadingList) return <Pill>Loading</Pill>;
-    if (events.length === 0 && !loadingEvents) return <Pill tone="warn">No events</Pill>;
-    if (!event || !activationSelected) return <Pill tone="warn">Select event</Pill>;
+    if (!activationSelected) return <Pill tone="warn">Resolving event</Pill>;
     if (loadingObservations) return <Pill>Checking observation</Pill>;
     if (observationRunning) return <Pill tone="ok">Syncing</Pill>;
     if (anyLoading) return <Pill>Loading data</Pill>;
@@ -1048,57 +1059,81 @@ function EventStoreContent() {
     return <Pill tone="ok">Ready</Pill>;
   })();
 
-  const isCurrentEventScope = useCallback((name, activationValue, record, requestId, requestRef) => {
+  // A request is current only while the full context (substrate, event,
+  // activation) and the context generation it started under are unchanged.
+  const isCurrentContext = useCallback((name, record, activationValue, generation) => {
     return (
-      requestId === requestRef.current &&
+      generation === contextGenRef.current &&
       selectedSubstrateRef.current === name &&
-      selectedActivationRef.current === String(activationValue) &&
-      selectedEventRef.current === String(record)
+      selectedEventRef.current === String(record) &&
+      selectedActivationRef.current === String(activationValue)
     );
   }, []);
 
+  // Clears only resources that belong to the selected event/activation
+  // context and invalidates their outstanding requests. The persisted event
+  // list is untouched.
   const clearActivationResources = useCallback(() => {
+    payloadRequestRef.current += 1;
+    boardRequestRef.current += 1;
+    wireRequestRef.current += 1;
+    budgetRequestRef.current += 1;
+    observationRequestRef.current += 1;
+
     setPayloads([]);
     setBudgets([]);
     setBoards({});
     setWirePackets({});
     setObservations({});
+    setBusyObservation({});
     setStreamResults({});
     setLogViewer(null);
     setBudgetErrors({});
     setBudgetNotices({});
     setBudgetLoadError("");
+    setLoadingPayloads(false);
+    setLoadingBudgets(false);
+    setLoadingBoards(false);
+    setLoadingWire(false);
+    setLoadingObservations(false);
   }, []);
 
+  // Full reset used by the initial loader, including the event list.
   const clearScopeData = useCallback(() => {
-    setEvents([]);
     clearActivationResources();
+    setEvents([]);
     setStore(null);
     setEvent("");
     setActivation("");
-    selectedActivationRef.current = "";
     selectedEventRef.current = "";
+    selectedActivationRef.current = "";
   }, [clearActivationResources]);
 
   const loadPayloadsForRecord = useCallback(async (name, record, activationValue) => {
     const selectedActivation = String(activationValue);
-    if (!name || !record || !/^\d+$/.test(selectedActivation)) {
+    const selectedRecord = String(record ?? "");
+    if (!name || !selectedRecord || !/^\d+$/.test(selectedActivation)) {
       payloadRequestRef.current += 1;
       setPayloads([]);
       setLoadingPayloads(false);
       return [];
     }
 
+    const generation = contextGenRef.current;
     const requestId = ++payloadRequestRef.current;
+    const isCurrent = () =>
+      requestId === payloadRequestRef.current &&
+      isCurrentContext(name, selectedRecord, selectedActivation, generation);
+
     setLoadingPayloads(true);
     try {
-      const body = await apiRequest(`/wallets/${enc(name)}/events/${enc(record)}/payloads`);
-      if (!isCurrentEventScope(name, selectedActivation, record, requestId, payloadRequestRef)) return null;
+      const body = await apiRequest(`/wallets/${enc(name)}/events/${enc(selectedRecord)}/payloads`);
+      if (!isCurrent()) return null;
 
       const rows = Array.isArray(body?.payloads) ? body.payloads : [];
       const unique = new Map();
       rows.forEach((entry) => {
-        const normalized = normalizePayload(entry, record);
+        const normalized = normalizePayload(entry, selectedRecord);
         if (!normalized) return;
         const key = payloadRowKey(normalized);
         if (!unique.has(key)) unique.set(key, normalized);
@@ -1108,7 +1143,7 @@ function EventStoreContent() {
       setPayloads(collected);
       return collected;
     } catch (err) {
-      if (isCurrentEventScope(name, selectedActivation, record, requestId, payloadRequestRef)) {
+      if (isCurrent()) {
         setPayloads([]);
         setError(`Unable to load payload records: ${err instanceof Error ? err.message : "unknown API error"}`);
       }
@@ -1116,7 +1151,7 @@ function EventStoreContent() {
     } finally {
       if (requestId === payloadRequestRef.current) setLoadingPayloads(false);
     }
-  }, [isCurrentEventScope]);
+  }, [isCurrentContext]);
 
   const loadEvents = useCallback(async (name) => {
     if (!name) {
@@ -1178,28 +1213,25 @@ function EventStoreContent() {
       return null;
     }
     const selected = String(activationValue);
+    const generation = contextGenRef.current;
     const requestId = ++budgetRequestRef.current;
+    const isCurrent = () =>
+      requestId === budgetRequestRef.current &&
+      generation === contextGenRef.current &&
+      selectedSubstrateRef.current === name &&
+      selectedActivationRef.current === selected;
+
     setLoadingBudgets(true);
     setBudgetLoadError("");
     try {
       const body = await apiRequest(`/wallets/${enc(name)}/activations/${enc(selected)}/budgets`);
-      if (
-        requestId !== budgetRequestRef.current ||
-        selectedSubstrateRef.current !== name ||
-        selectedActivationRef.current !== selected
-      ) {
-        return null;
-      }
+      if (!isCurrent()) return null;
       const rows = Array.isArray(body?.budgets) ? body.budgets : [];
       const filtered = rows.filter((row) => row?.activation == null || String(row.activation) === selected);
       setBudgets(filtered);
       return filtered;
     } catch (err) {
-      if (
-        requestId === budgetRequestRef.current &&
-        selectedSubstrateRef.current === name &&
-        selectedActivationRef.current === selected
-      ) {
+      if (isCurrent()) {
         setBudgets([]);
         const message = err instanceof Error ? err.message : "API error";
         setBudgetLoadError(`Unable to load network budgets: ${message}`);
@@ -1215,11 +1247,13 @@ function EventStoreContent() {
 
   const loadPayloadBoards = useCallback(async (name, activationValue, networkRows) => {
     if (!name || !/^\d+$/.test(String(activationValue))) {
+      boardRequestRef.current += 1;
       setLoadingBoards(false);
       return;
     }
 
     const selected = String(activationValue);
+    const generation = contextGenRef.current;
     const requestId = ++boardRequestRef.current;
     const activeNetworks = (networkRows || [])
       .map(normalizeNetwork)
@@ -1227,6 +1261,7 @@ function EventStoreContent() {
 
     const isCurrent = () =>
       requestId === boardRequestRef.current &&
+      generation === contextGenRef.current &&
       selectedSubstrateRef.current === name &&
       selectedActivationRef.current === selected;
 
@@ -1260,11 +1295,13 @@ function EventStoreContent() {
 
   const loadWirePackets = useCallback(async (name, activationValue, networkRows) => {
     if (!name || !/^\d+$/.test(String(activationValue))) {
+      wireRequestRef.current += 1;
       setLoadingWire(false);
       return;
     }
 
     const selected = String(activationValue);
+    const generation = contextGenRef.current;
     const requestId = ++wireRequestRef.current;
     const activeNetworks = (networkRows || [])
       .map(normalizeNetwork)
@@ -1273,6 +1310,7 @@ function EventStoreContent() {
 
     const isCurrent = () =>
       requestId === wireRequestRef.current &&
+      generation === contextGenRef.current &&
       selectedSubstrateRef.current === name &&
       selectedActivationRef.current === selected;
 
@@ -1311,16 +1349,22 @@ function EventStoreContent() {
 
   const loadObservationStatuses = useCallback(async (name, activationValue, networkRows) => {
     if (!name || !/^\d+$/.test(String(activationValue))) {
+      observationRequestRef.current += 1;
       setLoadingObservations(false);
       return null;
     }
 
     const selected = String(activationValue);
+    const generation = contextGenRef.current;
+    const requestId = ++observationRequestRef.current;
     const btcNetworks = (networkRows || [])
       .map(normalizeNetwork)
+      .filter(Boolean)
       .filter(bitcoinNetwork);
 
     const isCurrent = () =>
+      requestId === observationRequestRef.current &&
+      generation === contextGenRef.current &&
       selectedSubstrateRef.current === name &&
       selectedActivationRef.current === selected;
 
@@ -1348,7 +1392,7 @@ function EventStoreContent() {
       setObservations(next);
       return next;
     } finally {
-      if (isCurrent()) {
+      if (requestId === observationRequestRef.current) {
         setLoadingObservations(false);
       }
     }
@@ -1389,147 +1433,91 @@ function EventStoreContent() {
     ],
   );
 
-  const logRefresh = useCallback((stage) => {
-    const entry = {
-      time: new Date().toLocaleTimeString(),
-      stage,
-    };
-    setRefreshStage(stage);
-    setRefreshLog((previous) => [...previous, entry]);
-    console.info(`[EventStore Refresh] ${entry.time} — ${stage}`);
-  }, []);
-
-  const applyEventContext = useCallback((row, networkRows) => {
-    const record = String(row?.record ?? "");
-    if (!record) return false;
-
-    const selectedActivation = activationFromEvent(row) ?? "0";
-
-    contextGenRef.current += 1;
-    const gen = contextGenRef.current;
-
-    payloadRequestRef.current += 1;
-    boardRequestRef.current += 1;
-    wireRequestRef.current += 1;
-    budgetRequestRef.current += 1;
-
-    selectedEventRef.current = record;
-    selectedActivationRef.current = selectedActivation;
-    setEvent(record);
-    setActivation(selectedActivation);
-
-    clearActivationResources();
-    setError("");
-    setNotice("");
-    setBudgetLoadError("");
-
-    const name = selectedSubstrateRef.current;
-    const nets = networkRows || networks;
-
-    loadActivationResources(
-      name,
-      record,
-      selectedActivation,
-      nets,
-      () =>
-        contextGenRef.current === gen &&
-        selectedSubstrateRef.current === name &&
-        selectedActivationRef.current === selectedActivation &&
-        selectedEventRef.current === record,
-    );
-
-    return true;
-  }, [clearActivationResources, loadActivationResources, networks]);
-
-  const chooseEvent = useCallback((recordValue) => {
-    const record = String(recordValue || "").trim();
-    if (!record) return;
-    if (record === selectedEventRef.current) return;
-
-    const matched = events.find((row) => String(row?.record) === record);
-    if (!matched) {
-      setError(`Selected event "${record}" is not in the persisted event list.`);
-      return;
-    }
-
-    applyEventContext(matched, networks);
-  }, [events, networks, applyEventContext]);
-
   const loadInitial = useCallback(async () => {
     const bootId = ++bootRequestRef.current;
 
     setLoadingList(true);
     setError("");
     setNotice("");
-    setRefreshLog([]);
-    logRefresh("Starting scope load");
 
     if (!substrate) {
       clearScopeData();
       setNetworks([]);
-      setError("Event Store requires a substrate query parameter.");
       setLoadingList(false);
-      logRefresh("Missing substrate");
+      setError("Event Store requires a substrate query parameter.");
       return;
     }
 
     selectedSubstrateRef.current = substrate;
     selectedActivationRef.current = "";
     selectedEventRef.current = "";
+    contextGenRef.current += 1;
+
     clearScopeData();
 
     try {
-      logRefresh("Loading persisted events");
       const eventRows = await loadEvents(substrate);
 
       if (bootId !== bootRequestRef.current) return;
 
-      if (eventRows === null) {
-        setLoadingList(false);
-        return;
-      }
+      if (eventRows === null) return;
 
-      if (eventRows.length === 0) {
+      const validEvents = selectableEventRows(eventRows);
+
+      if (validEvents.length === 0) {
+        setEvents(eventRows);
         setNetworks([]);
         setEvent("");
         setActivation("");
-        selectedActivationRef.current = "";
         selectedEventRef.current = "";
-        setNotice("No persisted events found for this substrate.");
-        logRefresh("No persisted events");
-        setLoadingList(false);
+        selectedActivationRef.current = "";
+        if (eventRows.length === 0) {
+          setNotice("No persisted event records found for this substrate.");
+        } else {
+          setError("Persisted event records contain no usable record identifier and activation.");
+        }
         return;
       }
 
-      logRefresh("Loading networks");
+      // Deterministic default: first valid row in the API's existing order.
+      const matched = validEvents[0];
+      const selectedRecord = String(matched.record);
+      const selectedActivation = activationFromEvent(matched);
+
+      // Establish the selected context before resource requests.
+      selectedEventRef.current = selectedRecord;
+      selectedActivationRef.current = selectedActivation;
+
+      setEvent(selectedRecord);
+      setActivation(selectedActivation);
+
       const networkRows = await listNetworks();
 
-      if (bootId !== bootRequestRef.current || selectedSubstrateRef.current !== substrate) {
+      if (
+        bootId !== bootRequestRef.current ||
+        selectedSubstrateRef.current !== substrate ||
+        selectedEventRef.current !== selectedRecord ||
+        selectedActivationRef.current !== selectedActivation
+      ) {
         return;
       }
 
       setNetworks(networkRows);
 
-      const matched =
-        eventRows.find((row) => String(row?.record ?? "").length > 0) ||
-        null;
-
-      if (!matched) {
-        setEvent("");
-        setActivation("");
-        selectedActivationRef.current = "";
-        selectedEventRef.current = "";
-        setError("Persisted event records contain no record identifier.");
-        logRefresh("Event record resolution failed");
-        setLoadingList(false);
-        return;
-      }
-
-      logRefresh("Selecting default event");
-      applyEventContext(matched, networkRows);
-      logRefresh("Page-level load complete");
+      loadActivationResources(
+        substrate,
+        selectedRecord,
+        selectedActivation,
+        networkRows,
+        () =>
+          bootId === bootRequestRef.current &&
+          selectedSubstrateRef.current === substrate &&
+          selectedEventRef.current === selectedRecord &&
+          selectedActivationRef.current === selectedActivation,
+      );
     } catch (err) {
       if (bootId !== bootRequestRef.current) return;
+
       setError(
         err instanceof Error
           ? err.message
@@ -1538,20 +1526,69 @@ function EventStoreContent() {
     } finally {
       if (bootId === bootRequestRef.current) {
         setLoadingList(false);
-        logRefresh("Page refresh indicator cleared");
       }
     }
   }, [
     substrate,
     clearScopeData,
     loadEvents,
-    applyEventContext,
-    logRefresh,
+    loadActivationResources,
   ]);
 
   useEffect(() => {
     loadInitial();
   }, [loadInitial]);
+
+  // Dropdown handler: find row -> derive activation -> update refs/state
+  // immediately -> clear old-context resources -> load the new context.
+  // The persisted event list is never re-fetched here.
+  const handleSelectEvent = useCallback(
+    (value) => {
+      const requested = String(value ?? "");
+      const row = selectableEventRows(events).find(
+        (candidate) => String(candidate.record) === requested,
+      );
+      if (!row) return;
+
+      const nextRecord = String(row.record);
+      const nextActivation = activationFromEvent(row);
+      if (nextActivation === null) return;
+
+      if (
+        nextRecord === selectedEventRef.current &&
+        nextActivation === selectedActivationRef.current
+      ) {
+        return;
+      }
+
+      const name = substrate;
+      if (!name || selectedSubstrateRef.current !== name) return;
+
+      contextGenRef.current += 1;
+      const generation = contextGenRef.current;
+      selectedEventRef.current = nextRecord;
+      selectedActivationRef.current = nextActivation;
+
+      setEvent(nextRecord);
+      setActivation(nextActivation);
+      setError("");
+      setNotice("");
+
+      clearActivationResources();
+
+      loadActivationResources(name, nextRecord, nextActivation, networks, () =>
+        isCurrentContext(name, nextRecord, nextActivation, generation),
+      );
+    },
+    [
+      events,
+      substrate,
+      networks,
+      clearActivationResources,
+      loadActivationResources,
+      isCurrentContext,
+    ],
+  );
 
   const runningBitcoinNetworkIds = useMemo(
     () =>
@@ -1572,6 +1609,7 @@ function EventStoreContent() {
 
     const selectedSubstrate = substrate;
     const selectedActivation = String(activation);
+    const generation = contextGenRef.current;
 
     let cancelled = false;
     let timeoutId = null;
@@ -1587,6 +1625,7 @@ function EventStoreContent() {
 
       if (
         cancelled ||
+        generation !== contextGenRef.current ||
         selectedSubstrateRef.current !== selectedSubstrate ||
         selectedActivationRef.current !== selectedActivation
       ) {
@@ -1617,12 +1656,6 @@ function EventStoreContent() {
     };
   }, [substrate, activation, runningBitcoinNetworkIds]);
 
-  const refreshAll = useCallback(async () => {
-    setRefreshLog([]);
-    logRefresh("Manual refresh requested");
-    await loadInitial();
-  }, [loadInitial, logRefresh]);
-
   const appendStreamResult = (networkId, label, body) => {
     setStreamResults((current) => ({
       ...current,
@@ -1642,16 +1675,25 @@ function EventStoreContent() {
     const id = network.id;
     const selectedSubstrate = substrate;
     const selectedActivation = String(activation);
+    const generation = contextGenRef.current;
+    const stale = () =>
+      generation !== contextGenRef.current ||
+      selectedSubstrateRef.current !== selectedSubstrate ||
+      selectedActivationRef.current !== selectedActivation;
     const route = `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(id)}/observation`;
     setBusyObservation((current) => ({ ...current, [id]: true }));
     try {
       const status = await apiRequest(route);
-      if (selectedSubstrateRef.current !== selectedSubstrate || selectedActivationRef.current !== selectedActivation) return;
+      if (stale()) return;
       setObservations((current) => ({ ...current, [id]: status }));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to retrieve bit-miner process status.");
+      if (!stale()) {
+        setError(err instanceof Error ? err.message : "Unable to retrieve bit-miner process status.");
+      }
     } finally {
-      setBusyObservation((current) => ({ ...current, [id]: false }));
+      if (!stale()) {
+        setBusyObservation((current) => ({ ...current, [id]: false }));
+      }
     }
   };
 
@@ -1659,27 +1701,35 @@ function EventStoreContent() {
     const id = network.id;
     const selectedSubstrate = substrate;
     const selectedActivation = String(activation);
+    const generation = contextGenRef.current;
+    const stale = () =>
+      generation !== contextGenRef.current ||
+      selectedSubstrateRef.current !== selectedSubstrate ||
+      selectedActivationRef.current !== selectedActivation;
     const route = `/wallets/${enc(selectedSubstrate)}/activations/${enc(selectedActivation)}/networks/${enc(id)}/observation`;
     setBusyObservation((current) => ({ ...current, [id]: true }));
     try {
       const result = await apiRequest(route, { method: action === "start" ? "POST" : "DELETE" });
-      if (selectedSubstrateRef.current !== selectedSubstrate || selectedActivationRef.current !== selectedActivation) return;
+      if (stale()) return;
       appendStreamResult(id, `${action.toUpperCase()} observation response`, result);
       setObservations((current) => ({ ...current, [id]: result }));
 
       if (action === "start") {
         const status = await apiRequest(route);
-        if (selectedSubstrateRef.current !== selectedSubstrate || selectedActivationRef.current !== selectedActivation) return;
+        if (stale()) return;
         appendStreamResult(id, "Initial process status", status);
         setObservations((current) => ({ ...current, [id]: status }));
       }
       setNotice(result?.message || `Bitcoin bit-miner ${action} request completed.`);
     } catch (err) {
+      if (stale()) return;
       const failure = { error: err instanceof Error ? err.message : "Bitcoin bit-miner request failed." };
       appendStreamResult(id, `${action.toUpperCase()} request error`, failure);
       setError(failure.error);
     } finally {
-      setBusyObservation((current) => ({ ...current, [id]: false }));
+      if (!stale()) {
+        setBusyObservation((current) => ({ ...current, [id]: false }));
+      }
     }
   };
 
@@ -1687,6 +1737,11 @@ function EventStoreContent() {
     const id = network.id;
     const selectedSubstrate = substrate;
     const selectedActivation = String(activation);
+    const generation = contextGenRef.current;
+    const stale = () =>
+      generation !== contextGenRef.current ||
+      selectedSubstrateRef.current !== selectedSubstrate ||
+      selectedActivationRef.current !== selectedActivation;
     setBudgetErrors((current) => ({ ...current, [id]: "" }));
     setBudgetNotices((current) => ({ ...current, [id]: "" }));
 
@@ -1708,18 +1763,15 @@ function EventStoreContent() {
           body: JSON.stringify({ min_events: minEvents, max_events: maxEvents }),
         },
       );
-      if (
-        selectedSubstrateRef.current !== selectedSubstrate ||
-        selectedActivationRef.current !== selectedActivation
-      ) {
-        return;
-      }
+      if (stale()) return;
       await loadBudgets(selectedSubstrate, selectedActivation);
+      if (stale()) return;
       setBudgetNotices((current) => ({
         ...current,
         [id]: `Saved budget (${minEvents} … ${maxEvents}).`,
       }));
     } catch (err) {
+      if (stale()) return;
       setBudgetErrors((current) => ({
         ...current,
         [id]: err instanceof Error ? err.message : "Unable to save network budget.",
@@ -1746,7 +1798,13 @@ function EventStoreContent() {
     ? "Loading persisted events…"
     : substrate
       ? "No persisted event records were returned."
-      : "Substrate must be supplied by the parent route.";
+      : "A substrate must be supplied by the parent route.";
+
+  const eventPlaceholder = loadingList || loadingEvents
+    ? "Loading events…"
+    : eventOptions.length === 0
+      ? "No persisted events"
+      : "Select an event";
 
   const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
 
@@ -1766,78 +1824,43 @@ function EventStoreContent() {
             </h1>
             <p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 sm:text-sm dark:text-zinc-400">
               Event-scoped payloads, network budgets, payload boards, Bitcoin observation and API-owned wirepackets.
-              Substrate is supplied by the parent route; select any persisted event to switch context.
+              The substrate is supplied by the parent route; choose any persisted event below.
             </p>
           </div>
 
-          <div className="grid grid-cols-3 gap-2 sm:flex sm:flex-wrap sm:items-center">
-            <a href="/network" className={BUTTON}>
-              Network
-            </a>
-            <a href="/" className={BUTTON}>
-              QTM
-            </a>
-            <button
-              type="button"
-              className={BUTTON}
-              disabled={!substrate || loadingList}
-              onClick={refreshAll}
-            >
-              {loadingList ? "Refreshing…" : "Refresh"}
-            </button>
+          <div className="flex min-w-0 flex-col gap-2 sm:w-96">
+            <div className="grid grid-cols-2 gap-2">
+              <a href="/network" className={BUTTON}>
+                Network
+              </a>
+              <a href="/" className={BUTTON}>
+                QTM
+              </a>
+            </div>
 
-            <details className="relative col-span-3 min-w-0 sm:w-80">
-              <summary className="flex cursor-pointer list-none flex-col gap-1.5 rounded-lg border border-zinc-200 bg-zinc-100 px-3 py-2 text-left dark:border-zinc-800 dark:bg-zinc-900">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[11px] font-medium text-zinc-600 dark:text-zinc-300">
-                    Refresh diagnostics
-                  </span>
-                  <span className="text-[10px] tabular-nums text-zinc-500">
-                    {refreshLog.length} stages
-                    {loadingList ? " · running" : " · idle"}
-                  </span>
-                </div>
-                <div className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
-                  {refreshStage || "No refresh activity recorded"}
-                </div>
-              </summary>
-
-              <div className="absolute right-0 z-30 mt-2 max-h-80 w-full overflow-y-auto rounded-xl border border-zinc-200 bg-white p-3 shadow-xl dark:border-zinc-800 dark:bg-zinc-950">
-                <div className="mb-3 flex items-center justify-between gap-2">
-                  <h3 className="text-xs font-semibold">Refresh activity</h3>
-                  <span className="text-[10px] text-zinc-500">
-                    {loadingList ? "In progress" : "Not running"}
-                  </span>
-                </div>
-                {refreshLog.length > 0 ? (
-                  <div className="flex flex-col gap-2">
-                    {refreshLog.map((entry, index) => (
-                      <div
-                        key={`${entry.time}-${index}`}
-                        className="flex min-w-0 items-start gap-2 border-b border-zinc-100 pb-2 last:border-0 last:pb-0 dark:border-zinc-800"
-                      >
-                        <span className="shrink-0 pt-0.5 font-mono text-[10px] text-zinc-400">
-                          {entry.time}
-                        </span>
-                        <span
-                          className={`min-w-0 break-words text-xs ${
-                            entry.stage === refreshStage && loadingList
-                              ? "font-semibold text-blue-600 dark:text-blue-400"
-                              : "text-zinc-600 dark:text-zinc-300"
-                          }`}
-                        >
-                          {entry.stage}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="py-3 text-xs text-zinc-500">
-                    No refresh activity recorded yet.
-                  </p>
+            <label className="block min-w-0">
+              <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                Persisted event
+              </span>
+              <select
+                aria-label="Select persisted event"
+                className={INPUT}
+                value={event}
+                disabled={!substrate || loadingList || eventOptions.length === 0}
+                onChange={(changeEvent) => handleSelectEvent(changeEvent.target.value)}
+              >
+                {!event && (
+                  <option value="" disabled>
+                    {eventPlaceholder}
+                  </option>
                 )}
-              </div>
-            </details>
+                {eventOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
         </header>
 
@@ -1853,41 +1876,12 @@ function EventStoreContent() {
           subtitle={
             substrate
               ? `${substrate} · Event ${event || "—"}`
-              : "No substrate from parent route"
+              : "No context from parent route"
           }
           badge={overviewBadge}
           className="w-full"
         >
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="block min-w-0 sm:col-span-2">
-              <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
-                Persisted event
-              </span>
-              <select
-                className={INPUT}
-                value={event}
-                disabled={!substrate || loadingList || eventOptions.length === 0}
-                onChange={(e) => chooseEvent(e.target.value)}
-                aria-label="Select persisted event"
-              >
-                {eventOptions.length === 0 ? (
-                  <option value="">
-                    {loadingEvents || loadingList
-                      ? "Loading events…"
-                      : "No persisted events"}
-                  </option>
-                ) : (
-                  eventOptions.map(({ record, row }) => (
-                    <option key={record} value={record}>
-                      {eventOptionLabel(row)}
-                    </option>
-                  ))
-                )}
-              </select>
-            </label>
-          </div>
-
-          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
             <Stat label="Substrate" value={substrate || "—"} wide />
             <Stat label="Event" value={event || "—"} wide />
             <Stat label="Activation" value={activation || "—"} />
@@ -2013,26 +2007,26 @@ function EventStoreContent() {
                   const isFocused = String(row?.record) === String(event);
                   return (
                     <tr
-                      key={`${row.record}-${index}`}
+                      key={`${row?.record}-${index}`}
                       className={`align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/50 ${isFocused ? "bg-emerald-50/60 dark:bg-emerald-950/30" : ""}`}
                     >
                       <td className="whitespace-nowrap px-4 py-3 font-mono">
-                        {activationFromEvent(row) ?? money(row.activation)}
+                        {activationFromEvent(row) ?? money(row?.activation)}
                       </td>
-                      <td className="px-4 py-3">{money(row.kind)}</td>
+                      <td className="px-4 py-3">{money(row?.kind)}</td>
                       <td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">
-                        {money(row.record)}
+                        {money(row?.record)}
                         {isFocused && <span className="ml-2 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">focused</span>}
                       </td>
                       <td className="break-all px-4 py-3 font-mono">
-                        {money(row.dimension ?? state?.dimension)}
+                        {money(row?.dimension ?? state?.dimension)}
                       </td>
                       <td className="break-all px-4 py-3 font-mono">
-                        {money(row.structural_value ?? state?.structural_value)}
+                        {money(row?.structural_value ?? state?.structural_value)}
                       </td>
-                      <td className="px-4 py-3">{money(row.depth_objects)}</td>
+                      <td className="px-4 py-3">{money(row?.depth_objects)}</td>
                       <td className="break-all px-4 py-3 font-mono">
-                        {money(row.retained_mass ?? state?.retained_mass)}
+                        {money(row?.retained_mass ?? state?.retained_mass)}
                       </td>
                     </tr>
                   );
@@ -2057,34 +2051,34 @@ function EventStoreContent() {
               const isFocused = String(row?.record) === String(event);
               return (
                 <article
-                  key={`${row.record}-card-${index}`}
+                  key={`${row?.record}-card-${index}`}
                   className={`${INNER} p-3 ${isFocused ? "ring-2 ring-emerald-400/60" : ""}`}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <h4 className="min-w-0 break-all text-sm font-semibold">
-                      {money(row.kind)}
+                      {money(row?.kind)}
                     </h4>
                     <Pill>
-                      Act. {activationFromEvent(row) ?? money(row.activation)}
+                      Act. {activationFromEvent(row) ?? money(row?.activation)}
                     </Pill>
                   </div>
                   <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">
-                    {money(row.record)}
+                    {money(row?.record)}
                     {isFocused && <span className="ml-2 text-[10px] font-semibold text-emerald-600">focused</span>}
                   </p>
                   <div className="mt-3">
                     <Fields min="7rem">
                       <Field label="Dimension">
-                        {money(row.dimension ?? state?.dimension)}
+                        {money(row?.dimension ?? state?.dimension)}
                       </Field>
                       <Field label="Structural value (Σ)">
-                        {money(row.structural_value ?? state?.structural_value)}
+                        {money(row?.structural_value ?? state?.structural_value)}
                       </Field>
                       <Field label="Depth objects">
-                        {money(row.depth_objects)}
+                        {money(row?.depth_objects)}
                       </Field>
                       <Field label="Retained mass">
-                        {money(row.retained_mass ?? state?.retained_mass)}
+                        {money(row?.retained_mass ?? state?.retained_mass)}
                       </Field>
                     </Fields>
                   </div>
