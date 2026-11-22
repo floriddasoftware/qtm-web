@@ -3,6 +3,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
+// Same API origin configuration as the main page (src/app/page.js).
 const API_BASE = (
   process.env.NEXT_PUBLIC_QTM_API_BASE ||
   "https://qtm-api.onrender.com"
@@ -99,6 +100,54 @@ function enc(value) {
   return encodeURIComponent(String(value));
 }
 
+/* ───────────── Runtime call (mirrors callRuntime in src/app/page.js) ───────────── */
+
+// Native IPC entry point, present only inside a native shell.
+function nativeInvoke() {
+  if (typeof window === "undefined") return null;
+  return (
+    window.__TAURI__?.core?.invoke ??
+    window.__TAURI_INTERNALS__?.invoke ??
+    null
+  );
+}
+
+const NATIVE_COMMANDS = {
+  listEvents: "qtm_events",
+};
+
+// Same route table entry as page.js: GET /wallets/:name/events
+const API_ROUTES = {
+  listEvents: ({ name }) => ["GET", `/wallets/${enc(name)}/events`],
+};
+
+async function callRuntime(operation, args = {}) {
+  const invoke = nativeInvoke();
+
+  if (invoke) {
+    try {
+      return await invoke(NATIVE_COMMANDS[operation], args);
+    } catch (cause) {
+      throw new Error(
+        typeof cause === "string" && cause.trim()
+          ? cause.trim()
+          : cause instanceof Error && cause.message
+            ? cause.message
+            : "The QP runtime reported an error.",
+      );
+    }
+  }
+
+  const route = API_ROUTES[operation];
+  if (typeof route !== "function") {
+    throw new Error(`Unsupported QP runtime operation: ${String(operation)}.`);
+  }
+  const [method, path] = route(args || {});
+  return apiRequest(path, { method });
+}
+
+/* ───────────── Persisted event normalization ───────────── */
+
 function activationFromEvent(event) {
   const value =
     event?.activation ??
@@ -109,58 +158,44 @@ function activationFromEvent(event) {
     : String(value);
 }
 
-function eventRecordsOf(source) {
-  const candidates = [
-    source?.events,
-    source?.records,
-    source?.event_records,
-    source?.eventRecords,
-    source?.items,
-    source?.data?.events,
-    source?.data?.records,
-  ];
-
-  for (const candidate of candidates) {
-    if (Array.isArray(candidate)) {
-      return candidate.filter(
-        (row) => row && typeof row === "object",
-      );
-    }
-
-    if (candidate && typeof candidate === "object") {
-      for (const key of ["events", "records", "items"]) {
-        if (Array.isArray(candidate[key])) {
-          return candidate[key].filter(
-            (row) => row && typeof row === "object",
-          );
-        }
-      }
-    }
+function compareEventRows(a, b) {
+  const aa = activationFromEvent(a);
+  const bb = activationFromEvent(b);
+  if (aa !== bb) {
+    if (aa === null) return 1;
+    if (bb === null) return -1;
+    const x = BigInt(aa);
+    const y = BigInt(bb);
+    if (x !== y) return x < y ? -1 : 1;
   }
-
-  return [];
+  const ra = String(a.record);
+  const rb = String(b.record);
+  return ra < rb ? -1 : ra > rb ? 1 : 0;
 }
 
-function recordNameOf(record) {
-  for (const key of [
-    "record_name",
-    "recordName",
-    "filename",
-    "file_name",
-    "fileName",
-    "name",
-    "record",
-    "path",
-    "id",
-  ]) {
-    const value = record?.[key];
-
-    if (typeof value === "string" && value.trim()) {
-      return value;
-    }
+// Canonical EventStoreResponse.events -> PersistedEventSummary rows.
+// kind, record, activation, dimension, structural_value, depth_objects,
+// retained_mass, delta, tau, gross_work, net_work, commitment and coordinate
+// are preserved exactly as returned; nothing is fabricated.
+function normalizePersistedEvents(response) {
+  if (!Array.isArray(response?.events)) {
+    throw new Error("The API response did not include a persisted events array.");
   }
 
-  return "";
+  const rows = [];
+  for (const row of response.events) {
+    if (!row || typeof row !== "object") continue;
+    if (typeof row.record !== "string" || !row.record.trim()) continue;
+    const activation = activationFromEvent(row);
+    rows.push({
+      ...row,
+      kind: row.kind,
+      record: row.record,
+      activation: activation === null ? row.activation : activation,
+    });
+  }
+
+  return rows.sort(compareEventRows);
 }
 
 function selectableEventRows(rows) {
@@ -168,23 +203,14 @@ function selectableEventRows(rows) {
   const result = [];
 
   for (const row of Array.isArray(rows) ? rows : []) {
-    const record = recordNameOf(row);
-
+    const record = typeof row?.record === "string" ? row.record : "";
     if (!record.trim() || seen.has(record)) continue;
 
     const activation = activationFromEvent(row);
     if (activation === null) continue;
 
-    // Normalize the event record identifier into the shape
-    // expected by the Event Store selectors and downstream loaders.
-    const normalized = {
-      ...row,
-      record,
-      activation,
-    };
-
     seen.add(record);
-    result.push(normalized);
+    result.push({ ...row, record, activation });
   }
 
   return result;
@@ -1051,7 +1077,8 @@ function EventStoreContent() {
   const searchParams = useSearchParams();
   const requestedSubstrate = (searchParams.get("substrate") || "").trim();
 
-  const [substrate] = useState(requestedSubstrate);
+  // Derived from the URL on every render so a substrate change re-runs the loader.
+  const substrate = requestedSubstrate;
   const [event, setEvent] = useState("");
   const [activation, setActivation] = useState("");
 
@@ -1308,58 +1335,44 @@ function EventStoreContent() {
     }
   }, [isCurrentContext]);
 
-const loadEvents = useCallback(async (name) => {
-  if (!name) {
-    setEvents([]);
-    setStore(null);
-    return [];
-  }
+  // Persisted events: same runtime call as the Receive tab in src/app/page.js.
+  // Returns the normalized rows, or null when the request failed or is stale.
+  // A valid empty response ({ events: [] }) returns [] and is not an error.
+  const loadEvents = useCallback(async (name, bootId) => {
+    const isCurrent = () =>
+      bootId === bootRequestRef.current &&
+      selectedSubstrateRef.current === name;
 
-  try {
-    const response = await apiRequest(
-      `/wallets/${enc(name)}/events`,
-    );
+    if (!name) {
+      setEvents([]);
+      setStore(null);
+      return [];
+    }
 
-    if (selectedSubstrateRef.current !== name) {
+    try {
+      const data = await callRuntime("listEvents", { name });
+      if (!isCurrent()) return null;
+
+      const records = normalizePersistedEvents(data);
+
+      setEvents(records);
+      setStore(data);
+      return records;
+    } catch (err) {
+      if (isCurrent()) {
+        setEvents([]);
+        setPayloads([]);
+        setStore(null);
+        setError(
+          err instanceof Error && err.message
+            ? err.message
+            : "Unable to read persisted events.",
+        );
+      }
       return null;
     }
+  }, []);
 
-    const persistedEvents = Array.isArray(response?.events)
-      ? response.events
-      : [];
-
-    const records = persistedEvents
-      .filter(
-        (row) =>
-          row &&
-          typeof row.record === "string" &&
-          /^\d+$/.test(String(row.activation)),
-      )
-      .map((row) => ({
-        ...row,
-        record: row.record,
-        activation: String(row.activation),
-      }));
-
-    setEvents(records);
-    setStore(response);
-
-    return records;
-  } catch (err) {
-    if (selectedSubstrateRef.current === name) {
-      setEvents([]);
-      setPayloads([]);
-      setStore(null);
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to read persisted events.",
-      );
-    }
-
-    return null;
-  }
-}, []);
   // Activation-scoped budget fetch.
   // The endpoint returns the activation-wide budget set, but loading/errors
   // are owned by each registered network.
@@ -1611,10 +1624,11 @@ const loadEvents = useCallback(async (name) => {
     selectedEventRef.current = "";
     contextGenRef.current += 1;
 
+    // Clears stale events from the previous substrate before the new request.
     clearScopeData();
 
     try {
-      const eventRows = await loadEvents(substrate);
+      const eventRows = await loadEvents(substrate, bootId);
 
       if (bootId !== bootRequestRef.current) return;
       if (eventRows === null) return;
@@ -1622,7 +1636,6 @@ const loadEvents = useCallback(async (name) => {
       const validEvents = selectableEventRows(eventRows);
 
       if (validEvents.length === 0) {
-        setEvents(eventRows);
         setNetworks([]);
         setEvent("");
         setActivation("");
@@ -1964,16 +1977,16 @@ const loadEvents = useCallback(async (name) => {
 
   const closeBitMinerLogs = useCallback(() => setLogViewer(null), []);
 
-const eventsEmptyText = substrate
-  ? "No persisted event records were returned."
-  : "A substrate must be supplied by the parent route.";
+  const eventsEmptyText = substrate
+    ? "No persisted event records were returned."
+    : "A substrate must be supplied by the parent route.";
 
-const eventPlaceholder =
-  eventOptions.length === 0
-    ? "No persisted events"
-    : "Select an event";
-    
-const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
+  const eventPlaceholder =
+    eventOptions.length === 0
+      ? "No persisted events"
+      : "Select an event";
+
+  const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
 
   return (
     <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
@@ -2013,7 +2026,7 @@ const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
                 aria-label="Select persisted event"
                 className={INPUT}
                 value={event}
-               disabled={!substrate || eventOptions.length === 0}
+                disabled={!substrate || eventOptions.length === 0}
                 onChange={(changeEvent) => handleSelectEvent(changeEvent.target.value)}
               >
                 {!event && (
