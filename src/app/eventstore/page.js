@@ -109,16 +109,84 @@ function activationFromEvent(event) {
     : String(value);
 }
 
+function eventRecordsOf(source) {
+  const candidates = [
+    source?.events,
+    source?.records,
+    source?.event_records,
+    source?.eventRecords,
+    source?.items,
+    source?.data?.events,
+    source?.data?.records,
+  ];
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      return candidate.filter(
+        (row) => row && typeof row === "object",
+      );
+    }
+
+    if (candidate && typeof candidate === "object") {
+      for (const key of ["events", "records", "items"]) {
+        if (Array.isArray(candidate[key])) {
+          return candidate[key].filter(
+            (row) => row && typeof row === "object",
+          );
+        }
+      }
+    }
+  }
+
+  return [];
+}
+
+function recordNameOf(record) {
+  for (const key of [
+    "record_name",
+    "recordName",
+    "filename",
+    "file_name",
+    "fileName",
+    "name",
+    "record",
+    "path",
+    "id",
+  ]) {
+    const value = record?.[key];
+
+    if (typeof value === "string" && value.trim()) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
 function selectableEventRows(rows) {
   const seen = new Set();
   const result = [];
+
   for (const row of Array.isArray(rows) ? rows : []) {
-    const record = String(row?.record ?? "");
-    if (record.trim() === "" || seen.has(record)) continue;
-    if (activationFromEvent(row) === null) continue;
+    const record = recordNameOf(row);
+
+    if (!record.trim() || seen.has(record)) continue;
+
+    const activation = activationFromEvent(row);
+    if (activation === null) continue;
+
+    // Normalize the event record identifier into the shape
+    // expected by the Event Store selectors and downstream loaders.
+    const normalized = {
+      ...row,
+      record,
+      activation,
+    };
+
     seen.add(record);
-    result.push(row);
+    result.push(normalized);
   }
+
   return result;
 }
 
@@ -1247,10 +1315,8 @@ const loadEvents = useCallback(async (name) => {
     return null;
   }
 
-  setError("");
-
   try {
-    const eventBody = await apiRequest(
+    const data = await apiRequest(
       `/wallets/${enc(name)}/events`,
     );
 
@@ -1258,14 +1324,21 @@ const loadEvents = useCallback(async (name) => {
       return null;
     }
 
-    const nextEvents = Array.isArray(eventBody?.events)
-      ? eventBody.events
-      : [];
+    const records = eventRecordsOf(data).map((row) => {
+      const record = recordNameOf(row);
+      const activation = activationFromEvent(row);
 
-    setEvents(nextEvents);
-    setStore(eventBody);
+      return {
+        ...row,
+        record,
+        activation,
+      };
+    });
 
-    return nextEvents;
+    setEvents(records);
+    setStore(data);
+
+    return records;
   } catch (err) {
     if (selectedSubstrateRef.current === name) {
       setEvents([]);
@@ -1274,14 +1347,13 @@ const loadEvents = useCallback(async (name) => {
       setError(
         err instanceof Error
           ? err.message
-          : "Unable to load events.",
+          : "Unable to load persisted events.",
       );
     }
 
     return null;
   }
 }, []);
-
   // Activation-scoped budget fetch.
   // The endpoint returns the activation-wide budget set, but loading/errors
   // are owned by each registered network.
