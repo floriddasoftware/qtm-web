@@ -877,16 +877,16 @@ function NetworkCard({
   );
 }
 
+
 /* ───────────────────────── Page ─────────────────────────
  *
  * Entry contract (from parent route):
- *   substrate  — search param, required
- *   event_     — search param, required; identifies the event to open
+ *   substrate — search param, required
  *
  * The Event Store is a receiver. It does not discover substrates,
  * list wallets, or fall back to a first substrate.
  *
- * Internal activation is derived from the matched event record.
+ * Persisted event records are resolved internally from the substrate.
  * Activation-scoped resources (budgets, boards, observation, wirepackets)
  * still use the numeric activation the API requires.
  */
@@ -894,10 +894,9 @@ function NetworkCard({
 function EventStoreContent() {
   const searchParams = useSearchParams();
   const requestedSubstrate = (searchParams.get("substrate") || "").trim();
-  const requestedEvent = (searchParams.get("event_") || "").trim();
 
   const [substrate] = useState(requestedSubstrate);
-  const [event] = useState(requestedEvent);
+  const [event, setEvent] = useState("");
   const [activation, setActivation] = useState("");
 
   const [loadingObservations, setLoadingObservations] = useState(false);
@@ -1371,107 +1370,131 @@ function EventStoreContent() {
     console.info(`[EventStore Refresh] ${entry.time} — ${stage}`);
   }, []);
 
-  const loadInitial = useCallback(async () => {
-    const bootId = ++bootRequestRef.current;
 
-    setLoadingList(true);
-    setError("");
-    setNotice("");
-    setRefreshLog([]);
-    logRefresh("Starting scope load");
+const loadInitial = useCallback(async () => {
+  const bootId = ++bootRequestRef.current;
 
-    if (!substrate || !event) {
-      clearScopeData();
-      setNetworks([]);
-      setError(
-        !substrate && !event
-          ? "Event Store requires substrate and event_ query parameters from the parent route."
-          : !substrate
-            ? "Event Store requires a substrate query parameter from the parent route."
-            : "Event Store requires an event_ query parameter from the parent route.",
-      );
+  setLoadingList(true);
+  setError("");
+  setNotice("");
+  setRefreshLog([]);
+  logRefresh("Starting scope load");
+
+  if (!substrate) {
+    clearScopeData();
+    setNetworks([]);
+    setEvent("");
+    setActivation("");
+    selectedActivationRef.current = "";
+    setError("Event Store requires a substrate query parameter.");
+    setLoadingList(false);
+    logRefresh("Missing substrate");
+    return;
+  }
+
+  selectedSubstrateRef.current = substrate;
+  selectedActivationRef.current = "";
+  clearScopeData();
+  setEvent("");
+  setActivation("");
+
+  try {
+    logRefresh("Loading persisted events");
+
+    const eventRows = await loadEvents(substrate);
+
+    if (bootId !== bootRequestRef.current) return;
+
+    if (eventRows === null) {
       setLoadingList(false);
-      logRefresh("Missing entry context");
       return;
     }
 
-    selectedSubstrateRef.current = substrate;
-    selectedActivationRef.current = "";
-    clearScopeData();
+    setEvents(eventRows);
 
-    try {
-      logRefresh("Loading events");
-      const eventRows = await loadEvents(substrate);
-
-      if (bootId !== bootRequestRef.current) return;
-      if (eventRows === null) {
-        setLoadingList(false);
-        return;
-      }
-
-      const matched = eventRows.find((row) => String(row?.record) === String(event));
-      if (!matched) {
-        setError(`Event record "${event}" was not found under substrate "${substrate}".`);
-        setLoadingList(false);
-        logRefresh("Event not found");
-        return;
-      }
-
-      const selectedActivation = activationFromEvent(matched) ?? "0";
-      selectedActivationRef.current = selectedActivation;
-      setActivation(selectedActivation);
-
-      logRefresh("Loading networks");
-      const networkRows = await listNetworks();
-
-      if (
-        bootId !== bootRequestRef.current ||
-        selectedSubstrateRef.current !== substrate ||
-        selectedActivationRef.current !== selectedActivation
-      ) {
-        return;
-      }
-
-      setNetworks(networkRows);
-
-      logRefresh("Starting activation resources");
-      loadActivationResources(
-        substrate,
-        event,
-        selectedActivation,
-        networkRows,
-        () =>
-          bootId === bootRequestRef.current &&
-          selectedSubstrateRef.current === substrate &&
-          selectedActivationRef.current === selectedActivation,
-      );
-
-      logRefresh("Page-level load complete");
-    } catch (err) {
-      if (bootId !== bootRequestRef.current) return;
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to load Event Store.",
-      );
-    } finally {
-      if (bootId === bootRequestRef.current) {
-        setLoadingList(false);
-        logRefresh("Page refresh indicator cleared");
-      }
+    if (eventRows.length === 0) {
+      setNetworks([]);
+      setEvent("");
+      setActivation("");
+      selectedActivationRef.current = "";
+      setNotice("No persisted events found for this substrate.");
+      logRefresh("No persisted events");
+      return;
     }
-  }, [
-    substrate,
-    event,
-    clearScopeData,
-    loadEvents,
-    loadActivationResources,
-    logRefresh,
-  ]);
 
-  useEffect(() => {
-    loadInitial();
-  }, [loadInitial]);
+    // Resolve the persisted event internally from the substrate event list.
+    const matched = eventRows[0];
+    const resolvedEvent = String(matched?.record ?? "");
+
+    if (!resolvedEvent) {
+      setNetworks([]);
+      setEvent("");
+      setActivation("");
+      selectedActivationRef.current = "";
+      setError("Persisted event records contain no record identifier.");
+      logRefresh("Event record resolution failed");
+      return;
+    }
+
+    setEvent(resolvedEvent);
+
+    const selectedActivation = activationFromEvent(matched) ?? "0";
+    selectedActivationRef.current = selectedActivation;
+    setActivation(selectedActivation);
+
+    logRefresh("Loading networks");
+
+    const networkRows = await listNetworks();
+
+    if (
+      bootId !== bootRequestRef.current ||
+      selectedSubstrateRef.current !== substrate ||
+      selectedActivationRef.current !== selectedActivation
+    ) {
+      return;
+    }
+
+    setNetworks(networkRows);
+
+    logRefresh("Starting activation resources");
+
+    loadActivationResources(
+      substrate,
+      resolvedEvent,
+      selectedActivation,
+      networkRows,
+      () =>
+        bootId === bootRequestRef.current &&
+        selectedSubstrateRef.current === substrate &&
+        selectedActivationRef.current === selectedActivation,
+    );
+
+    logRefresh("Page-level load complete");
+  } catch (err) {
+    if (bootId !== bootRequestRef.current) return;
+
+    setError(
+      err instanceof Error
+        ? err.message
+        : "Unable to load Event Store.",
+    );
+  } finally {
+    if (bootId === bootRequestRef.current) {
+      setLoadingList(false);
+      logRefresh("Page refresh indicator cleared");
+    }
+  }
+}, [
+  substrate,
+  clearScopeData,
+  loadEvents,
+  loadActivationResources,
+  logRefresh,
+]);
+
+useEffect(() => {
+  loadInitial();
+}, [loadInitial]);
 
   const runningBitcoinNetworkIds = useMemo(
     () =>
