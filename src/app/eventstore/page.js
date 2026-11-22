@@ -217,6 +217,17 @@ function flag(value) {
   return value == null ? "Not reported" : value ? "Yes" : "No";
 }
 
+function eventOptionLabel(row) {
+  const record = String(row?.record ?? "");
+  const kind = row?.kind ? String(row.kind) : "";
+  const act = activationFromEvent(row);
+  const parts = [];
+  if (kind) parts.push(kind);
+  if (act != null) parts.push(`act ${act}`);
+  if (record) parts.push(record);
+  return parts.length > 0 ? parts.join(" · ") : "Unknown event";
+}
+
 /* ───────────────────────── UI primitives ───────────────────────── */
 
 function Pill({ children, tone = "neutral" }) {
@@ -877,18 +888,14 @@ function NetworkCard({
   );
 }
 
-
 /* ───────────────────────── Page ─────────────────────────
  *
  * Entry contract (from parent route):
  *   substrate — search param, required
  *
- * The Event Store is a receiver. It does not discover substrates,
- * list wallets, or fall back to a first substrate.
- *
- * Persisted event records are resolved internally from the substrate.
- * Activation-scoped resources (budgets, boards, observation, wirepackets)
- * still use the numeric activation the API requires.
+ * The Event Store is a receiver. It does not discover substrates.
+ * Persisted events are loaded from GET /wallets/:name/events.
+ * The native event dropdown switches event + activation context instantly.
  */
 
 function EventStoreContent() {
@@ -927,12 +934,14 @@ function EventStoreContent() {
 
   const selectedSubstrateRef = useRef(requestedSubstrate);
   const selectedActivationRef = useRef("");
+  const selectedEventRef = useRef("");
   const payloadRequestRef = useRef(0);
   const boardRequestRef = useRef(0);
   const wireRequestRef = useRef(0);
   const eventsRequestRef = useRef(0);
   const budgetRequestRef = useRef(0);
   const bootRequestRef = useRef(0);
+  const contextGenRef = useRef(0);
 
   const selectedEvents = useMemo(
     () => events.filter((row) => activationFromEvent(row) === String(activation)),
@@ -993,6 +1002,18 @@ function EventStoreContent() {
     return slots;
   }, [renderedNetworks]);
 
+  const eventOptions = useMemo(() => {
+    const seen = new Set();
+    const options = [];
+    for (const row of events) {
+      const record = String(row?.record ?? "");
+      if (!record || seen.has(record)) continue;
+      seen.add(record);
+      options.push({ record, row });
+    }
+    return options;
+  }, [events]);
+
   const configuredCount = budgets.filter(
     (row) => row.configured && row.budget,
   ).length;
@@ -1015,9 +1036,10 @@ function EventStoreContent() {
   const anyLoading = requiredScopeLoading || loadingPayloads;
 
   const overviewBadge = (() => {
-    if (!substrate || !event) return <Pill tone="warn">Missing context</Pill>;
+    if (!substrate) return <Pill tone="warn">Missing substrate</Pill>;
     if (loadingList) return <Pill>Loading</Pill>;
-    if (!activationSelected) return <Pill tone="warn">Resolving event</Pill>;
+    if (events.length === 0 && !loadingEvents) return <Pill tone="warn">No events</Pill>;
+    if (!event || !activationSelected) return <Pill tone="warn">Select event</Pill>;
     if (loadingObservations) return <Pill>Checking observation</Pill>;
     if (observationRunning) return <Pill tone="ok">Syncing</Pill>;
     if (anyLoading) return <Pill>Loading data</Pill>;
@@ -1026,16 +1048,16 @@ function EventStoreContent() {
     return <Pill tone="ok">Ready</Pill>;
   })();
 
-  const isCurrentScope = useCallback((name, activationValue, requestId, requestRef) => {
+  const isCurrentEventScope = useCallback((name, activationValue, record, requestId, requestRef) => {
     return (
       requestId === requestRef.current &&
       selectedSubstrateRef.current === name &&
-      selectedActivationRef.current === String(activationValue)
+      selectedActivationRef.current === String(activationValue) &&
+      selectedEventRef.current === String(record)
     );
   }, []);
 
-  const clearScopeData = useCallback(() => {
-    setEvents([]);
+  const clearActivationResources = useCallback(() => {
     setPayloads([]);
     setBudgets([]);
     setBoards({});
@@ -1043,13 +1065,20 @@ function EventStoreContent() {
     setObservations({});
     setStreamResults({});
     setLogViewer(null);
-    setStore(null);
     setBudgetErrors({});
     setBudgetNotices({});
     setBudgetLoadError("");
+  }, []);
+
+  const clearScopeData = useCallback(() => {
+    setEvents([]);
+    clearActivationResources();
+    setStore(null);
+    setEvent("");
     setActivation("");
     selectedActivationRef.current = "";
-  }, []);
+    selectedEventRef.current = "";
+  }, [clearActivationResources]);
 
   const loadPayloadsForRecord = useCallback(async (name, record, activationValue) => {
     const selectedActivation = String(activationValue);
@@ -1064,7 +1093,7 @@ function EventStoreContent() {
     setLoadingPayloads(true);
     try {
       const body = await apiRequest(`/wallets/${enc(name)}/events/${enc(record)}/payloads`);
-      if (!isCurrentScope(name, selectedActivation, requestId, payloadRequestRef)) return null;
+      if (!isCurrentEventScope(name, selectedActivation, record, requestId, payloadRequestRef)) return null;
 
       const rows = Array.isArray(body?.payloads) ? body.payloads : [];
       const unique = new Map();
@@ -1079,7 +1108,7 @@ function EventStoreContent() {
       setPayloads(collected);
       return collected;
     } catch (err) {
-      if (isCurrentScope(name, selectedActivation, requestId, payloadRequestRef)) {
+      if (isCurrentEventScope(name, selectedActivation, record, requestId, payloadRequestRef)) {
         setPayloads([]);
         setError(`Unable to load payload records: ${err instanceof Error ? err.message : "unknown API error"}`);
       }
@@ -1087,7 +1116,7 @@ function EventStoreContent() {
     } finally {
       if (requestId === payloadRequestRef.current) setLoadingPayloads(false);
     }
-  }, [isCurrentScope]);
+  }, [isCurrentEventScope]);
 
   const loadEvents = useCallback(async (name) => {
     if (!name) {
@@ -1370,131 +1399,159 @@ function EventStoreContent() {
     console.info(`[EventStore Refresh] ${entry.time} — ${stage}`);
   }, []);
 
+  const applyEventContext = useCallback((row, networkRows) => {
+    const record = String(row?.record ?? "");
+    if (!record) return false;
 
-const loadInitial = useCallback(async () => {
-  const bootId = ++bootRequestRef.current;
+    const selectedActivation = activationFromEvent(row) ?? "0";
 
-  setLoadingList(true);
-  setError("");
-  setNotice("");
-  setRefreshLog([]);
-  logRefresh("Starting scope load");
+    contextGenRef.current += 1;
+    const gen = contextGenRef.current;
 
-  if (!substrate) {
-    clearScopeData();
-    setNetworks([]);
-    setEvent("");
-    setActivation("");
-    selectedActivationRef.current = "";
-    setError("Event Store requires a substrate query parameter.");
-    setLoadingList(false);
-    logRefresh("Missing substrate");
-    return;
-  }
+    payloadRequestRef.current += 1;
+    boardRequestRef.current += 1;
+    wireRequestRef.current += 1;
+    budgetRequestRef.current += 1;
 
-  selectedSubstrateRef.current = substrate;
-  selectedActivationRef.current = "";
-  clearScopeData();
-  setEvent("");
-  setActivation("");
-
-  try {
-    logRefresh("Loading persisted events");
-
-    const eventRows = await loadEvents(substrate);
-
-    if (bootId !== bootRequestRef.current) return;
-
-    if (eventRows === null) {
-      setLoadingList(false);
-      return;
-    }
-
-    setEvents(eventRows);
-
-    if (eventRows.length === 0) {
-      setNetworks([]);
-      setEvent("");
-      setActivation("");
-      selectedActivationRef.current = "";
-      setNotice("No persisted events found for this substrate.");
-      logRefresh("No persisted events");
-      return;
-    }
-
-    // Resolve the persisted event internally from the substrate event list.
-    const matched = eventRows[0];
-    const resolvedEvent = String(matched?.record ?? "");
-
-    if (!resolvedEvent) {
-      setNetworks([]);
-      setEvent("");
-      setActivation("");
-      selectedActivationRef.current = "";
-      setError("Persisted event records contain no record identifier.");
-      logRefresh("Event record resolution failed");
-      return;
-    }
-
-    setEvent(resolvedEvent);
-
-    const selectedActivation = activationFromEvent(matched) ?? "0";
+    selectedEventRef.current = record;
     selectedActivationRef.current = selectedActivation;
+    setEvent(record);
     setActivation(selectedActivation);
 
-    logRefresh("Loading networks");
+    clearActivationResources();
+    setError("");
+    setNotice("");
+    setBudgetLoadError("");
 
-    const networkRows = await listNetworks();
+    const name = selectedSubstrateRef.current;
+    const nets = networkRows || networks;
 
-    if (
-      bootId !== bootRequestRef.current ||
-      selectedSubstrateRef.current !== substrate ||
-      selectedActivationRef.current !== selectedActivation
-    ) {
+    loadActivationResources(
+      name,
+      record,
+      selectedActivation,
+      nets,
+      () =>
+        contextGenRef.current === gen &&
+        selectedSubstrateRef.current === name &&
+        selectedActivationRef.current === selectedActivation &&
+        selectedEventRef.current === record,
+    );
+
+    return true;
+  }, [clearActivationResources, loadActivationResources, networks]);
+
+  const chooseEvent = useCallback((recordValue) => {
+    const record = String(recordValue || "").trim();
+    if (!record) return;
+    if (record === selectedEventRef.current) return;
+
+    const matched = events.find((row) => String(row?.record) === record);
+    if (!matched) {
+      setError(`Selected event "${record}" is not in the persisted event list.`);
       return;
     }
 
-    setNetworks(networkRows);
+    applyEventContext(matched, networks);
+  }, [events, networks, applyEventContext]);
 
-    logRefresh("Starting activation resources");
+  const loadInitial = useCallback(async () => {
+    const bootId = ++bootRequestRef.current;
 
-    loadActivationResources(
-      substrate,
-      resolvedEvent,
-      selectedActivation,
-      networkRows,
-      () =>
-        bootId === bootRequestRef.current &&
-        selectedSubstrateRef.current === substrate &&
-        selectedActivationRef.current === selectedActivation,
-    );
+    setLoadingList(true);
+    setError("");
+    setNotice("");
+    setRefreshLog([]);
+    logRefresh("Starting scope load");
 
-    logRefresh("Page-level load complete");
-  } catch (err) {
-    if (bootId !== bootRequestRef.current) return;
-
-    setError(
-      err instanceof Error
-        ? err.message
-        : "Unable to load Event Store.",
-    );
-  } finally {
-    if (bootId === bootRequestRef.current) {
+    if (!substrate) {
+      clearScopeData();
+      setNetworks([]);
+      setError("Event Store requires a substrate query parameter.");
       setLoadingList(false);
-      logRefresh("Page refresh indicator cleared");
+      logRefresh("Missing substrate");
+      return;
     }
-  }
-}, [
-  substrate,
-  clearScopeData,
-  loadEvents,
-  loadActivationResources,
-  logRefresh,
-]);
 
-useEffect(() => {
-  loadInitial();
-}, [loadInitial]);
+    selectedSubstrateRef.current = substrate;
+    selectedActivationRef.current = "";
+    selectedEventRef.current = "";
+    clearScopeData();
+
+    try {
+      logRefresh("Loading persisted events");
+      const eventRows = await loadEvents(substrate);
+
+      if (bootId !== bootRequestRef.current) return;
+
+      if (eventRows === null) {
+        setLoadingList(false);
+        return;
+      }
+
+      if (eventRows.length === 0) {
+        setNetworks([]);
+        setEvent("");
+        setActivation("");
+        selectedActivationRef.current = "";
+        selectedEventRef.current = "";
+        setNotice("No persisted events found for this substrate.");
+        logRefresh("No persisted events");
+        setLoadingList(false);
+        return;
+      }
+
+      logRefresh("Loading networks");
+      const networkRows = await listNetworks();
+
+      if (bootId !== bootRequestRef.current || selectedSubstrateRef.current !== substrate) {
+        return;
+      }
+
+      setNetworks(networkRows);
+
+      const matched =
+        eventRows.find((row) => String(row?.record ?? "").length > 0) ||
+        null;
+
+      if (!matched) {
+        setEvent("");
+        setActivation("");
+        selectedActivationRef.current = "";
+        selectedEventRef.current = "";
+        setError("Persisted event records contain no record identifier.");
+        logRefresh("Event record resolution failed");
+        setLoadingList(false);
+        return;
+      }
+
+      logRefresh("Selecting default event");
+      applyEventContext(matched, networkRows);
+      logRefresh("Page-level load complete");
+    } catch (err) {
+      if (bootId !== bootRequestRef.current) return;
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load Event Store.",
+      );
+    } finally {
+      if (bootId === bootRequestRef.current) {
+        setLoadingList(false);
+        logRefresh("Page refresh indicator cleared");
+      }
+    }
+  }, [
+    substrate,
+    clearScopeData,
+    loadEvents,
+    applyEventContext,
+    logRefresh,
+  ]);
+
+  useEffect(() => {
+    loadInitial();
+  }, [loadInitial]);
 
   const runningBitcoinNetworkIds = useMemo(
     () =>
@@ -1689,21 +1746,9 @@ useEffect(() => {
     ? "Loading persisted events…"
     : substrate
       ? "No persisted event records were returned."
-      : "Substrate and event_ must be supplied by the parent route.";
+      : "Substrate must be supplied by the parent route.";
 
   const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
-
-  const refreshStages = [
-    "Starting scope load",
-    "Loading events",
-    "Event not found",
-    "Loading networks",
-    "Starting activation resources",
-    "Page-level load complete",
-    "Page refresh indicator cleared",
-    "Missing entry context",
-    "Manual refresh requested",
-  ];
 
   return (
     <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
@@ -1721,7 +1766,7 @@ useEffect(() => {
             </h1>
             <p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 sm:text-sm dark:text-zinc-400">
               Event-scoped payloads, network budgets, payload boards, Bitcoin observation and API-owned wirepackets.
-              Context is supplied by the parent route.
+              Substrate is supplied by the parent route; select any persisted event to switch context.
             </p>
           </div>
 
@@ -1735,7 +1780,7 @@ useEffect(() => {
             <button
               type="button"
               className={BUTTON}
-              disabled={!substrate || !event || loadingList}
+              disabled={!substrate || loadingList}
               onClick={refreshAll}
             >
               {loadingList ? "Refreshing…" : "Refresh"}
@@ -1808,12 +1853,41 @@ useEffect(() => {
           subtitle={
             substrate
               ? `${substrate} · Event ${event || "—"}`
-              : "No context from parent route"
+              : "No substrate from parent route"
           }
           badge={overviewBadge}
           className="w-full"
         >
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block min-w-0 sm:col-span-2">
+              <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                Persisted event
+              </span>
+              <select
+                className={INPUT}
+                value={event}
+                disabled={!substrate || loadingList || eventOptions.length === 0}
+                onChange={(e) => chooseEvent(e.target.value)}
+                aria-label="Select persisted event"
+              >
+                {eventOptions.length === 0 ? (
+                  <option value="">
+                    {loadingEvents || loadingList
+                      ? "Loading events…"
+                      : "No persisted events"}
+                  </option>
+                ) : (
+                  eventOptions.map(({ record, row }) => (
+                    <option key={record} value={record}>
+                      {eventOptionLabel(row)}
+                    </option>
+                  ))
+                )}
+              </select>
+            </label>
+          </div>
+
+          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
             <Stat label="Substrate" value={substrate || "—"} wide />
             <Stat label="Event" value={event || "—"} wide />
             <Stat label="Activation" value={activation || "—"} />
