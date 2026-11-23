@@ -65,7 +65,7 @@ if (["string", "number", "bigint"].includes(typeof value)) {
 return String(value);
 }
 if (Array.isArray(value)) {
-return value.length ? ⁠${value.length} items⁠ : "None";
+return value.length ? `${value.length} items` : "None";
 }
 return "Details available";
 }
