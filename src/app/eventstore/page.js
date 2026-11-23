@@ -18,42 +18,103 @@ segwit: { label: "SegWit · P2WPKH", note: "BIP84 · m/84'/0'/0'/0/0" },
 other: { label: "Bitcoin", note: "" },
 };
 const INPUT =
-"h-10 w-full min-w-0 rounded-xl border border-zinc-200 bg-white px-3 text-sm outline-none transition focus:border-zinc-500 focus:ring-4 focus:ring-zinc-500/10 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950";
+  "h-10 w-full min-w-0 rounded-xl border border-zinc-200 bg-white px-3 text-sm outline-none transition focus:border-zinc-500 focus:ring-4 focus:ring-zinc-500/10 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950";
 const BUTTON =
-"inline-flex min-h-10 items-center justify-center rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium transition hover:bg-zinc-50 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800";
+  "inline-flex min-h-10 items-center justify-center rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium transition hover:bg-zinc-50 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800";
 const OUTER =
-"qtm-pop min-w-0 self-start rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900";
+  "qtm-pop min-w-0 self-start rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900";
 const INNER =
-"qtm-pop min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/70 dark:border-zinc-800 dark:bg-zinc-950/60";
-const QTM_STYLES = ⁠@keyframes qtm-pop { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } } .qtm-pop { animation: qtm-pop 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both; } @keyframes qtm-backdrop-in { from { opacity: 0; } to { opacity: 1; } } @keyframes qtm-dialog-in { from { opacity: 0; transform: translateY(12px) scale(0.97); } to { opacity: 1; transform: none; } } .qtm-backdrop { animation: qtm-backdrop-in 0.2s ease-out both; } .qtm-dialog { animation: qtm-dialog-in 0.25s cubic-bezier(0.2, 0.8, 0.2, 1) both; } @media (prefers-reduced-motion: reduce) { .qtm-pop, .qtm-backdrop, .qtm-dialog { animation: none; } }⁠;
+  "qtm-pop min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/70 dark:border-zinc-800 dark:bg-zinc-950/60";
+
+const QTM_STYLES = `
+@keyframes qtm-pop {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.qtm-pop {
+  animation: qtm-pop 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes qtm-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes qtm-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.qtm-backdrop {
+  animation: qtm-backdrop-in 0.2s ease-out both;
+}
+
+.qtm-dialog {
+  animation: qtm-dialog-in 0.25s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qtm-pop,
+  .qtm-backdrop,
+  .qtm-dialog {
+    animation: none;
+  }
+}
+`;
+
 const WIREPACKETS_POLL_MS = 2000;
+
 async function apiRequest(path, options = {}) {
-let response;
-try {
-response = await fetch(⁠${API_BASE}${path}⁠, {
-...options,
-cache: "no-store",
-headers: {
-Accept: "application/json",
-...(options.body ? { "Content-Type": "application/json" } : {}),
-...options.headers,
-},
-});
-} catch (cause) {
-if (cause?.name === "AbortError") throw cause;
-throw new Error(
-⁠Could not reach the QTM API at ${API_BASE}: ${ cause instanceof Error ? cause.message : "network error" }⁠,
-);
-}
-const raw = await response.text();
-let body = {};
-if (raw) {
-try {
-body = JSON.parse(raw);
-} catch {
-body = { response_text: raw };
-}
-}
+  let response;
+
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      cache: "no-store",
+      headers: {
+        Accept: "application/json",
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...options.headers,
+      },
+    });
+  } catch (cause) {
+    if (cause?.name === "AbortError") throw cause;
+
+    throw new Error(
+      `Could not reach the QTM API at ${API_BASE}: ${
+        cause instanceof Error ? cause.message : "network error"
+      }`,
+    );
+  }
+
+  const raw = await response.text();
+
+  let body = {};
+
+  if (raw) {
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = { response_text: raw };
+    }
+  }
 if (!response.ok) {
 throw new Error(
 body?.error ||
