@@ -1,2320 +1,2593 @@
 "use client";
+
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
+
 // Same API origin configuration as the main page (src/app/page.js).
 const API_BASE = (
-process.env.NEXT_PUBLIC_QTM_API_BASE ||
-"https://qtm-api.onrender.com"
-).replace(//+$/, "");
+  process.env.NEXT_PUBLIC_QTM_API_BASE ||
+  "https://qtm-api.onrender.com"
+).replace(/\/+$/, "");
+
 const COIN_TYPES = [
-{ key: "bitcoin", name: "Bitcoin", symbol: "BTC", type: 0, path: "m/44'/0'/0'/0/0" },
-{ key: "ethereum", name: "Ethereum", symbol: "ETH", type: 60, path: "m/44'/60'/0'/0/0" },
-{ key: "solana", name: "Solana", symbol: "SOL", type: 501, path: "m/44'/501'/0'/0'" },
-{ key: "tron", name: "Tron", symbol: "TRX", type: 195, path: "m/44'/195'/0'/0/0" },
+  { key: "bitcoin", name: "Bitcoin", symbol: "BTC", type: 0, path: "m/44'/0'/0'/0/0" },
+  { key: "ethereum", name: "Ethereum", symbol: "ETH", type: 60, path: "m/44'/60'/0'/0/0" },
+  { key: "solana", name: "Solana", symbol: "SOL", type: 501, path: "m/44'/501'/0'/0'" },
+  { key: "tron", name: "Tron", symbol: "TRX", type: 195, path: "m/44'/195'/0'/0/0" },
 ];
+
 const BITCOIN_KINDS = {
-legacy: { label: "Legacy · P2PKH", note: "BIP44 · m/44'/0'/0'/0/0" },
-segwit: { label: "SegWit · P2WPKH", note: "BIP84 · m/84'/0'/0'/0/0" },
-other: { label: "Bitcoin", note: "" },
+  legacy: { label: "Legacy · P2PKH", note: "BIP44 · m/44'/0'/0'/0/0" },
+  segwit: { label: "SegWit · P2WPKH", note: "BIP84 · m/84'/0'/0'/0/0" },
+  other: { label: "Bitcoin", note: "" },
 };
+
 const INPUT =
-"h-10 w-full min-w-0 rounded-xl border border-zinc-200 bg-white px-3 text-sm outline-none transition focus:border-zinc-500 focus:ring-4 focus:ring-zinc-500/10 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950";
+  "h-10 w-full min-w-0 rounded-xl border border-zinc-200 bg-white px-3 text-sm outline-none transition focus:border-zinc-500 focus:ring-4 focus:ring-zinc-500/10 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950";
 const BUTTON =
-"inline-flex min-h-10 items-center justify-center rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium transition hover:bg-zinc-50 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800";
+  "inline-flex min-h-10 items-center justify-center rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium transition hover:bg-zinc-50 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800";
 const OUTER =
-"qtm-pop min-w-0 self-start rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900";
+  "qtm-pop min-w-0 self-start rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900";
 const INNER =
-"qtm-pop min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/70 dark:border-zinc-800 dark:bg-zinc-950/60";
-const QTM_STYLES = ⁠@keyframes qtm-pop { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } } .qtm-pop { animation: qtm-pop 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both; } @keyframes qtm-backdrop-in { from { opacity: 0; } to { opacity: 1; } } @keyframes qtm-dialog-in { from { opacity: 0; transform: translateY(12px) scale(0.97); } to { opacity: 1; transform: none; } } .qtm-backdrop { animation: qtm-backdrop-in 0.2s ease-out both; } .qtm-dialog { animation: qtm-dialog-in 0.25s cubic-bezier(0.2, 0.8, 0.2, 1) both; } @media (prefers-reduced-motion: reduce) { .qtm-pop, .qtm-backdrop, .qtm-dialog { animation: none; } }⁠;
+  "qtm-pop min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/70 dark:border-zinc-800 dark:bg-zinc-950/60";
+
+const QTM_STYLES = `
+@keyframes qtm-pop {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+.qtm-pop { animation: qtm-pop 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@keyframes qtm-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes qtm-dialog-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+.qtm-backdrop { animation: qtm-backdrop-in 0.2s ease-out both; }
+.qtm-dialog { animation: qtm-dialog-in 0.25s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@media (prefers-reduced-motion: reduce) {
+  .qtm-pop, .qtm-backdrop, .qtm-dialog { animation: none; }
+}
+`;
+
 const WIREPACKETS_POLL_MS = 2000;
+
 const EMPTY_HISTORY = Object.freeze({
-substrate: "",
-rows: [],
-directory: "",
-loading: false,
-error: "",
+  substrate: "",
+  rows: [],
+  directory: "",
+  loading: false,
+  error: "",
 });
+
 async function apiRequest(path, options = {}) {
-let response;
-try {
-response = await fetch(⁠${API_BASE}${path}⁠, {
-...options,
-cache: "no-store",
-headers: {
-Accept: "application/json",
-...(options.body ? { "Content-Type": "application/json" } : {}),
-...options.headers,
-},
-});
-} catch (cause) {
-if (cause?.name === "AbortError") throw cause;
-throw new Error(
-⁠Could not reach the QTM API at ${API_BASE}: ${ cause instanceof Error ? cause.message : "network error" }⁠,
-);
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      cache: "no-store",
+      headers: {
+        Accept: "application/json",
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...options.headers,
+      },
+    });
+  } catch (cause) {
+    if (cause?.name === "AbortError") throw cause;
+    throw new Error(
+      `Could not reach the QTM API at ${API_BASE}: ${
+        cause instanceof Error ? cause.message : "network error"
+      }`,
+    );
+  }
+
+  const raw = await response.text();
+  let body = {};
+  if (raw) {
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = { response_text: raw };
+    }
+  }
+  if (!response.ok) {
+    throw new Error(
+      body?.error ||
+        body?.message ||
+        body?.detail ||
+        body?.response_text ||
+        `Request failed with HTTP ${response.status}`,
+    );
+  }
+  return body;
 }
-const raw = await response.text();
-let body = {};
-if (raw) {
-try {
-body = JSON.parse(raw);
-} catch {
-body = { response_text: raw };
-}
-}
-if (!response.ok) {
-throw new Error(
-body?.error ||
-body?.message ||
-body?.detail ||
-body?.response_text ||
-⁠Request failed with HTTP ${response.status}⁠,
-);
-}
-return body;
-}
+
 function enc(value) {
-return encodeURIComponent(String(value));
+  return encodeURIComponent(String(value));
 }
+
 /* ───────────── Runtime call (mirrors callRuntime in src/app/page.js) ───────────── */
+
 function nativeInvoke() {
-if (typeof window === "undefined") return null;
-return (
-window.TAURI?.core?.invoke ??
-window.TAURI_INTERNALS?.invoke ??
-null
-);
+  if (typeof window === "undefined") return null;
+  return (
+    window.__TAURI__?.core?.invoke ??
+    window.__TAURI_INTERNALS__?.invoke ??
+    null
+  );
 }
+
 const NATIVE_COMMANDS = {
-listEvents: "qtm_events",
+  listEvents: "qtm_events",
 };
+
 const API_ROUTES = {
-listEvents: ({ name }) => ["GET", ⁠/wallets/${enc(name)}/events⁠],
+  listEvents: ({ name }) => ["GET", `/wallets/${enc(name)}/events`],
 };
+
 async function callRuntime(operation, args = {}) {
-const invoke = nativeInvoke();
-if (invoke) {
-try {
-return await invoke(NATIVE_COMMANDS[operation], args);
-} catch (cause) {
-throw new Error(
-typeof cause === "string" && cause.trim()
-? cause.trim()
-: cause instanceof Error && cause.message
-? cause.message
-: "The QP runtime reported an error.",
-);
+  const invoke = nativeInvoke();
+
+  if (invoke) {
+    try {
+      return await invoke(NATIVE_COMMANDS[operation], args);
+    } catch (cause) {
+      throw new Error(
+        typeof cause === "string" && cause.trim()
+          ? cause.trim()
+          : cause instanceof Error && cause.message
+            ? cause.message
+            : "The QP runtime reported an error.",
+      );
+    }
+  }
+
+  const route = API_ROUTES[operation];
+  if (typeof route !== "function") {
+    throw new Error(`Unsupported QP runtime operation: ${String(operation)}.`);
+  }
+  const [method, path] = route(args || {});
+  return apiRequest(path, { method });
 }
-}
-const route = API_ROUTES[operation];
-if (typeof route !== "function") {
-throw new Error(⁠Unsupported QP runtime operation: ${String(operation)}.⁠);
-}
-const [method, path] = route(args || {});
-return apiRequest(path, { method });
-}
+
 /* ───────────── Heritage activation & persisted event normalization ───────────── */
+
 function activationFromHeritage(event) {
-if (!event || typeof event !== "object") return null;
-const heritageState = event?.heritage?.state;
-const rawActivations =
-typeof heritageState?.activations === "function"
-? heritageState.activations()
-: heritageState?.activations ??
-heritageState?.activation_count ??
-heritageState?.activation;
-const candidate =
-rawActivations !== undefined && rawActivations !== null
-? rawActivations
-: event?.activation;
-return candidate === undefined ||
-candidate === null ||
-!/^\d+$/.test(String(candidate))
-? null
-: String(candidate);
+  if (!event || typeof event !== "object") return null;
+
+  const heritageState = event?.heritage?.state;
+  const rawActivations =
+    typeof heritageState?.activations === "function"
+      ? heritageState.activations()
+      : heritageState?.activations ??
+        heritageState?.activation_count ??
+        heritageState?.activation;
+
+  const candidate =
+    rawActivations !== undefined && rawActivations !== null
+      ? rawActivations
+      : event?.activation;
+
+  return candidate === undefined ||
+    candidate === null ||
+    !/^\d+$/.test(String(candidate))
+    ? null
+    : String(candidate);
 }
+
 function recordOf(row) {
-for (const key of ["record", "record_name", "filename", "id"]) {
-const value = row?.[key];
-if (typeof value === "string" && value.trim()) return value.trim();
+  for (const key of ["record", "record_name", "filename", "id"]) {
+    const value = row?.[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
 }
-return "";
-}
+
 function compareEventRows(a, b) {
-const aa = activationFromHeritage(a);
-const bb = activationFromHeritage(b);
-if (aa !== bb) {
-if (aa === null) return 1;
-if (bb === null) return -1;
-const x = BigInt(aa);
-const y = BigInt(bb);
-if (x !== y) return x < y ? -1 : 1;
+  const aa = activationFromHeritage(a);
+  const bb = activationFromHeritage(b);
+  if (aa !== bb) {
+    if (aa === null) return 1;
+    if (bb === null) return -1;
+    const x = BigInt(aa);
+    const y = BigInt(bb);
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  const ra = recordOf(a);
+  const rb = recordOf(b);
+  return ra < rb ? -1 : ra > rb ? 1 : 0;
 }
-const ra = recordOf(a);
-const rb = recordOf(b);
-return ra < rb ? -1 : ra > rb ? 1 : 0;
-}
+
 function normalizePersistedHistoryResponse(response) {
-const source = Array.isArray(response) ? response : response?.events;
-if (!Array.isArray(source)) {
-throw new Error("The runtime response did not include a persisted events array.");
+  const source = Array.isArray(response) ? response : response?.events;
+  if (!Array.isArray(source)) {
+    throw new Error("The runtime response did not include a persisted events array.");
+  }
+
+  const rows = [];
+  for (const row of source) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+    const record = recordOf(row);
+    const activation = activationFromHeritage(row);
+    rows.push({
+      ...row,
+      ...(record ? { record } : {}),
+      ...(activation !== null ? { activation } : {}),
+    });
+  }
+
+  const directory =
+    !Array.isArray(response) && typeof response?.directory === "string"
+      ? response.directory
+      : "";
+
+  return {
+    rows: rows.sort(compareEventRows),
+    directory,
+  };
 }
-const rows = [];
-for (const row of source) {
-if (!row || typeof row !== "object" || Array.isArray(row)) continue;
-const record = recordOf(row);
-const activation = activationFromHeritage(row);
-rows.push({
-...row,
-...(record ? { record } : {}),
-...(activation !== null ? { activation } : {}),
-});
-}
-const directory =
-!Array.isArray(response) && typeof response?.directory === "string"
-? response.directory
-: "";
-return {
-rows: rows.sort(compareEventRows),
-directory,
-};
-}
+
 function extractSelectableEvents(rows) {
-const seen = new Set();
-const result = [];
-for (const row of Array.isArray(rows) ? rows : []) {
-const record = recordOf(row);
-const activation = activationFromHeritage(row);
-if (!record || activation === null || seen.has(record)) continue;
-seen.add(record);
-result.push({ ...row, record, activation });
+  const seen = new Set();
+  const result = [];
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const record = recordOf(row);
+    const activation = activationFromHeritage(row);
+    if (!record || activation === null || seen.has(record)) continue;
+    seen.add(record);
+    result.push({ ...row, record, activation });
+  }
+
+  return result;
 }
-return result;
-}
+
 function normalizeNetworkId(value) {
-if (typeof value !== "string" && typeof value !== "number") return "";
-return String(value).trim();
+  if (typeof value !== "string" && typeof value !== "number") return "";
+  return String(value).trim();
 }
+
 function observationMatches(status, networkId, activationValue) {
-if (!status || typeof status !== "object") return false;
-if (status.network != null && normalizeNetworkId(status.network) !== networkId) return false;
-if (status.activation != null && String(status.activation) !== String(activationValue)) return false;
-return true;
+  if (!status || typeof status !== "object") return false;
+  if (status.network != null && normalizeNetworkId(status.network) !== networkId) return false;
+  if (status.activation != null && String(status.activation) !== String(activationValue)) return false;
+  return true;
 }
+
 function normalizeDerivedNetwork(entry) {
-if (typeof entry === "string" || typeof entry === "number") {
-const id = normalizeNetworkId(entry);
-if (!id) return null;
-const lower = id.toLowerCase();
-const isBtc = lower.includes("btc") || lower.includes("bitcoin");
-const isSegwit = /segwit|bech32|p2wpkh|84/.test(lower);
-const isLegacy = /legacy|p2pkh|44/.test(lower);
-return {
-id,
-name: id,
-coin: isBtc ? "bitcoin" : undefined,
-purpose: isBtc ? (isSegwit ? "84" : isLegacy ? "44" : undefined) : undefined,
-path: isBtc
-? isSegwit
-? "m/84'/0'/0'/0/0"
-: isLegacy
-? "m/44'/0'/0'/0/0"
-: undefined
-: undefined,
-registered: true,
-};
+  if (typeof entry === "string" || typeof entry === "number") {
+    const id = normalizeNetworkId(entry);
+    if (!id) return null;
+    const lower = id.toLowerCase();
+    const isBtc = lower.includes("btc") || lower.includes("bitcoin");
+    const isSegwit = /segwit|bech32|p2wpkh|84/.test(lower);
+    const isLegacy = /legacy|p2pkh|44/.test(lower);
+    return {
+      id,
+      name: id,
+      coin: isBtc ? "bitcoin" : undefined,
+      purpose: isBtc ? (isSegwit ? "84" : isLegacy ? "44" : undefined) : undefined,
+      path: isBtc
+        ? isSegwit
+          ? "m/84'/0'/0'/0/0"
+          : isLegacy
+            ? "m/44'/0'/0'/0/0"
+            : undefined
+        : undefined,
+      registered: true,
+    };
+  }
+
+  const id = normalizeNetworkId(entry?.id ?? entry?.network_id ?? entry?.network);
+  if (!id) return null;
+  return {
+    id,
+    name: entry.name || id,
+    coin: entry.coin,
+    purpose: entry.purpose,
+    path: entry.path,
+    registered: entry.registered ?? true,
+  };
 }
-const id = normalizeNetworkId(entry?.id ?? entry?.network_id ?? entry?.network);
-if (!id) return null;
-return {
-id,
-name: entry.name || id,
-coin: entry.coin,
-purpose: entry.purpose,
-path: entry.path,
-registered: entry.registered ?? true,
-};
-}
+
 async function fetchDerivedNetworksForActivation(substrate, activationValue, signal) {
-const body = await apiRequest(
-⁠/wallets/${enc(substrate)}/activations/${enc(activationValue)}/networks⁠,
-{ signal },
-);
-if (body?.activation != null && String(body.activation) !== String(activationValue)) {
-throw new Error(
-⁠Derived networks activation mismatch (expected ${activationValue}, got ${body.activation}).⁠,
-);
+  const body = await apiRequest(
+    `/wallets/${enc(substrate)}/activations/${enc(activationValue)}/networks`,
+    { signal },
+  );
+
+  if (body?.activation != null && String(body.activation) !== String(activationValue)) {
+    throw new Error(
+      `Derived networks activation mismatch (expected ${activationValue}, got ${body.activation}).`,
+    );
+  }
+
+  const rawList = Array.isArray(body)
+    ? body
+    : Array.isArray(body?.networks)
+      ? body.networks
+      : [];
+
+  const unique = new Map();
+  for (const item of rawList) {
+    if (item && typeof item === "object" && item.registered === false) continue;
+    const normalized = normalizeDerivedNetwork(item);
+    if (normalized && !unique.has(normalized.id)) {
+      unique.set(normalized.id, normalized);
+    }
+  }
+
+  return {
+    event: body?.event && typeof body.event === "object" ? body.event : null,
+    networks: [...unique.values()],
+  };
 }
-const rawList = Array.isArray(body)
-? body
-: Array.isArray(body?.networks)
-? body.networks
-: [];
-const unique = new Map();
-for (const item of rawList) {
-if (item && typeof item === "object" && item.registered === false) continue;
-const normalized = normalizeDerivedNetwork(item);
-if (normalized && !unique.has(normalized.id)) {
-unique.set(normalized.id, normalized);
-}
-}
-return {
-event: body?.event && typeof body.event === "object" ? body.event : null,
-networks: [...unique.values()],
-};
-}
+
 function normalizePayload(entry, fallbackRecord) {
-const network = normalizeDerivedNetwork(entry?.network);
-const path = entry?.path ?? entry?.payload_path;
-const depth = entry?.depth_identifier ?? entry?.depthIdentifier ?? entry?.depth_id;
-if (!network || typeof path !== "string" || depth == null) return null;
-const record = String(entry?.record ?? fallbackRecord);
-const rawDirection = String(entry?.direction || "").toLowerCase();
-const direction =
-rawDirection === "transit_inputs" || rawDirection === "transit"
-? "transit_inputs"
-: rawDirection === "exile_outputs" || rawDirection === "exile"
-? "exile_outputs"
-: record.startsWith("event_")
-? "transit_inputs"
-: record.startsWith("exile_")
-? "exile_outputs"
-: "unclassified";
-const objects = Array.isArray(entry?.objects) ? entry.objects : [];
-return {
-...entry,
-record,
-network,
-path,
-depth_identifier: String(depth),
-direction,
-objects,
-};
+  const network = normalizeDerivedNetwork(entry?.network);
+  const path = entry?.path ?? entry?.payload_path;
+  const depth = entry?.depth_identifier ?? entry?.depthIdentifier ?? entry?.depth_id;
+  if (!network || typeof path !== "string" || depth == null) return null;
+  const record = String(entry?.record ?? fallbackRecord);
+  const rawDirection = String(entry?.direction || "").toLowerCase();
+  const direction =
+    rawDirection === "transit_inputs" || rawDirection === "transit"
+      ? "transit_inputs"
+      : rawDirection === "exile_outputs" || rawDirection === "exile"
+        ? "exile_outputs"
+        : record.startsWith("event_")
+          ? "transit_inputs"
+          : record.startsWith("exile_")
+            ? "exile_outputs"
+            : "unclassified";
+  const objects = Array.isArray(entry?.objects) ? entry.objects : [];
+  return {
+    ...entry,
+    record,
+    network,
+    path,
+    depth_identifier: String(depth),
+    direction,
+    objects,
+  };
 }
+
 function payloadRowKey(payload) {
-return JSON.stringify([
-payload.record,
-payload.network.id,
-payload.path,
-payload.depth_identifier,
-]);
+  return JSON.stringify([
+    payload.record,
+    payload.network.id,
+    payload.path,
+    payload.depth_identifier,
+  ]);
 }
+
 function coinKey(network) {
-if (!network) return "other";
-const coin = String(network.coin ?? "").toLowerCase();
-const id = String(network.id ?? "").toLowerCase();
-for (const c of COIN_TYPES) {
-if (
-coin === c.key ||
-coin === String(c.type) ||
-coin === c.symbol.toLowerCase() ||
-id === c.symbol.toLowerCase() ||
-id.includes(c.key)
-) {
-return c.key;
+  if (!network) return "other";
+  const coin = String(network.coin ?? "").toLowerCase();
+  const id = String(network.id ?? "").toLowerCase();
+  for (const c of COIN_TYPES) {
+    if (
+      coin === c.key ||
+      coin === String(c.type) ||
+      coin === c.symbol.toLowerCase() ||
+      id === c.symbol.toLowerCase() ||
+      id.includes(c.key)
+    ) {
+      return c.key;
+    }
+  }
+  const match = String(network.path ?? "").match(/^m\/\d+'?\/(\d+)'?/);
+  if (match) {
+    const found = COIN_TYPES.find((c) => String(c.type) === match[1]);
+    if (found) return found.key;
+  }
+  return "other";
 }
-}
-const match = String(network.path ?? "").match(/^m/\d+'?/(\d+)'?/);
-if (match) {
-const found = COIN_TYPES.find((c) => String(c.type) === match[1]);
-if (found) return found.key;
-}
-return "other";
-}
+
 function bitcoinNetwork(network) {
-return coinKey(network) === "bitcoin";
+  return coinKey(network) === "bitcoin";
 }
+
 function bitcoinKind(network) {
-const pathPurpose = String(network.path ?? "").match(/^m/(\d+)'?/);
-const purpose = String(network.purpose ?? "").trim() || (pathPurpose ? pathPurpose[1] : "");
-if (purpose === "84") return "segwit";
-if (purpose === "44") return "legacy";
-const text = ⁠${network.id} ${network.name}⁠.toLowerCase();
-if (/segwit|bech32|p2wpkh/.test(text)) return "segwit";
-if (/legacy|p2pkh/.test(text)) return "legacy";
-return "other";
+  const pathPurpose = String(network.path ?? "").match(/^m\/(\d+)'?/);
+  const purpose = String(network.purpose ?? "").trim() || (pathPurpose ? pathPurpose[1] : "");
+  if (purpose === "84") return "segwit";
+  if (purpose === "44") return "legacy";
+  const text = `${network.id} ${network.name}`.toLowerCase();
+  if (/segwit|bech32|p2wpkh/.test(text)) return "segwit";
+  if (/legacy|p2pkh/.test(text)) return "legacy";
+  return "other";
 }
+
 function ownPayloadKind(board, network) {
-const own = coinKey(network);
-const matches = (Array.isArray(board?.kinds) ? board.kinds : []).filter(
-(entry) => coinKey({ coin: entry?.kind, id: String(entry?.kind ?? "") }) === own,
-);
-return matches.sort((a, b) => Number(Boolean(b.in_scope)) - Number(Boolean(a.in_scope)))[0] || null;
+  const own = coinKey(network);
+  const matches = (Array.isArray(board?.kinds) ? board.kinds : []).filter(
+    (entry) => coinKey({ coin: entry?.kind, id: String(entry?.kind ?? "") }) === own,
+  );
+  return matches.sort((a, b) => Number(Boolean(b.in_scope)) - Number(Boolean(a.in_scope)))[0] || null;
 }
+
 function money(value) {
-if (value === undefined || value === null || value === "") return "—";
-return String(value);
+  if (value === undefined || value === null || value === "") return "—";
+  return String(value);
 }
+
 function flag(value) {
-return value == null ? "Not reported" : value ? "Yes" : "No";
+  return value == null ? "Not reported" : value ? "Yes" : "No";
 }
+
 /* ───────────────────────── UI primitives ───────────────────────── */
+
 function Pill({ children, tone = "neutral" }) {
-const tones = {
-neutral:
-"border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
-ok: "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300",
-warn: "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200",
-};
-return (
-<span className={⁠inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${tones[tone]}⁠}>
-{children}
-</span>
-);
+  const tones = {
+    neutral:
+      "border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
+    ok: "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300",
+    warn: "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200",
+  };
+  return (
+    <span className={`inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${tones[tone]}`}>
+      {children}
+    </span>
+  );
 }
+
 function Notice({ children, type = "error" }) {
-const styles =
-type === "success"
-? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200"
-: "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200";
-return (
-<p role={type === "error" ? "alert" : "status"} className={⁠qtm-pop break-words rounded-xl border px-3 py-2 text-xs leading-5 ${styles}⁠}>
-{children}
-</p>
-);
+  const styles =
+    type === "success"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200"
+      : "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200";
+  return (
+    <p role={type === "error" ? "alert" : "status"} className={`qtm-pop break-words rounded-xl border px-3 py-2 text-xs leading-5 ${styles}`}>
+      {children}
+    </p>
+  );
 }
+
 function Field({ label, children }) {
-return (
-<div className="min-w-0">
-<dt className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-{label}
-</dt>
-<dd className="mt-0.5 break-words text-sm font-medium leading-5">{children ?? "—"}</dd>
-</div>
-);
+  return (
+    <div className="min-w-0">
+      <dt className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+        {label}
+      </dt>
+      <dd className="mt-0.5 break-words text-sm font-medium leading-5">{children ?? "—"}</dd>
+    </div>
+  );
 }
+
 function Fields({ children, min = "8rem" }) {
-return (
-<dl className="grid gap-x-4 gap-y-3" style={{ gridTemplateColumns: ⁠repeat(auto-fit, minmax(${min}, 1fr))⁠ }}>
-{children}
-</dl>
-);
+  return (
+    <dl className="grid gap-x-4 gap-y-3" style={{ gridTemplateColumns: `repeat(auto-fit, minmax(${min}, 1fr))` }}>
+      {children}
+    </dl>
+  );
 }
+
 function Stat({ label, value, wide = false }) {
-return (
-<div className={⁠min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/60 ${wide ? "col-span-2" : ""}⁠}>
-<p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">{label}</p>
-<p className="mt-1 break-all text-sm font-semibold tabular-nums">{value}</p>
-</div>
-);
+  return (
+    <div className={`min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/60 ${wide ? "col-span-2" : ""}`}>
+      <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">{label}</p>
+      <p className="mt-1 break-all text-sm font-semibold tabular-nums">{value}</p>
+    </div>
+  );
 }
+
 function Collapsible({ open, children }) {
-return (
-<div className={⁠grid transition-[grid-template-rows,opacity,visibility] duration-300 ease-out motion-reduce:transition-none ${open ? "visible grid-rows-[1fr] opacity-100" : "invisible grid-rows-[0fr] opacity-0"}⁠}>
-<div className="min-h-0 min-w-0 overflow-hidden">{children}</div>
-</div>
-);
+  return (
+    <div className={`grid transition-[grid-template-rows,opacity,visibility] duration-300 ease-out motion-reduce:transition-none ${open ? "visible grid-rows-[1fr] opacity-100" : "invisible grid-rows-[0fr] opacity-0"}`}>
+      <div className="min-h-0 min-w-0 overflow-hidden">{children}</div>
+    </div>
+  );
 }
+
 function Card({
-title,
-subtitle,
-badge,
-defaultOpen = false,
-inner = false,
-scroll = false,
-className = "",
-style,
-children,
+  title,
+  subtitle,
+  badge,
+  defaultOpen = false,
+  inner = false,
+  scroll = false,
+  className = "",
+  style,
+  children,
 }) {
-const [open, setOpen] = useState(defaultOpen);
-return (
-<section style={style} className={⁠${inner ? INNER : OUTER} ${className}⁠}>
-<button
-type="button"
-aria-expanded={open}
-onClick={() => setOpen((value) => !value)}
-className={⁠flex w-full items-center gap-3 text-left ${inner ? "px-3 py-2.5" : "px-4 py-3.5"}⁠}
->
-<span className="min-w-0 flex-1">
-<span className={⁠block truncate font-semibold ${inner ? "text-[11px] uppercase tracking-wider text-zinc-600 dark:text-zinc-300" : "text-sm"}⁠}>
-{title}
-</span>
-{subtitle && <span className="mt-0.5 block truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400">{subtitle}</span>}
-</span>
-{badge}
-<span aria-hidden="true" className={⁠shrink-0 text-zinc-400 transition-transform duration-300 ${open ? "rotate-180" : ""}⁠}>▾</span>
-</button>
-<Collapsible open={open}>
-<div className={⁠border-t border-zinc-200/80 dark:border-zinc-800 ${inner ? "p-3" : "p-4"} ${scroll ? "max-h-80 overflow-y-auto overscroll-contain" : ""}⁠}>
-{children}
-</div>
-</Collapsible>
-</section>
-);
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section style={style} className={`${inner ? INNER : OUTER} ${className}`}>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className={`flex w-full items-center gap-3 text-left ${inner ? "px-3 py-2.5" : "px-4 py-3.5"}`}
+      >
+        <span className="min-w-0 flex-1">
+          <span className={`block truncate font-semibold ${inner ? "text-[11px] uppercase tracking-wider text-zinc-600 dark:text-zinc-300" : "text-sm"}`}>
+            {title}
+          </span>
+          {subtitle && <span className="mt-0.5 block truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400">{subtitle}</span>}
+        </span>
+        {badge}
+        <span aria-hidden="true" className={`shrink-0 text-zinc-400 transition-transform duration-300 ${open ? "rotate-180" : ""}`}>▾</span>
+      </button>
+      <Collapsible open={open}>
+        <div className={`border-t border-zinc-200/80 dark:border-zinc-800 ${inner ? "p-3" : "p-4"} ${scroll ? "max-h-80 overflow-y-auto overscroll-contain" : ""}`}>
+          {children}
+        </div>
+      </Collapsible>
+    </section>
+  );
 }
+
 function SectionHeading({ title, meta, children }) {
-return (
-<div className="flex flex-wrap items-center gap-2 px-1 pt-2">
-<h2 className="text-base font-semibold tracking-tight">{title}</h2>
-{meta && <Pill>{meta}</Pill>}
-{children && <p className="basis-full text-xs text-zinc-500 dark:text-zinc-400">{children}</p>}
-</div>
-);
+  return (
+    <div className="flex flex-wrap items-center gap-2 px-1 pt-2">
+      <h2 className="text-base font-semibold tracking-tight">{title}</h2>
+      {meta && <Pill>{meta}</Pill>}
+      {children && <p className="basis-full text-xs text-zinc-500 dark:text-zinc-400">{children}</p>}
+    </div>
+  );
 }
+
 /* ───────────────────────── Network pieces ───────────────────────── */
+
 function BudgetSummary({ budget }) {
-return (
-<Fields min="7rem">
-<Field label="Min events">{money(budget?.min_events)}</Field>
-<Field label="Max events">{money(budget?.max_events)}</Field>
-</Fields>
-);
+  return (
+    <Fields min="7rem">
+      <Field label="Min events">{money(budget?.min_events)}</Field>
+      <Field label="Max events">{money(budget?.max_events)}</Field>
+    </Fields>
+  );
 }
+
 function BudgetEditor({ budget, disabled, saving, onSave }) {
-const toDraft = () => ({
-min_events: String(budget?.min_events ?? 0),
-max_events: String(budget?.max_events ?? 1024),
-});
-const [draft, setDraft] = useState(toDraft);
-useEffect(() => {
-setDraft(toDraft());
-// eslint-disable-next-line react-hooks/exhaustive-deps
-}, [budget?.min_events, budget?.max_events]);
-return (
-<form
-className="mt-4 grid gap-3 border-t border-zinc-200 pt-4 sm:grid-cols-2 dark:border-zinc-800"
-onSubmit={(event) => {
-event.preventDefault();
-onSave(draft);
-}}
->
-{[
-["min_events", "Min events"],
-["max_events", "Max events"],
-].map(([key, label]) => (
-<label key={key} className="block min-w-0">
-<span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
-{label}
-</span>
-<input
-className={INPUT}
-inputMode="numeric"
-value={draft[key]}
-disabled={disabled || saving}
-onChange={(event) =>
-setDraft((current) => ({
-...current,
-[key]: event.target.value,
-}))
+  const toDraft = () => ({
+    min_events: String(budget?.min_events ?? 0),
+    max_events: String(budget?.max_events ?? 1024),
+  });
+
+  const [draft, setDraft] = useState(toDraft);
+
+  useEffect(() => {
+    setDraft(toDraft());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [budget?.min_events, budget?.max_events]);
+
+  return (
+    <form
+      className="mt-4 grid gap-3 border-t border-zinc-200 pt-4 sm:grid-cols-2 dark:border-zinc-800"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSave(draft);
+      }}
+    >
+      {[
+        ["min_events", "Min events"],
+        ["max_events", "Max events"],
+      ].map(([key, label]) => (
+        <label key={key} className="block min-w-0">
+          <span className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
+            {label}
+          </span>
+          <input
+            className={INPUT}
+            inputMode="numeric"
+            value={draft[key]}
+            disabled={disabled || saving}
+            onChange={(event) =>
+              setDraft((current) => ({
+                ...current,
+                [key]: event.target.value,
+              }))
+            }
+          />
+        </label>
+      ))}
+
+      <div className="sm:col-span-2">
+        <button
+          className={`${BUTTON} w-full sm:w-auto`}
+          type="submit"
+          disabled={disabled || saving}
+        >
+          {saving ? "Saving budget…" : "Save network budget"}
+        </button>
+      </div>
+    </form>
+  );
 }
-/>
-</label>
-))}
-<div className="sm:col-span-2">
-<button
-className={⁠${BUTTON} w-full sm:w-auto⁠}
-type="submit"
-disabled={disabled || saving}
->
-{saving ? "Saving budget…" : "Save network budget"}
-</button>
-</div>
-</form>
-);
-}
+
 function PayloadBoard({ board, kind, loading }) {
-if (loading && !board) return <p className="text-xs text-zinc-500">Loading payload board…</p>;
-if (!board) return <p className="text-xs text-zinc-500">No payload-board response yet.</p>;
-const obs = board.observation;
-const ap = kind?.authorized_payload;
-return (
-<div className="space-y-3">
-{board.error && <Notice>{board.error}</Notice>}
-{board.message && <p className="text-xs text-zinc-500">{board.message}</p>}
-{kind ? (
-<Fields min="8rem">
-<Field label="Payload kind">{money(kind.kind)}</Field>
-<Field label="Commitment"><span className="break-all font-mono text-xs">{money(board.commitment)}</span></Field>
-<Field label="Depth path">{money(kind.depth_path)}</Field>
-<Field label="Depth record">{money(kind.depth_record)}</Field>
-<Field label="Depth objects">{kind.depth_objects?.length ?? 0}</Field>
-<Field label="Authorized payload">{flag(ap?.carried)}</Field>
-<Field label="Authorization">{money(ap?.authorization_state)}</Field>
-<Field label="Settlement">{money(ap?.settlement_state)}</Field>
-{obs && <Field label="Miner feature">{flag(obs.bit_minner_feature)}</Field>}
-{obs && <Field label="Settlement carried">{flag(obs.settlement_payload_carried)}</Field>}
-</Fields>
-) : (
-<p className="text-xs text-zinc-500">The API returned no payload kind for this network's chain.</p>
-)}
-</div>
-);
+  if (loading && !board) return <p className="text-xs text-zinc-500">Loading payload board…</p>;
+  if (!board) return <p className="text-xs text-zinc-500">No payload-board response yet.</p>;
+  const obs = board.observation;
+  const ap = kind?.authorized_payload;
+  return (
+    <div className="space-y-3">
+      {board.error && <Notice>{board.error}</Notice>}
+      {board.message && <p className="text-xs text-zinc-500">{board.message}</p>}
+      {kind ? (
+        <Fields min="8rem">
+          <Field label="Payload kind">{money(kind.kind)}</Field>
+          <Field label="Commitment"><span className="break-all font-mono text-xs">{money(board.commitment)}</span></Field>
+          <Field label="Depth path">{money(kind.depth_path)}</Field>
+          <Field label="Depth record">{money(kind.depth_record)}</Field>
+          <Field label="Depth objects">{kind.depth_objects?.length ?? 0}</Field>
+          <Field label="Authorized payload">{flag(ap?.carried)}</Field>
+          <Field label="Authorization">{money(ap?.authorization_state)}</Field>
+          <Field label="Settlement">{money(ap?.settlement_state)}</Field>
+          {obs && <Field label="Miner feature">{flag(obs.bit_minner_feature)}</Field>}
+          {obs && <Field label="Settlement carried">{flag(obs.settlement_payload_carried)}</Field>}
+        </Fields>
+      ) : (
+        <p className="text-xs text-zinc-500">The API returned no payload kind for this network&apos;s chain.</p>
+      )}
+    </div>
+  );
 }
+
 /* ───────────────────────── Bit-Miner log popup ───────────────────────── */
+
 const LOG_POLL_RUNNING_MS = 2500;
 const LOG_POLL_STOPPED_MS = 6000;
 const LOG_DISPLAY_MAX_CHARS = 250_000;
 const LOG_STICK_THRESHOLD_PX = 24;
+
 const LOG_BUTTON =
-"inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-[11px] font-medium transition hover:bg-zinc-50 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800";
+  "inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-[11px] font-medium transition hover:bg-zinc-50 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800";
+
 async function fetchBitMinerLog({ substrate, activation, network, signal }) {
-const path = ⁠/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(network)}/observation/log⁠;
-let response;
-try {
-response = await fetch(⁠${API_BASE}${path}⁠, { cache: "no-store", headers: { Accept: "text/plain" }, signal });
-} catch (cause) {
-if (cause?.name === "AbortError") throw cause;
-const reason = cause instanceof Error && cause.message ? cause.message : "network error";
-throw new Error(⁠Could not reach the QTM runtime at ${API_BASE} (${reason}).⁠);
+  const path = `/wallets/${enc(substrate)}/activations/${enc(activation)}/networks/${enc(network)}/observation/log`;
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, { cache: "no-store", headers: { Accept: "text/plain" }, signal });
+  } catch (cause) {
+    if (cause?.name === "AbortError") throw cause;
+    const reason = cause instanceof Error && cause.message ? cause.message : "network error";
+    throw new Error(`Could not reach the QTM runtime at ${API_BASE} (${reason}).`);
+  }
+
+  const text = await response.text();
+  if (!response.ok) {
+    let detail = text.trim();
+    try {
+      const parsed = JSON.parse(text);
+      detail = parsed?.error || parsed?.message || parsed?.detail || detail;
+    } catch {
+      // Keep the raw error body.
+    }
+    throw new Error(detail ? String(detail).slice(0, 400) : `Log request failed with HTTP ${response.status}.`);
+  }
+  return text.length > LOG_DISPLAY_MAX_CHARS ? text.slice(-LOG_DISPLAY_MAX_CHARS) : text;
 }
-const text = await response.text();
-if (!response.ok) {
-let detail = text.trim();
-try {
-const parsed = JSON.parse(text);
-detail = parsed?.error || parsed?.message || parsed?.detail || detail;
-} catch {
-// Keep the raw error body.
-}
-throw new Error(detail ? String(detail).slice(0, 400) : ⁠Log request failed with HTTP ${response.status}.⁠);
-}
-return text.length > LOG_DISPLAY_MAX_CHARS ? text.slice(-LOG_DISPLAY_MAX_CHARS) : text;
-}
+
 function BitMinerLogPopup({ substrate, activation, network, running, onClose, onRefreshStatus }) {
-const [log, setLog] = useState(null);
-const [loading, setLoading] = useState(true);
-const [refreshing, setRefreshing] = useState(false);
-const [error, setError] = useState("");
-const [updatedAt, setUpdatedAt] = useState(null);
-const [pinned, setPinned] = useState(true);
-const dialogRef = useRef(null);
-const scrollRef = useRef(null);
-const pinnedRef = useRef(true);
-const requestRef = useRef(0);
-const inflightRef = useRef(null);
-const closeRef = useRef(onClose);
-useEffect(() => { closeRef.current = onClose; }, [onClose]);
-const load = useCallback(async () => {
-inflightRef.current?.abort();
-const controller = new AbortController();
-inflightRef.current = controller;
-const requestId = ++requestRef.current;
-setRefreshing(true);
-try {
-const text = await fetchBitMinerLog({ substrate, activation, network, signal: controller.signal });
-if (requestId !== requestRef.current) return;
-setLog((previous) => (previous === text ? previous : text));
-setUpdatedAt(new Date());
-setError("");
-} catch (err) {
-if (err?.name === "AbortError" || requestId !== requestRef.current) return;
-setError(err instanceof Error ? err.message : "Unable to load the bit-miner log.");
-} finally {
-if (requestId === requestRef.current) {
-setLoading(false);
-setRefreshing(false);
+  const [log, setLog] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [pinned, setPinned] = useState(true);
+
+  const dialogRef = useRef(null);
+  const scrollRef = useRef(null);
+  const pinnedRef = useRef(true);
+  const requestRef = useRef(0);
+  const inflightRef = useRef(null);
+  const closeRef = useRef(onClose);
+
+  useEffect(() => { closeRef.current = onClose; }, [onClose]);
+
+  const load = useCallback(async () => {
+    inflightRef.current?.abort();
+    const controller = new AbortController();
+    inflightRef.current = controller;
+    const requestId = ++requestRef.current;
+    setRefreshing(true);
+    try {
+      const text = await fetchBitMinerLog({ substrate, activation, network, signal: controller.signal });
+      if (requestId !== requestRef.current) return;
+      setLog((previous) => (previous === text ? previous : text));
+      setUpdatedAt(new Date());
+      setError("");
+    } catch (err) {
+      if (err?.name === "AbortError" || requestId !== requestRef.current) return;
+      setError(err instanceof Error ? err.message : "Unable to load the bit-miner log.");
+    } finally {
+      if (requestId === requestRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    }
+  }, [substrate, activation, network]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer = null;
+    const interval = running ? LOG_POLL_RUNNING_MS : LOG_POLL_STOPPED_MS;
+    const tick = async () => {
+      if (!document.hidden) await load();
+      if (!cancelled) timer = setTimeout(tick, interval);
+    };
+    tick();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      requestRef.current += 1;
+      inflightRef.current?.abort();
+    };
+  }, [load, running]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
+  }, [log]);
+
+  function handleScroll() {
+    const el = scrollRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= LOG_STICK_THRESHOLD_PX;
+    pinnedRef.current = atBottom;
+    setPinned(atBottom);
+  }
+
+  function jumpToLatest() {
+    const el = scrollRef.current;
+    if (!el) return;
+    pinnedRef.current = true;
+    setPinned(true);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function handleRefresh() {
+    pinnedRef.current = true;
+    setPinned(true);
+    onRefreshStatus?.();
+    load();
+  }
+
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    dialogRef.current?.focus();
+
+    function onKeyDown(event) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeRef.current?.();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = dialogRef.current.querySelectorAll('button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])');
+      if (focusable.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+      if (previousFocus instanceof HTMLElement) previousFocus.focus();
+    };
+  }, []);
+
+  const hasLog = typeof log === "string" && log.length > 0;
+
+  return (
+    <div className="qtm-backdrop fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/50 p-3 backdrop-blur-sm sm:p-6" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="bitminer-log-title"
+        tabIndex={-1}
+        className="qtm-dialog flex max-h-[78vh] w-full max-w-[800px] flex-col overflow-hidden rounded-3xl border border-zinc-200 bg-white text-zinc-950 shadow-2xl outline-none sm:min-w-[min(720px,100%)] dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-zinc-200 px-4 py-3 sm:px-5 sm:py-4 dark:border-zinc-800">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 id="bitminer-log-title" className="text-sm font-semibold tracking-tight sm:text-base">Bit-Miner logs</h2>
+              <span role="status" className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${running ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300" : "border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"}`}>
+                <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${running ? "bg-emerald-500 motion-safe:animate-pulse" : "bg-zinc-400"}`} />
+                {running ? "Running" : "Stopped"}
+              </span>
+            </div>
+            <p className="mt-1 break-all font-mono text-[10px] leading-4 text-zinc-500 dark:text-zinc-400">{substrate} · activation {activation} · {network}</p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <button type="button" className={LOG_BUTTON} disabled={refreshing} onClick={handleRefresh}>{refreshing ? "Refreshing…" : "Refresh"}</button>
+            <button type="button" aria-label="Close log viewer" className={`${LOG_BUTTON} w-8 px-0 text-base leading-none`} onClick={onClose}>×</button>
+          </div>
+        </div>
+
+        <div className="relative flex min-h-0 flex-1 flex-col bg-zinc-950">
+          {error && (
+            <div role="alert" className="shrink-0 break-words border-b border-red-900/60 bg-red-950 px-4 py-2 text-xs leading-5 text-red-200">
+              {error}{hasLog ? " Showing the last output received." : ""}
+            </div>
+          )}
+          <div ref={scrollRef} onScroll={handleScroll} tabIndex={0} aria-label="Bit-miner process log output" className="min-h-[16rem] flex-1 overflow-auto overscroll-contain px-4 py-3 sm:px-5">
+            {loading && log === null ? (
+              <p className="text-xs text-zinc-400">Loading log…</p>
+            ) : hasLog ? (
+              <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-zinc-100 sm:text-xs">{log}</pre>
+            ) : error && log === null ? (
+              <p className="text-xs text-zinc-400">The log could not be loaded.</p>
+            ) : (
+              <p className="text-xs text-zinc-400">No log output yet. Output appears here once the bit-miner process writes to its log.</p>
+            )}
+          </div>
+          {!pinned && hasLog && <button type="button" onClick={jumpToLatest} className="absolute bottom-3 right-4 rounded-full border border-zinc-600 bg-zinc-800/95 px-3 py-1.5 text-[11px] font-medium text-zinc-100 shadow-lg transition hover:bg-zinc-700">Jump to latest ↓</button>}
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 px-4 py-2.5 text-[10px] text-zinc-500 sm:px-5 dark:border-zinc-800 dark:text-zinc-400">
+          <span>{updatedAt ? `Updated ${updatedAt.toLocaleTimeString()}` : "Waiting for first response…"}</span>
+          <span>Auto-refresh every {(running ? LOG_POLL_RUNNING_MS : LOG_POLL_STOPPED_MS) / 1000}s · Esc to close</span>
+        </div>
+      </div>
+    </div>
+  );
 }
-}
-}, [substrate, activation, network]);
-useEffect(() => {
-let cancelled = false;
-let timer = null;
-const interval = running ? LOG_POLL_RUNNING_MS : LOG_POLL_STOPPED_MS;
-const tick = async () => {
-if (!document.hidden) await load();
-if (!cancelled) timer = setTimeout(tick, interval);
-};
-tick();
-return () => {
-cancelled = true;
-if (timer) clearTimeout(timer);
-requestRef.current += 1;
-inflightRef.current?.abort();
-};
-}, [load, running]);
-useEffect(() => {
-const el = scrollRef.current;
-if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
-}, [log]);
-function handleScroll() {
-const el = scrollRef.current;
-if (!el) return;
-const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= LOG_STICK_THRESHOLD_PX;
-pinnedRef.current = atBottom;
-setPinned(atBottom);
-}
-function jumpToLatest() {
-const el = scrollRef.current;
-if (!el) return;
-pinnedRef.current = true;
-setPinned(true);
-el.scrollTop = el.scrollHeight;
-}
-function handleRefresh() {
-pinnedRef.current = true;
-setPinned(true);
-onRefreshStatus?.();
-load();
-}
-useEffect(() => {
-const previousFocus = document.activeElement;
-const previousOverflow = document.body.style.overflow;
-document.body.style.overflow = "hidden";
-dialogRef.current?.focus();
-function onKeyDown(event) {
-if (event.key === "Escape") {
-event.preventDefault();
-closeRef.current?.();
-return;
-}
-if (event.key !== "Tab" || !dialogRef.current) return;
-const focusable = dialogRef.current.querySelectorAll('button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])');
-if (focusable.length === 0) {
-event.preventDefault();
-return;
-}
-const first = focusable[0];
-const last = focusable[focusable.length - 1];
-if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) {
-event.preventDefault();
-last.focus();
-} else if (!event.shiftKey && document.activeElement === last) {
-event.preventDefault();
-first.focus();
-}
-}
-document.addEventListener("keydown", onKeyDown);
-return () => {
-document.removeEventListener("keydown", onKeyDown);
-document.body.style.overflow = previousOverflow;
-if (previousFocus instanceof HTMLElement) previousFocus.focus();
-};
-}, []);
-const hasLog = typeof log === "string" && log.length > 0;
-return (
-<div className="qtm-backdrop fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/50 p-3 backdrop-blur-sm sm:p-6" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-<div
-ref={dialogRef}
-role="dialog"
-aria-modal="true"
-aria-labelledby="bitminer-log-title"
-tabIndex={-1}
-className="qtm-dialog flex max-h-[78vh] w-full max-w-[800px] flex-col overflow-hidden rounded-3xl border border-zinc-200 bg-white text-zinc-950 shadow-2xl outline-none sm:min-w-[min(720px,100%)] dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
->
-<div className="flex items-start justify-between gap-3 border-b border-zinc-200 px-4 py-3 sm:px-5 sm:py-4 dark:border-zinc-800">
-<div className="min-w-0">
-<div className="flex flex-wrap items-center gap-2">
-<h2 id="bitminer-log-title" className="text-sm font-semibold tracking-tight sm:text-base">Bit-Miner logs</h2>
-<span role="status" className={⁠inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${running ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300" : "border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"}⁠}>
-<span aria-hidden="true" className={⁠h-1.5 w-1.5 rounded-full ${running ? "bg-emerald-500 motion-safe:animate-pulse" : "bg-zinc-400"}⁠} />
-{running ? "Running" : "Stopped"}
-</span>
-</div>
-<p className="mt-1 break-all font-mono text-[10px] leading-4 text-zinc-500 dark:text-zinc-400">{substrate} · activation {activation} · {network}</p>
-</div>
-<div className="flex shrink-0 items-center gap-2">
-<button type="button" className={LOG_BUTTON} disabled={refreshing} onClick={handleRefresh}>{refreshing ? "Refreshing…" : "Refresh"}</button>
-<button type="button" aria-label="Close log viewer" className={⁠${LOG_BUTTON} w-8 px-0 text-base leading-none⁠} onClick={onClose}>×</button>
-</div>
-</div>
-<div className="relative flex min-h-0 flex-1 flex-col bg-zinc-950">
-{error && (
-<div role="alert" className="shrink-0 break-words border-b border-red-900/60 bg-red-950 px-4 py-2 text-xs leading-5 text-red-200">
-{error}{hasLog ? " Showing the last output received." : ""}
-</div>
-)}
-<div ref={scrollRef} onScroll={handleScroll} tabIndex={0} aria-label="Bit-miner process log output" className="min-h-[16rem] flex-1 overflow-auto overscroll-contain px-4 py-3 sm:px-5">
-{loading && log === null ? (
-<p className="text-xs text-zinc-400">Loading log…</p>
-) : hasLog ? (
-<pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-zinc-100 sm:text-xs">{log}</pre>
-) : error && log === null ? (
-<p className="text-xs text-zinc-400">The log could not be loaded.</p>
-) : (
-<p className="text-xs text-zinc-400">No log output yet. Output appears here once the bit-miner process writes to its log.</p>
-)}
-</div>
-{!pinned && hasLog && <button type="button" onClick={jumpToLatest} className="absolute bottom-3 right-4 rounded-full border border-zinc-600 bg-zinc-800/95 px-3 py-1.5 text-[11px] font-medium text-zinc-100 shadow-lg transition hover:bg-zinc-700">Jump to latest ↓</button>}
-</div>
-<div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 px-4 py-2.5 text-[10px] text-zinc-500 sm:px-5 dark:border-zinc-800 dark:text-zinc-400">
-<span>{updatedAt ? ⁠Updated ${updatedAt.toLocaleTimeString()}⁠ : "Waiting for first response…"}</span>
-<span>Auto-refresh every {(running ? LOG_POLL_RUNNING_MS : LOG_POLL_STOPPED_MS) / 1000}s · Esc to close</span>
-</div>
-</div>
-</div>
-);
-}
+
 function StreamBody({ status, busy, results, network, actionError, onAction, onRefresh, onViewLogs }) {
-const known = typeof status?.running === "boolean";
-const running = status?.running === true;
-const observedAt =
-status?.runtime?.unix_seconds != null
-? new Date(Number(status.runtime.unix_seconds) * 1000).toLocaleString()
-: null;
-const clips = Array.isArray(status?.clips) ? status.clips : [];
-const eventPath = status?.event_path ?? status?.path;
-return (
-<div className="space-y-3">
-<div className="flex min-w-0 flex-wrap items-center gap-2">
-<Pill tone={running ? "ok" : known ? "neutral" : "warn"}>{running ? "Running" : known ? "Idle" : "Unknown"}</Pill>
-{status?.pid != null && <span className="text-xs text-zinc-500">PID {status.pid}</span>}
-</div>
-{status && (
-<Fields min="7rem">
-<Field label="Process">{running ? "Running" : known ? "Not running" : "Not reported"}</Field>
-<Field label="PID">{money(status.pid)}</Field>
-<Field label="Activation">{money(status.activation)}</Field>
-<Field label="Network"><span className="break-all font-mono text-xs">{money(status.network)}</span></Field>
-<Field label="Status read">{money(observedAt)}</Field>
-</Fields>
-)}
-<div className="grid grid-cols-3 gap-2">
-<button type="button" className={⁠${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap⁠} disabled={busy || running} onClick={() => onAction("start", network)}>{busy ? "Working…" : "Start"}</button>
-<button type="button" className={⁠${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap⁠} disabled={busy} onClick={() => onRefresh(network)}>Refresh</button>
-<button type="button" className={⁠${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap⁠} disabled={busy || !running} onClick={() => onAction("stop", network)}>Stop</button>
-</div>
-{actionError && <Notice>{actionError}</Notice>}
-{status?.error && <Notice>{status.error}</Notice>}
-{eventPath && <p className="break-all font-mono text-[10px] text-zinc-500">Event path: {eventPath}</p>}
-{status?.log_path && <p className="break-all font-mono text-[10px] text-zinc-500">Process log: {status.log_path}</p>}
-{clips.length > 0 && (
-<div>
-<h5 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Observation clips</h5>
-<ul className="mt-1 space-y-1">
-{clips.map((clip, index) => (
-<li key={⁠${clip?.substrate}-${index}⁠} className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
-<span className="break-all font-mono">{money(clip?.substrate)}</span>
-<Pill tone={clip?.active ? "ok" : "neutral"}>{clip?.active ? "Active" : "Inactive"}</Pill>
-{clip?.direction && <span>{clip.direction}</span>}
-</li>
-))}
-</ul>
-</div>
-)}
-<div>
-<div className="flex items-center justify-between">
-<h5 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">BitMiner responses</h5>
-<div className="flex items-center gap-2">
-<button type="button" className={LOG_BUTTON} disabled={!onViewLogs} onClick={() => onViewLogs?.(network)}>View process logs</button>
-<span className="text-[10px] tabular-nums text-zinc-500">{results.length}</span>
-</div>
-</div>
-<div aria-live="polite" aria-label="Bitcoin bit-miner API responses" className="mt-2 max-h-56 space-y-2 overflow-y-auto overscroll-contain rounded-xl bg-white p-2 dark:bg-zinc-900">
-{results.map((entry) => (
-<div key={entry.id} className="border-b border-zinc-200 pb-2 last:border-0 last:pb-0 dark:border-zinc-800">
-<div className="mb-1 flex items-center justify-between gap-2 text-[10px] text-zinc-500">
-<span className="min-w-0 break-words font-semibold">{entry.label}</span>
-<time className="shrink-0">{entry.time}</time>
-</div>
-<pre className="overflow-x-auto whitespace-pre-wrap break-all text-[10px] leading-4 text-zinc-700 dark:text-zinc-300">{JSON.stringify(entry.body, null, 2)}</pre>
-</div>
-))}
-{results.length === 0 && <p className="py-2 text-xs text-zinc-500">Start bit-miner to launch its window loop. Refresh reads the API process status without adding another response entry.</p>}
-</div>
-</div>
-</div>
-);
+  const known = typeof status?.running === "boolean";
+  const running = status?.running === true;
+  const observedAt =
+    status?.runtime?.unix_seconds != null
+      ? new Date(Number(status.runtime.unix_seconds) * 1000).toLocaleString()
+      : null;
+  const clips = Array.isArray(status?.clips) ? status.clips : [];
+  const eventPath = status?.event_path ?? status?.path;
+  return (
+    <div className="space-y-3">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <Pill tone={running ? "ok" : known ? "neutral" : "warn"}>{running ? "Running" : known ? "Idle" : "Unknown"}</Pill>
+        {status?.pid != null && <span className="text-xs text-zinc-500">PID {status.pid}</span>}
+      </div>
+      {status && (
+        <Fields min="7rem">
+          <Field label="Process">{running ? "Running" : known ? "Not running" : "Not reported"}</Field>
+          <Field label="PID">{money(status.pid)}</Field>
+          <Field label="Activation">{money(status.activation)}</Field>
+          <Field label="Network"><span className="break-all font-mono text-xs">{money(status.network)}</span></Field>
+          <Field label="Status read">{money(observedAt)}</Field>
+        </Fields>
+      )}
+      <div className="grid grid-cols-3 gap-2">
+        <button type="button" className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`} disabled={busy || running} onClick={() => onAction("start", network)}>{busy ? "Working…" : "Start"}</button>
+        <button type="button" className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`} disabled={busy} onClick={() => onRefresh(network)}>Refresh</button>
+        <button type="button" className={`${BUTTON} w-full min-w-0 px-2 text-xs whitespace-nowrap`} disabled={busy || !running} onClick={() => onAction("stop", network)}>Stop</button>
+      </div>
+      {actionError && <Notice>{actionError}</Notice>}
+      {status?.error && <Notice>{status.error}</Notice>}
+      {eventPath && <p className="break-all font-mono text-[10px] text-zinc-500">Event path: {eventPath}</p>}
+      {status?.log_path && <p className="break-all font-mono text-[10px] text-zinc-500">Process log: {status.log_path}</p>}
+      {clips.length > 0 && (
+        <div>
+          <h5 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Observation clips</h5>
+          <ul className="mt-1 space-y-1">
+            {clips.map((clip, index) => (
+              <li key={`${clip?.substrate}-${index}`} className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                <span className="break-all font-mono">{money(clip?.substrate)}</span>
+                <Pill tone={clip?.active ? "ok" : "neutral"}>{clip?.active ? "Active" : "Inactive"}</Pill>
+                {clip?.direction && <span>{clip.direction}</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <div>
+        <div className="flex items-center justify-between">
+          <h5 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">BitMiner responses</h5>
+          <div className="flex items-center gap-2">
+            <button type="button" className={LOG_BUTTON} disabled={!onViewLogs} onClick={() => onViewLogs?.(network)}>View process logs</button>
+            <span className="text-[10px] tabular-nums text-zinc-500">{results.length}</span>
+          </div>
+        </div>
+        <div aria-live="polite" aria-label="Bitcoin bit-miner API responses" className="mt-2 max-h-56 space-y-2 overflow-y-auto overscroll-contain rounded-xl bg-white p-2 dark:bg-zinc-900">
+          {results.map((entry) => (
+            <div key={entry.id} className="border-b border-zinc-200 pb-2 last:border-0 last:pb-0 dark:border-zinc-800">
+              <div className="mb-1 flex items-center justify-between gap-2 text-[10px] text-zinc-500">
+                <span className="min-w-0 break-words font-semibold">{entry.label}</span>
+                <time className="shrink-0">{entry.time}</time>
+              </div>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-all text-[10px] leading-4 text-zinc-700 dark:text-zinc-300">{JSON.stringify(entry.body, null, 2)}</pre>
+            </div>
+          ))}
+          {results.length === 0 && <p className="py-2 text-xs text-zinc-500">Start bit-miner to launch its window loop. Refresh reads the API process status without adding another response entry.</p>}
+        </div>
+      </div>
+    </div>
+  );
 }
+
 function WirePacketsBody({ metadata, loading }) {
-const [selectedSubmission, setSelectedSubmission] = useState("");
-const route = metadata?.file_route;
-const href = route
-? ⁠${API_BASE}${route.startsWith("/") ? route : ⁠/${route}⁠}⁠
-: null;
-const packets = Array.isArray(metadata?.packets) ? metadata.packets : [];
-const selectedPacket =
-packets.find((packet) => String(packet.submission) === selectedSubmission) ||
-packets[packets.length - 1] ||
-null;
-const entries = Array.isArray(selectedPacket?.packets)
-? [...selectedPacket.packets].sort((a, b) => Number(a.vout) - Number(b.vout))
-: [];
-if (loading && !metadata) {
-return <p className="text-xs text-zinc-500">Loading WirePackets…</p>;
+  const [selectedSubmission, setSelectedSubmission] = useState("");
+  const route = metadata?.file_route;
+  const href = route
+    ? `${API_BASE}${route.startsWith("/") ? route : `/${route}`}`
+    : null;
+  const packets = Array.isArray(metadata?.packets) ? metadata.packets : [];
+  const selectedPacket =
+    packets.find((packet) => String(packet.submission) === selectedSubmission) ||
+    packets[packets.length - 1] ||
+    null;
+  const entries = Array.isArray(selectedPacket?.packets)
+    ? [...selectedPacket.packets].sort((a, b) => Number(a.vout) - Number(b.vout))
+    : [];
+
+  if (loading && !metadata) {
+    return <p className="text-xs text-zinc-500">Loading WirePackets…</p>;
+  }
+  if (!metadata) {
+    return <p className="text-xs text-zinc-500">No WirePackets metadata response.</p>;
+  }
+
+  return (
+    <div className="space-y-3">
+      <Fields min="7rem">
+        <Field label="Scope">{money(metadata.scope)}</Field>
+        <Field label="Total bytes">
+          {metadata.bytes == null ? "Not reported" : Number(metadata.bytes).toLocaleString()}
+        </Field>
+        <Field label="Persisted submissions">{packets.length}</Field>
+        <Field label="Files present">{flag(metadata.exists)}</Field>
+      </Fields>
+
+      {metadata.path && (
+        <p className="break-all font-mono text-[11px] text-zinc-500">{metadata.path}</p>
+      )}
+
+      {packets.length > 0 ? (
+        <div className="space-y-2">
+          <label className="flex min-w-0 items-center gap-2">
+            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Submission</span>
+            <select
+              aria-label="Select WirePacket submission"
+              className="h-8 min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-2 text-xs dark:border-zinc-700 dark:bg-zinc-950"
+              value={selectedPacket ? String(selectedPacket.submission) : ""}
+              onChange={(event) => setSelectedSubmission(event.target.value)}
+            >
+              {packets.map((packet) => (
+                <option key={packet.submission} value={String(packet.submission)}>
+                  Submission {packet.submission} · {packet.packet_count ?? packet.packets?.length ?? 0} vout entries
+                </option>
+              ))}
+            </select>
+            <Pill tone="ok">{entries.length} vout</Pill>
+          </label>
+
+          {selectedPacket && (
+            <div className="min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/70 p-2 dark:border-zinc-800 dark:bg-zinc-950/60">
+              <p className="mb-2 break-all font-mono text-[10px] text-zinc-500">{selectedPacket.path}</p>
+              {entries.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[620px] table-fixed text-left text-[10px]">
+                    <thead className="text-[9px] uppercase tracking-wider text-zinc-500">
+                      <tr>
+                        <th className="w-12 px-2 py-1.5">Vout</th>
+                        <th className="w-24 px-2 py-1.5 text-right">Value (sat)</th>
+                        <th className="w-44 px-2 py-1.5">Txid</th>
+                        <th className="px-2 py-1.5">Script pubkey</th>
+                        <th className="w-32 px-2 py-1.5">Commitment</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                      {entries.map((entry, index) => (
+                        <tr key={`${entry.vout}-${index}`} className="align-top">
+                          <td className="whitespace-nowrap px-2 py-2 font-mono tabular-nums">{money(entry.vout)}</td>
+                          <td className="whitespace-nowrap px-2 py-2 text-right font-mono tabular-nums">{entry.value_sat == null ? "—" : Number(entry.value_sat).toLocaleString()}</td>
+                          <td className="break-all px-2 py-2 font-mono text-zinc-500">{money(entry.txid)}</td>
+                          <td className="break-all px-2 py-2 font-mono text-zinc-500">{money(entry.script_pubkey)}</td>
+                          <td className="break-all px-2 py-2 font-mono text-zinc-500">{money(entry.commitment)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-xs text-zinc-500">No decoded packet values for this submission.</p>
+              )}
+            </div>
+          )}
+        </div>
+      ) : (
+        <p className="text-xs text-zinc-500">The API returned no persisted submission files for this activation.</p>
+      )}
+
+      {href && (
+        <a className={`${BUTTON} w-full`} href={href} target="_blank" rel="noreferrer">
+          Open combined WirePackets file
+        </a>
+      )}
+    </div>
+  );
 }
-if (!metadata) {
-return <p className="text-xs text-zinc-500">No WirePackets metadata response.</p>;
-}
-return (
-<div className="space-y-3">
-<Fields min="7rem">
-<Field label="Scope">{money(metadata.scope)}</Field>
-<Field label="Total bytes">
-{metadata.bytes == null ? "Not reported" : Number(metadata.bytes).toLocaleString()}
-</Field>
-<Field label="Persisted submissions">{packets.length}</Field>
-<Field label="Files present">{flag(metadata.exists)}</Field>
-</Fields>
-{metadata.path && (
-<p className="break-all font-mono text-[11px] text-zinc-500">{metadata.path}</p>
-)}
-{packets.length > 0 ? (
-<div className="space-y-2">
-<label className="flex min-w-0 items-center gap-2">
-<span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Submission</span>
-<select
-aria-label="Select WirePacket submission"
-className="h-8 min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-2 text-xs dark:border-zinc-700 dark:bg-zinc-950"
-value={selectedPacket ? String(selectedPacket.submission) : ""}
-onChange={(event) => setSelectedSubmission(event.target.value)}
->
-{packets.map((packet) => (
-<option key={packet.submission} value={String(packet.submission)}>
-Submission {packet.submission} · {packet.packet_count ?? packet.packets?.length ?? 0} vout entries
-</option>
-))}
-</select>
-<Pill tone="ok">{entries.length} vout</Pill>
-</label>
-{selectedPacket && (
-<div className="min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/70 p-2 dark:border-zinc-800 dark:bg-zinc-950/60">
-<p className="mb-2 break-all font-mono text-[10px] text-zinc-500">{selectedPacket.path}</p>
-{entries.length > 0 ? (
-<div className="overflow-x-auto">
-<table className="w-full min-w-[620px] table-fixed text-left text-[10px]">
-<thead className="text-[9px] uppercase tracking-wider text-zinc-500">
-<tr>
-<th className="w-12 px-2 py-1.5">Vout</th>
-<th className="w-24 px-2 py-1.5 text-right">Value (sat)</th>
-<th className="w-44 px-2 py-1.5">Txid</th>
-<th className="px-2 py-1.5">Script pubkey</th>
-<th className="w-32 px-2 py-1.5">Commitment</th>
-</tr>
-</thead>
-<tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-{entries.map((entry, index) => (
-<tr key={⁠${entry.vout}-${index}⁠} className="align-top">
-<td className="whitespace-nowrap px-2 py-2 font-mono tabular-nums">{money(entry.vout)}</td>
-<td className="whitespace-nowrap px-2 py-2 text-right font-mono tabular-nums">{entry.value_sat == null ? "—" : Number(entry.value_sat).toLocaleString()}</td>
-<td className="break-all px-2 py-2 font-mono text-zinc-500">{money(entry.txid)}</td>
-<td className="break-all px-2 py-2 font-mono text-zinc-500">{money(entry.script_pubkey)}</td>
-<td className="break-all px-2 py-2 font-mono text-zinc-500">{money(entry.commitment)}</td>
-</tr>
-))}
-</tbody>
-</table>
-</div>
-) : (
-<p className="text-xs text-zinc-500">No decoded packet values for this submission.</p>
-)}
-</div>
-)}
-</div>
-) : (
-<p className="text-xs text-zinc-500">The API returned no persisted submission files for this activation.</p>
-)}
-{href && (
-<a className={⁠${BUTTON} w-full⁠} href={href} target="_blank" rel="noreferrer">
-Open combined WirePackets file
-</a>
-)}
-</div>
-);
-}
+
 function PayloadItem({ payload }) {
-const [open, setOpen] = useState(false);
-return (
-<div className="min-w-0 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-<div className="flex items-start justify-between gap-2">
-<span className="min-w-0 break-all text-xs font-semibold">{payload.record}</span>
-<Pill>{payload.objects.length} obj</Pill>
-</div>
-<p className="mt-1 break-all font-mono text-[11px] text-zinc-500">{payload.depth_identifier}</p>
-<p className="mt-0.5 break-all font-mono text-[10px] text-zinc-400">{payload.path}</p>
-{payload.objects.length > 0 && (
-<>
-<button type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)} className="mt-2 flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-xs text-zinc-600 transition hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800">
-Depth objects
-<span aria-hidden="true" className={⁠transition-transform duration-300 ${open ? "rotate-180" : ""}⁠}>▾</span>
-</button>
-<Collapsible open={open}>
-<pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all text-[10px] text-zinc-500">{JSON.stringify(payload.objects, null, 2)}</pre>
-</Collapsible>
-</>
-)}
-</div>
-);
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="min-w-0 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="flex items-start justify-between gap-2">
+        <span className="min-w-0 break-all text-xs font-semibold">{payload.record}</span>
+        <Pill>{payload.objects.length} obj</Pill>
+      </div>
+      <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">{payload.depth_identifier}</p>
+      <p className="mt-0.5 break-all font-mono text-[10px] text-zinc-400">{payload.path}</p>
+      {payload.objects.length > 0 && (
+        <>
+          <button type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)} className="mt-2 flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-xs text-zinc-600 transition hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800">
+            Depth objects
+            <span aria-hidden="true" className={`transition-transform duration-300 ${open ? "rotate-180" : ""}`}>▾</span>
+          </button>
+          <Collapsible open={open}>
+            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all text-[10px] text-zinc-500">{JSON.stringify(payload.objects, null, 2)}</pre>
+          </Collapsible>
+        </>
+      )}
+    </div>
+  );
 }
+
 function PayloadRecordsBody({ group }) {
-const sections = [
-["Transit inputs", group.transit_inputs],
-["Exile outputs", group.exile_outputs],
-["Unclassified", group.unclassified],
-].filter(([, rows]) => rows.length > 0);
-if (sections.length === 0) return <p className="text-xs text-zinc-500">No payload records for this network.</p>;
-return (
-<div className="space-y-4">
-{sections.map(([title, rows]) => (
-<div key={title}>
-<h5 className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{title} <Pill>{rows.length}</Pill></h5>
-<div className="grid gap-2">{rows.map((payload) => <PayloadItem key={payloadRowKey(payload)} payload={payload} />)}</div>
-</div>
-))}
-</div>
-);
+  const sections = [
+    ["Transit inputs", group.transit_inputs],
+    ["Exile outputs", group.exile_outputs],
+    ["Unclassified", group.unclassified],
+  ].filter(([, rows]) => rows.length > 0);
+  if (sections.length === 0) return <p className="text-xs text-zinc-500">No payload records for this network.</p>;
+  return (
+    <div className="space-y-4">
+      {sections.map(([title, rows]) => (
+        <div key={title}>
+          <h5 className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{title} <Pill>{rows.length}</Pill></h5>
+          <div className="grid gap-2">{rows.map((payload) => <PayloadItem key={payloadRowKey(payload)} payload={payload} />)}</div>
+        </div>
+      ))}
+    </div>
+  );
 }
+
 function NetworkCard({
-kind, network, defaultOpen, index, activation, budgetRow, group, board, wire,
-observation, observationError, busy, results,
-loadingBoard, loadingBudget, savingBudget, loadingWire, loadingObservation,
-budgetError, budgetNotice, onSaveBudget, onStreamAction, onRefreshStream, onViewLogs,
+  kind, network, defaultOpen, index, activation, budgetRow, group, board, wire,
+  observation, observationError, busy, results,
+  loadingBoard, loadingBudget, savingBudget, loadingWire, loadingObservation,
+  budgetError, budgetNotice, onSaveBudget, onStreamAction, onRefreshStream, onViewLogs,
 }) {
-const meta = BITCOIN_KINDS[kind];
-const style = { animationDelay: ⁠${Math.min(index, 6) * 60}ms⁠ };
-if (!network) {
-return (
-<Card title={meta.label} subtitle={meta.note} badge={<Pill tone="warn">Not derived</Pill>} className="w-full" style={style}>
-<p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-No {meta.label} network was derived from the selected event's heritage state for this activation.
-</p>
-</Card>
-);
+  const meta = BITCOIN_KINDS[kind];
+  const style = { animationDelay: `${Math.min(index, 6) * 60}ms` };
+
+  if (!network) {
+    return (
+      <Card title={meta.label} subtitle={meta.note} badge={<Pill tone="warn">Not derived</Pill>} className="w-full" style={style}>
+        <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+          No {meta.label} network was derived from the selected event&apos;s heritage state for this activation.
+        </p>
+      </Card>
+    );
+  }
+
+  const status =
+    observation && (observation.network == null || normalizeNetworkId(observation.network) === network.id)
+      ? observation
+      : undefined;
+  const budget = budgetRow?.budget || null;
+  const configured = Boolean(budgetRow?.configured && budget);
+  const payloadKind = ownPayloadKind(board, network);
+  const payloadTotal = group.transit_inputs.length + group.exile_outputs.length + group.unclassified.length;
+
+  return (
+    <Card title={kind === "other" ? network.name : meta.label} subtitle={network.id} badge={<Pill tone={configured ? "ok" : "neutral"}>{configured ? "Budget set" : "No budget"}</Pill>} defaultOpen={defaultOpen} className="w-full" style={style}>
+      <div className="space-y-3">
+        <Fields min="7rem">
+          <Field label="Purpose">{money(network.purpose)}</Field>
+          <Field label="Derivation path"><span className="break-all font-mono text-xs">{money(network.path)}</span></Field>
+        </Fields>
+
+        <Card
+          inner
+          defaultOpen
+          title={`Network budget · event/${activation || "—"}/${network.id}/budget`}
+          badge={
+            loadingBudget ? (
+              <Pill>Loading</Pill>
+            ) : savingBudget ? (
+              <Pill>Saving</Pill>
+            ) : null
+          }
+        >
+          <BudgetSummary budget={budget} />
+          <BudgetEditor
+            budget={budget}
+            disabled={loadingBudget || savingBudget || !/^\d+$/.test(String(activation))}
+            saving={savingBudget}
+            onSave={(draft) => onSaveBudget(network, draft)}
+          />
+          {budgetError && (
+            <div className="mt-3">
+              <Notice>{budgetError}</Notice>
+            </div>
+          )}
+          {budgetNotice && (
+            <div className="mt-3">
+              <Notice type="success">{budgetNotice}</Notice>
+            </div>
+          )}
+        </Card>
+
+        <Card inner scroll title="Payload board" badge={<Pill tone={payloadKind?.available ? "ok" : "neutral"}>{payloadKind ? (payloadKind.available ? "Available" : "Unavailable") : "None"}</Pill>}>
+          <PayloadBoard board={board} kind={payloadKind} loading={loadingBoard} />
+        </Card>
+        <Card inner title="Bit-miner" badge={<Pill tone={status?.running === true ? "ok" : "neutral"}>{status?.running === true ? "Running" : status?.running === false ? "Idle" : loadingObservation ? "Checking…" : "Unknown"}</Pill>}>
+          <StreamBody status={status} busy={busy} results={results} network={network} actionError={observationError} onAction={onStreamAction} onRefresh={onRefreshStream} onViewLogs={onViewLogs} />
+        </Card>
+        <Card inner title="Wirepackets file" badge={<Pill tone={wire?.exists ? "ok" : "neutral"}>{wire?.exists ? "Present" : "None"}</Pill>}>
+          <WirePacketsBody metadata={wire} loading={loadingWire} />
+        </Card>
+        <Card inner scroll title="Payload records" badge={<Pill>{payloadTotal}</Pill>}>
+          <PayloadRecordsBody group={group} />
+        </Card>
+      </div>
+    </Card>
+  );
 }
-const status =
-observation && (observation.network == null || normalizeNetworkId(observation.network) === network.id)
-? observation
-: undefined;
-const budget = budgetRow?.budget || null;
-const configured = Boolean(budgetRow?.configured && budget);
-const payloadKind = ownPayloadKind(board, network);
-const payloadTotal = group.transit_inputs.length + group.exile_outputs.length + group.unclassified.length;
-return (
-<Card title={kind === "other" ? network.name : meta.label} subtitle={network.id} badge={<Pill tone={configured ? "ok" : "neutral"}>{configured ? "Budget set" : "No budget"}</Pill>} defaultOpen={defaultOpen} className="w-full" style={style}>
-<div className="space-y-3">
-<Fields min="7rem">
-<Field label="Purpose">{money(network.purpose)}</Field>
-<Field label="Derivation path"><span className="break-all font-mono text-xs">{money(network.path)}</span></Field>
-</Fields>
-<Card
-inner
-defaultOpen
-title={⁠Network budget · event/${activation || "—"}/${network.id}/budget⁠}
-badge={
-loadingBudget ? (
-<Pill>Loading</Pill>
-) : savingBudget ? (
-<Pill>Saving</Pill>
-) : null
-}
->
-<BudgetSummary budget={budget} />
-<BudgetEditor
-budget={budget}
-disabled={loadingBudget || savingBudget || !/^\d+$/.test(String(activation))}
-saving={savingBudget}
-onSave={(draft) => onSaveBudget(network, draft)}
-/>
-{budgetError && (
-<div className="mt-3">
-<Notice>{budgetError}</Notice>
-</div>
-)}
-{budgetNotice && (
-<div className="mt-3">
-<Notice type="success">{budgetNotice}</Notice>
-</div>
-)}
-</Card>
-<Card inner scroll title="Payload board" badge={<Pill tone={payloadKind?.available ? "ok" : "neutral"}>{payloadKind ? (payloadKind.available ? "Available" : "Unavailable") : "None"}</Pill>}>
-<PayloadBoard board={board} kind={payloadKind} loading={loadingBoard} />
-</Card>
-<Card inner title="Bit-miner" badge={<Pill tone={status?.running === true ? "ok" : "neutral"}>{status?.running === true ? "Running" : status?.running === false ? "Idle" : loadingObservation ? "Checking…" : "Unknown"}</Pill>}>
-<StreamBody status={status} busy={busy} results={results} network={network} actionError={observationError} onAction={onStreamAction} onRefresh={onRefreshStream} onViewLogs={onViewLogs} />
-</Card>
-<Card inner title="Wirepackets file" badge={<Pill tone={wire?.exists ? "ok" : "neutral"}>{wire?.exists ? "Present" : "None"}</Pill>}>
-<WirePacketsBody metadata={wire} loading={loadingWire} />
-</Card>
-<Card inner scroll title="Payload records" badge={<Pill>{payloadTotal}</Pill>}>
-<PayloadRecordsBody group={group} />
-</Card>
-</div>
-</Card>
-);
-}
+
 /* ───────────────────────── Page ───────────────────────── */
+
 function EventStoreContent() {
-const searchParams = useSearchParams();
-const substrate = (searchParams.get("substrate") || "").trim();
-// Stage 1: Persisted event history (authoritative runtime response for ⁠substrate⁠).
-const [persistedHistory, setPersistedHistory] = useState(EMPTY_HISTORY);
-// Stage 2 & 3: Selected event record and heritage activation.
-const [selectedEvent, setSelectedEvent] = useState("");
-const [selectedActivation, setSelectedActivation] = useState("");
-const [derivedEventSnapshot, setDerivedEventSnapshot] = useState(null);
-// Stage 4: Networks derived by ⁠/wallets/:substrate/activations/:activation/networks⁠.
-const [derivedNetworks, setDerivedNetworks] = useState([]);
-const [loadingNetworks, setLoadingNetworks] = useState(false);
-// Stage 5: Activation- and network-scoped resources.
-const [observations, setObservations] = useState({});
-const [busyObservation, setBusyObservation] = useState({});
-const [observationErrors, setObservationErrors] = useState({});
-const [loadingObservations, setLoadingObservations] = useState({});
-const [streamResults, setStreamResults] = useState({});
-const [boards, setBoards] = useState({});
-const [loadingBoards, setLoadingBoards] = useState({});
-const [wirePackets, setWirePackets] = useState({});
-const [loadingWire, setLoadingWire] = useState({});
-const [budgetsByNetwork, setBudgetsByNetwork] = useState({});
-const [loadingBudgets, setLoadingBudgets] = useState({});
-const [savingBudgets, setSavingBudgets] = useState({});
-const [budgetErrors, setBudgetErrors] = useState({});
-const [budgetNotices, setBudgetNotices] = useState({});
-const [payloads, setPayloads] = useState([]);
-const [loadingPayloads, setLoadingPayloads] = useState(false);
-const [error, setError] = useState("");
-const [notice, setNotice] = useState("");
-const [logViewer, setLogViewer] = useState(null);
-// Substrate & event context locks + deduplication + cancellation controllers.
-const substrateEpochRef = useRef(0);
-const lockedSubstrateRef = useRef("");
-const contextGenRef = useRef(0);
-const selectedEventRef = useRef("");
-const selectedActivationRef = useRef("");
-const historyRequestRef = useRef(0);
-const activationAbortRef = useRef(null);
-const networkRequestRef = useRef(0);
-const inflightNetworkKeyRef = useRef("");
-const payloadRequestRef = useRef(0);
-const boardRequestRef = useRef({});
-const wireRequestRef = useRef({});
-const budgetRequestRef = useRef({});
-const observationRequestRef = useRef({});
-const historyRows = useMemo(
-() => (persistedHistory.substrate === substrate ? persistedHistory.rows : []),
-[persistedHistory, substrate],
-);
-const historyDirectory = useMemo(
-() => (persistedHistory.substrate === substrate ? persistedHistory.directory : ""),
-[persistedHistory, substrate],
-);
-const loadingHistory =
-Boolean(substrate) &&
-(persistedHistory.substrate !== substrate || persistedHistory.loading);
-const isSubstrateLocked = useCallback(
-(name, epoch) =>
-Boolean(name) &&
-epoch === substrateEpochRef.current &&
-lockedSubstrateRef.current === name,
-[],
-);
-const isContextLocked = useCallback(
-(name, record, activationValue, epoch, generation) =>
-isSubstrateLocked(name, epoch) &&
-generation === contextGenRef.current &&
-selectedEventRef.current === String(record) &&
-selectedActivationRef.current === String(activationValue),
-[isSubstrateLocked],
-);
-const cancelAndClearActivationState = useCallback(() => {
-activationAbortRef.current?.abort();
-activationAbortRef.current = null;
-inflightNetworkKeyRef.current = "";
-networkRequestRef.current += 1;
-payloadRequestRef.current += 1;
-boardRequestRef.current = {};
-wireRequestRef.current = {};
-observationRequestRef.current = {};
-budgetRequestRef.current = {};
-setDerivedEventSnapshot(null);
-setDerivedNetworks([]);
-setLoadingNetworks(false);
-setPayloads([]);
-setLoadingPayloads(false);
-setBudgetsByNetwork({});
-setLoadingBudgets({});
-setSavingBudgets({});
-setBudgetErrors({});
-setBudgetNotices({});
-setBoards({});
-setLoadingBoards({});
-setWirePackets({});
-setLoadingWire({});
-setObservations({});
-setBusyObservation({});
-setObservationErrors({});
-setLoadingObservations({});
-setStreamResults({});
-setLogViewer(null);
-}, []);
-const clearSubstrateScopedState = useCallback(
-(nextSubstrate = "") => {
-cancelAndClearActivationState();
-setSelectedEvent("");
-setSelectedActivation("");
-selectedEventRef.current = "";
-selectedActivationRef.current = "";
-setPersistedHistory({
-substrate: nextSubstrate,
-rows: [],
-directory: "",
-loading: Boolean(nextSubstrate),
-error: "",
-});
-},
-[cancelAndClearActivationState],
-);
-// Stage 1: Retrieve persisted event history via runtime ⁠listEvents⁠ using ⁠substrate⁠
-// strictly as the namespace segment (never refreshing or mutating substrate state).
-const fetchRuntimeHistory = useCallback(
-async (name, epoch) => {
-if (!name) {
-setPersistedHistory(EMPTY_HISTORY);
-return null;
+  const searchParams = useSearchParams();
+  const substrate = (searchParams.get("substrate") || "").trim();
+
+  // Stage 1: Persisted event history (authoritative runtime response for `substrate`).
+  const [persistedHistory, setPersistedHistory] = useState(EMPTY_HISTORY);
+
+  // Stage 2 & 3: Selected event record and heritage activation.
+  const [selectedEvent, setSelectedEvent] = useState("");
+  const [selectedActivation, setSelectedActivation] = useState("");
+  const [derivedEventSnapshot, setDerivedEventSnapshot] = useState(null);
+
+  // Stage 4: Networks derived by `/wallets/:substrate/activations/:activation/networks`.
+  const [derivedNetworks, setDerivedNetworks] = useState([]);
+  const [loadingNetworks, setLoadingNetworks] = useState(false);
+
+  // Stage 5: Activation- and network-scoped resources.
+  const [observations, setObservations] = useState({});
+  const [busyObservation, setBusyObservation] = useState({});
+  const [observationErrors, setObservationErrors] = useState({});
+  const [loadingObservations, setLoadingObservations] = useState({});
+  const [streamResults, setStreamResults] = useState({});
+
+  const [boards, setBoards] = useState({});
+  const [loadingBoards, setLoadingBoards] = useState({});
+
+  const [wirePackets, setWirePackets] = useState({});
+  const [loadingWire, setLoadingWire] = useState({});
+
+  const [budgetsByNetwork, setBudgetsByNetwork] = useState({});
+  const [loadingBudgets, setLoadingBudgets] = useState({});
+  const [savingBudgets, setSavingBudgets] = useState({});
+  const [budgetErrors, setBudgetErrors] = useState({});
+  const [budgetNotices, setBudgetNotices] = useState({});
+
+  const [payloads, setPayloads] = useState([]);
+  const [loadingPayloads, setLoadingPayloads] = useState(false);
+
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [logViewer, setLogViewer] = useState(null);
+
+  // Substrate & event context locks + deduplication + cancellation controllers.
+  const substrateEpochRef = useRef(0);
+  const lockedSubstrateRef = useRef("");
+  const contextGenRef = useRef(0);
+  const selectedEventRef = useRef("");
+  const selectedActivationRef = useRef("");
+
+  const historyRequestRef = useRef(0);
+  const activationAbortRef = useRef(null);
+  const networkRequestRef = useRef(0);
+  const inflightNetworkKeyRef = useRef("");
+  const payloadRequestRef = useRef(0);
+  const boardRequestRef = useRef({});
+  const wireRequestRef = useRef({});
+  const budgetRequestRef = useRef({});
+  const observationRequestRef = useRef({});
+
+  const historyRows = useMemo(
+    () => (persistedHistory.substrate === substrate ? persistedHistory.rows : []),
+    [persistedHistory, substrate],
+  );
+
+  const historyDirectory = useMemo(
+    () => (persistedHistory.substrate === substrate ? persistedHistory.directory : ""),
+    [persistedHistory, substrate],
+  );
+
+  const loadingHistory =
+    Boolean(substrate) &&
+    (persistedHistory.substrate !== substrate || persistedHistory.loading);
+
+  const isSubstrateLocked = useCallback(
+    (name, epoch) =>
+      Boolean(name) &&
+      epoch === substrateEpochRef.current &&
+      lockedSubstrateRef.current === name,
+    [],
+  );
+
+  const isContextLocked = useCallback(
+    (name, record, activationValue, epoch, generation) =>
+      isSubstrateLocked(name, epoch) &&
+      generation === contextGenRef.current &&
+      selectedEventRef.current === String(record) &&
+      selectedActivationRef.current === String(activationValue),
+    [isSubstrateLocked],
+  );
+
+  const cancelAndClearActivationState = useCallback(() => {
+    activationAbortRef.current?.abort();
+    activationAbortRef.current = null;
+
+    inflightNetworkKeyRef.current = "";
+    networkRequestRef.current += 1;
+    payloadRequestRef.current += 1;
+    boardRequestRef.current = {};
+    wireRequestRef.current = {};
+    observationRequestRef.current = {};
+    budgetRequestRef.current = {};
+
+    setDerivedEventSnapshot(null);
+    setDerivedNetworks([]);
+    setLoadingNetworks(false);
+
+    setPayloads([]);
+    setLoadingPayloads(false);
+
+    setBudgetsByNetwork({});
+    setLoadingBudgets({});
+    setSavingBudgets({});
+    setBudgetErrors({});
+    setBudgetNotices({});
+
+    setBoards({});
+    setLoadingBoards({});
+
+    setWirePackets({});
+    setLoadingWire({});
+
+    setObservations({});
+    setBusyObservation({});
+    setObservationErrors({});
+    setLoadingObservations({});
+    setStreamResults({});
+    setLogViewer(null);
+  }, []);
+
+  const clearSubstrateScopedState = useCallback(
+    (nextSubstrate = "") => {
+      cancelAndClearActivationState();
+      setSelectedEvent("");
+      setSelectedActivation("");
+      selectedEventRef.current = "";
+      selectedActivationRef.current = "";
+      setPersistedHistory({
+        substrate: nextSubstrate,
+        rows: [],
+        directory: "",
+        loading: Boolean(nextSubstrate),
+        error: "",
+      });
+    },
+    [cancelAndClearActivationState],
+  );
+
+  // Stage 1: Retrieve persisted event history via runtime `listEvents` using `substrate`
+  // strictly as the namespace segment (never refreshing or mutating substrate state).
+  const fetchRuntimeHistory = useCallback(
+    async (name, epoch) => {
+      if (!name) {
+        setPersistedHistory(EMPTY_HISTORY);
+        return null;
+      }
+
+      const requestId = ++historyRequestRef.current;
+      setPersistedHistory((current) => ({
+        substrate: name,
+        rows: current.substrate === name ? current.rows : [],
+        directory: current.substrate === name ? current.directory : "",
+        loading: true,
+        error: "",
+      }));
+
+      try {
+        const response = await callRuntime("listEvents", { name });
+        if (requestId !== historyRequestRef.current || !isSubstrateLocked(name, epoch)) {
+          return null;
+        }
+
+        const normalized = normalizePersistedHistoryResponse(response);
+        setPersistedHistory({
+          substrate: name,
+          rows: normalized.rows,
+          directory: normalized.directory,
+          loading: false,
+          error: "",
+        });
+        return normalized.rows;
+      } catch (err) {
+        if (requestId !== historyRequestRef.current || !isSubstrateLocked(name, epoch)) {
+          return null;
+        }
+
+        const message =
+          err instanceof Error && err.message
+            ? err.message
+            : "Unable to read persisted events from the runtime.";
+
+        setPersistedHistory({
+          substrate: name,
+          rows: [],
+          directory: "",
+          loading: false,
+          error: message,
+        });
+        setError(message);
+        return null;
+      }
+    },
+    [isSubstrateLocked],
+  );
+
+  // Stage 5a: Activation-scoped event payloads.
+  const loadPayloadsForRecord = useCallback(
+    async (name, record, activationValue, epoch, generation, signal) => {
+      const actStr = String(activationValue ?? "");
+      const recStr = String(record ?? "");
+      if (!name || !recStr || !/^\d+$/.test(actStr)) {
+        setPayloads([]);
+        setLoadingPayloads(false);
+        return [];
+      }
+
+      const requestId = ++payloadRequestRef.current;
+      const current = () =>
+        requestId === payloadRequestRef.current &&
+        isContextLocked(name, recStr, actStr, epoch, generation);
+
+      setLoadingPayloads(true);
+      try {
+        const body = await apiRequest(
+          `/wallets/${enc(name)}/events/${enc(recStr)}/payloads`,
+          { signal },
+        );
+        if (!current()) return null;
+
+        const rows = Array.isArray(body?.payloads) ? body.payloads : [];
+        const unique = new Map();
+        rows.forEach((entry) => {
+          const normalized = normalizePayload(entry, recStr);
+          if (!normalized) return;
+          const key = payloadRowKey(normalized);
+          if (!unique.has(key)) unique.set(key, normalized);
+        });
+
+        const collected = [...unique.values()];
+        setPayloads(collected);
+        return collected;
+      } catch (err) {
+        if (err?.name !== "AbortError" && current()) {
+          setPayloads([]);
+          setError(
+            `Unable to load payload records: ${
+              err instanceof Error ? err.message : "unknown API error"
+            }`,
+          );
+        }
+        return null;
+      } finally {
+        if (requestId === payloadRequestRef.current) {
+          setLoadingPayloads(false);
+        }
+      }
+    },
+    [isContextLocked],
+  );
+
+  // Stage 5b: Activation- and network-scoped budget loader (`event/<activation>/<network>/budget`).
+  // Executes strictly after derived networks are established for the active context.
+  const loadBudgetsForDerivedNetworks = useCallback(
+    async (name, record, activationValue, networkRows, epoch, generation, signal) => {
+      const actStr = String(activationValue ?? "");
+      const networkIds = (networkRows || [])
+        .map((network) => normalizeNetworkId(network?.id))
+        .filter(Boolean);
+
+      if (!name || !/^\d+$/.test(actStr) || networkIds.length === 0) {
+        setBudgetsByNetwork({});
+        setLoadingBudgets({});
+        return {};
+      }
+
+      const idsSet = new Set(networkIds);
+      setLoadingBudgets(() => {
+        const next = {};
+        for (const id of networkIds) next[id] = true;
+        return next;
+      });
+      setBudgetErrors(() => {
+        const next = {};
+        for (const id of networkIds) next[id] = "";
+        return next;
+      });
+
+      const perNetworkReqId = {};
+      for (const id of networkIds) {
+        perNetworkReqId[id] = (budgetRequestRef.current[id] =
+          (budgetRequestRef.current[id] || 0) + 1);
+      }
+
+      const isNetworkRequestCurrent = (id) =>
+        budgetRequestRef.current[id] === perNetworkReqId[id] &&
+        isContextLocked(name, record, actStr, epoch, generation);
+
+      try {
+        const body = await apiRequest(
+          `/wallets/${enc(name)}/activations/${enc(actStr)}/budgets`,
+          { signal },
+        );
+        if (!isContextLocked(name, record, actStr, epoch, generation)) {
+          return null;
+        }
+
+        const rows = Array.isArray(body?.budgets) ? body.budgets : [];
+        const nextMap = {};
+
+        for (const row of rows) {
+          if (row?.activation != null && String(row.activation) !== actStr) continue;
+          const net = normalizeDerivedNetwork(row?.network ?? row?.network_id);
+          if (!net || !idsSet.has(net.id)) continue;
+          nextMap[net.id] = row;
+        }
+
+        setBudgetsByNetwork((prev) => {
+          if (!isContextLocked(name, record, actStr, epoch, generation)) {
+            return prev;
+          }
+          const scoped = {};
+          for (const id of networkIds) {
+            scoped[id] = nextMap[id] ?? null;
+          }
+          return scoped;
+        });
+
+        return nextMap;
+      } catch (err) {
+        if (err?.name !== "AbortError" && isContextLocked(name, record, actStr, epoch, generation)) {
+          const message = err instanceof Error ? err.message : "API error";
+          setBudgetsByNetwork(() => {
+            const scoped = {};
+            for (const id of networkIds) scoped[id] = null;
+            return scoped;
+          });
+          setBudgetErrors(() => {
+            const next = {};
+            for (const id of networkIds) {
+              next[id] = `Unable to load budget for event/${actStr}/${id}/budget: ${message}`;
+            }
+            return next;
+          });
+        }
+        return null;
+      } finally {
+        setLoadingBudgets((prev) => {
+          const next = { ...prev };
+          for (const id of networkIds) {
+            if (!isNetworkRequestCurrent(id) || !isContextLocked(name, record, actStr, epoch, generation)) {
+              delete next[id];
+            } else {
+              next[id] = false;
+            }
+          }
+          return next;
+        });
+      }
+    },
+    [isContextLocked],
+  );
+
+  // Stage 5c: Activation-scoped payload board per derived network.
+  const loadPayloadBoardForNetwork = useCallback(
+    async (name, record, activationValue, network, epoch, generation, signal) => {
+      const id = normalizeNetworkId(network?.id);
+      const actStr = String(activationValue ?? "");
+      if (!name || !id || !/^\d+$/.test(actStr)) return;
+
+      const requestId = (boardRequestRef.current[id] =
+        (boardRequestRef.current[id] || 0) + 1);
+      const current = () =>
+        boardRequestRef.current[id] === requestId &&
+        isContextLocked(name, record, actStr, epoch, generation);
+
+      setLoadingBoards((c) => ({ ...c, [id]: true }));
+      try {
+        const body = await apiRequest(
+          `/wallets/${enc(name)}/activations/${enc(actStr)}/networks/${enc(id)}/payload-board`,
+          { signal },
+        );
+        if (!current()) return;
+        if (body?.activation != null && String(body.activation) !== actStr) return;
+        setBoards((c) => ({ ...c, [id]: body }));
+      } catch {
+        // Error surfaced inside board state if provided.
+      } finally {
+        if (boardRequestRef.current[id] === requestId) {
+          setLoadingBoards((c) => ({ ...c, [id]: false }));
+        }
+      }
+    },
+    [isContextLocked],
+  );
+
+  // Stage 5d: Activation-scoped WirePackets per derived Bitcoin network.
+  const loadWirePacketsForNetwork = useCallback(
+    async (name, record, activationValue, network, epoch, generation, signal) => {
+      const id = normalizeNetworkId(network?.id);
+      const actStr = String(activationValue ?? "");
+      if (!name || !id || !/^\d+$/.test(actStr) || !bitcoinNetwork(network)) return;
+
+      const requestId = (wireRequestRef.current[id] =
+        (wireRequestRef.current[id] || 0) + 1);
+      const current = () =>
+        wireRequestRef.current[id] === requestId &&
+        isContextLocked(name, record, actStr, epoch, generation);
+
+      setLoadingWire((c) => ({ ...c, [id]: true }));
+      try {
+        const metadata = await apiRequest(
+          `/wallets/${enc(name)}/activations/${enc(actStr)}/networks/${enc(id)}/wirepackets`,
+          { signal },
+        );
+        if (!current()) return;
+        if (metadata?.activation != null && String(metadata.activation) !== actStr) return;
+        setWirePackets((c) => ({ ...c, [id]: metadata }));
+      } catch {
+        // Handled per card / poll.
+      } finally {
+        if (wireRequestRef.current[id] === requestId) {
+          setLoadingWire((c) => ({ ...c, [id]: false }));
+        }
+      }
+    },
+    [isContextLocked],
+  );
+
+  // Stage 5e: Activation-scoped Bit-Miner observation status per derived Bitcoin network.
+  const loadObservationForNetwork = useCallback(
+    async (name, record, activationValue, network, epoch, generation, signal) => {
+      const id = normalizeNetworkId(network?.id);
+      const actStr = String(activationValue ?? "");
+      if (!name || !id || !/^\d+$/.test(actStr) || !bitcoinNetwork(network)) return;
+
+      const requestId = (observationRequestRef.current[id] =
+        (observationRequestRef.current[id] || 0) + 1);
+      const current = () =>
+        observationRequestRef.current[id] === requestId &&
+        isContextLocked(name, record, actStr, epoch, generation);
+
+      setLoadingObservations((c) => ({ ...c, [id]: true }));
+      setObservationErrors((c) => ({ ...c, [id]: "" }));
+
+      try {
+        const status = await apiRequest(
+          `/wallets/${enc(name)}/activations/${enc(actStr)}/networks/${enc(id)}/observation`,
+          { signal },
+        );
+        if (!current()) return;
+        if (!observationMatches(status, id, actStr)) {
+          setObservationErrors((c) => ({
+            ...c,
+            [id]: "Observation status response did not match this network.",
+          }));
+          return;
+        }
+        setObservations((c) => ({ ...c, [id]: status }));
+      } catch (err) {
+        if (err?.name !== "AbortError" && current()) {
+          setObservationErrors((c) => ({
+            ...c,
+            [id]:
+              err instanceof Error
+                ? err.message
+                : "Unable to load observation status.",
+          }));
+        }
+      } finally {
+        if (observationRequestRef.current[id] === requestId) {
+          setLoadingObservations((c) => ({ ...c, [id]: false }));
+        }
+      }
+    },
+    [isContextLocked],
+  );
+
+  // Stages 3 -> 4 -> 5:
+  // Extract heritage activation from selected event -> derive networks -> then load budgets & resources.
+  const activateSelectedEvent = useCallback(
+    async (name, eventRow, epoch, generation) => {
+      const record = recordOf(eventRow);
+      const activationValue = activationFromHeritage(eventRow);
+
+      cancelAndClearActivationState();
+
+      selectedEventRef.current = record;
+      selectedActivationRef.current = activationValue ?? "";
+      setSelectedEvent(record);
+      setSelectedActivation(activationValue ?? "");
+
+      if (!record || activationValue === null) {
+        setError(
+          "The selected persisted event does not report a valid heritage activation.",
+        );
+        return;
+      }
+
+      const dedupeKey = `${epoch}:${generation}:${name}:${record}:${activationValue}`;
+      if (inflightNetworkKeyRef.current === dedupeKey) {
+        return;
+      }
+      inflightNetworkKeyRef.current = dedupeKey;
+
+      const controller = new AbortController();
+      activationAbortRef.current = controller;
+      const { signal } = controller;
+
+      // Stage 4: Derive networks for this heritage activation.
+      const netReqId = ++networkRequestRef.current;
+      setLoadingNetworks(true);
+
+      let derivedResult;
+      try {
+        derivedResult = await fetchDerivedNetworksForActivation(
+          name,
+          activationValue,
+          signal,
+        );
+      } catch (err) {
+        if (
+          err?.name !== "AbortError" &&
+          netReqId === networkRequestRef.current &&
+          isContextLocked(name, record, activationValue, epoch, generation)
+        ) {
+          setDerivedNetworks([]);
+          setError(
+            `Unable to derive networks for activation ${activationValue}: ${
+              err instanceof Error ? err.message : "unknown API error"
+            }`,
+          );
+        }
+        return;
+      } finally {
+        if (inflightNetworkKeyRef.current === dedupeKey) {
+          inflightNetworkKeyRef.current = "";
+        }
+        if (netReqId === networkRequestRef.current) {
+          setLoadingNetworks(false);
+        }
+      }
+
+      if (
+        netReqId !== networkRequestRef.current ||
+        !isContextLocked(name, record, activationValue, epoch, generation)
+      ) {
+        return;
+      }
+
+      const networkRows = derivedResult.networks;
+      setDerivedEventSnapshot(derivedResult.event);
+      setDerivedNetworks(networkRows);
+
+      // Stage 5: Execute strictly after derived networks are established.
+      void loadPayloadsForRecord(
+        name,
+        record,
+        activationValue,
+        epoch,
+        generation,
+        signal,
+      );
+
+      void loadBudgetsForDerivedNetworks(
+        name,
+        record,
+        activationValue,
+        networkRows,
+        epoch,
+        generation,
+        signal,
+      );
+
+      for (const network of networkRows) {
+        void loadPayloadBoardForNetwork(
+          name,
+          record,
+          activationValue,
+          network,
+          epoch,
+          generation,
+          signal,
+        );
+
+        if (bitcoinNetwork(network)) {
+          void loadObservationForNetwork(
+            name,
+            record,
+            activationValue,
+            network,
+            epoch,
+            generation,
+            signal,
+          );
+          void loadWirePacketsForNetwork(
+            name,
+            record,
+            activationValue,
+            network,
+            epoch,
+            generation,
+            signal,
+          );
+        }
+      }
+    },
+    [
+      cancelAndClearActivationState,
+      isContextLocked,
+      loadPayloadsForRecord,
+      loadBudgetsForDerivedNetworks,
+      loadPayloadBoardForNetwork,
+      loadObservationForNetwork,
+      loadWirePacketsForNetwork,
+    ],
+  );
+
+  // Lifecycle Entry:
+  // substrate -> persisted events -> initial selected event -> heritage activation -> derive_network_data -> budgets + resources.
+  useEffect(() => {
+    const epoch = ++substrateEpochRef.current;
+    const generation = ++contextGenRef.current;
+    lockedSubstrateRef.current = substrate;
+
+    setError("");
+    setNotice("");
+
+    if (!substrate) {
+      clearSubstrateScopedState("");
+      setError("Event Store requires a substrate query parameter.");
+      return;
+    }
+
+    clearSubstrateScopedState(substrate);
+
+    void (async () => {
+      const rows = await fetchRuntimeHistory(substrate, epoch);
+      if (!rows || !isSubstrateLocked(substrate, epoch)) return;
+
+      if (rows.length === 0) {
+        setNotice("No persisted event records found for this substrate.");
+        return;
+      }
+
+      const selectable = extractSelectableEvents(rows);
+      if (selectable.length === 0) {
+        setNotice(
+          "Persisted history loaded; no event row carries both a record reference and a heritage activation.",
+        );
+        return;
+      }
+
+      await activateSelectedEvent(substrate, selectable[0], epoch, generation);
+    })();
+
+    return () => {
+      activationAbortRef.current?.abort();
+    };
+  }, [
+    substrate,
+    clearSubstrateScopedState,
+    fetchRuntimeHistory,
+    isSubstrateLocked,
+    activateSelectedEvent,
+  ]);
+
+  // Event selection handler: switches authoritative event & heritage activation context.
+  const handleSelectEvent = useCallback(
+    (value) => {
+      const requested = String(value ?? "");
+      if (!requested) return;
+
+      const candidate = extractSelectableEvents(historyRows).find(
+        (row) => String(row.record) === requested,
+      );
+      if (!candidate) return;
+
+      const nextRecord = String(candidate.record);
+      const nextActivation = String(candidate.activation);
+
+      if (
+        nextRecord === selectedEventRef.current &&
+        nextActivation === selectedActivationRef.current
+      ) {
+        return;
+      }
+
+      const name = lockedSubstrateRef.current;
+      const epoch = substrateEpochRef.current;
+      if (!isSubstrateLocked(name, epoch)) return;
+
+      const generation = ++contextGenRef.current;
+      setError("");
+      setNotice("");
+
+      void activateSelectedEvent(name, candidate, epoch, generation);
+    },
+    [historyRows, isSubstrateLocked, activateSelectedEvent],
+  );
+
+  const eventOptions = useMemo(
+    () =>
+      extractSelectableEvents(historyRows).map((row) => {
+        const record = String(row.record);
+        const rowActivation = activationFromHeritage(row);
+        const kind = row?.kind ? String(row.kind) : "";
+        return {
+          value: record,
+          label: `${kind ? `${kind} · ` : ""}Activation ${rowActivation} · ${record}`,
+        };
+      }),
+    [historyRows],
+  );
+
+  const selectedEvents = useMemo(
+    () =>
+      /^\d+$/.test(String(selectedActivation))
+        ? historyRows.filter(
+            (row) => activationFromHeritage(row) === String(selectedActivation),
+          )
+        : [],
+    [historyRows, selectedActivation],
+  );
+
+  const focusedEvent = useMemo(
+    () =>
+      derivedEventSnapshot ||
+      historyRows.find(
+        (row) => String(row?.record ?? "") === String(selectedEvent),
+      ) ||
+      null,
+    [derivedEventSnapshot, historyRows, selectedEvent],
+  );
+
+  const retainedMass = useMemo(
+    () =>
+      selectedEvents.reduce((sum, row) => {
+        const value =
+          row?.retained_mass ?? row?.heritage?.state?.retained_mass ?? "0";
+        return /^\d+$/.test(String(value)) ? sum + BigInt(value) : sum;
+      }, 0n),
+    [selectedEvents],
+  );
+
+  const payloadGroups = useMemo(() => {
+    const groups = new Map();
+    for (const payload of payloads) {
+      const id = payload.network.id;
+      if (!groups.has(id)) {
+        groups.set(id, {
+          transit_inputs: [],
+          exile_outputs: [],
+          unclassified: [],
+        });
+      }
+      groups.get(id)[payload.direction].push(payload);
+    }
+    return groups;
+  }, [payloads]);
+
+  const networkBudgetById = useMemo(() => {
+    const result = new Map();
+    for (const [id, row] of Object.entries(budgetsByNetwork)) {
+      if (!row) continue;
+      const net = normalizeDerivedNetwork(row.network ?? row.network_id) || { id };
+      result.set(id, { ...row, network: net });
+    }
+    return result;
+  }, [budgetsByNetwork]);
+
+  const bitcoinSlots = useMemo(() => {
+    const buckets = { legacy: [], segwit: [], other: [] };
+    for (const network of derivedNetworks) {
+      if (bitcoinNetwork(network)) buckets[bitcoinKind(network)].push(network);
+    }
+    const slots = [];
+    for (const kind of ["segwit", "legacy"]) {
+      if (buckets[kind].length === 0) slots.push({ kind, network: null });
+      else buckets[kind].forEach((network) => slots.push({ kind, network }));
+    }
+    buckets.other.forEach((network) => slots.push({ kind: "other", network }));
+    return slots;
+  }, [derivedNetworks]);
+
+  const activationSelected =
+    Boolean(substrate) && /^\d+$/.test(String(selectedActivation));
+
+  const observationRunning = derivedNetworks.some(
+    (network) =>
+      bitcoinNetwork(network) && observations[network.id]?.running === true,
+  );
+
+  const anyNetworkLoading =
+    loadingNetworks ||
+    Object.values(loadingObservations).some(Boolean) ||
+    Object.values(loadingBoards).some(Boolean) ||
+    Object.values(loadingWire).some(Boolean) ||
+    Object.values(loadingBudgets).some(Boolean) ||
+    Object.values(savingBudgets).some(Boolean);
+
+  const overviewBadge = (() => {
+    if (!substrate) return <Pill tone="warn">Missing substrate</Pill>;
+    if (loadingHistory) return <Pill>Loading history</Pill>;
+    if (!activationSelected) return <Pill tone="neutral">No event selected</Pill>;
+    if (loadingNetworks) return <Pill>Deriving networks</Pill>;
+    if (observationRunning) return <Pill tone="ok">Syncing</Pill>;
+    if (anyNetworkLoading || loadingPayloads) return <Pill>Loading data</Pill>;
+    if (Object.values(budgetErrors).some(Boolean)) return <Pill tone="warn">Budget error</Pill>;
+    if (error || persistedHistory.error) return <Pill tone="warn">Partial</Pill>;
+    return <Pill tone="ok">Ready</Pill>;
+  })();
+
+  const runningBitcoinNetworkIds = useMemo(
+    () =>
+      JSON.stringify(
+        derivedNetworks
+          .filter(bitcoinNetwork)
+          .filter((network) => observations[network.id]?.running === true)
+          .map((network) => network.id),
+      ),
+    [derivedNetworks, observations],
+  );
+
+  useEffect(() => {
+    if (!substrate || !/^\d+$/.test(String(selectedActivation))) return;
+
+    const networkIds = JSON.parse(runningBitcoinNetworkIds);
+    if (!networkIds.length) return;
+
+    const activeSubstrate = substrate;
+    const activeActivation = String(selectedActivation);
+    const activeEvent = selectedEventRef.current;
+    const epoch = substrateEpochRef.current;
+    const generation = contextGenRef.current;
+
+    let cancelled = false;
+    let timeoutId = null;
+
+    const pollWirePackets = async () => {
+      await Promise.allSettled(
+        networkIds.map(async (networkId) => {
+          try {
+            const metadata = await apiRequest(
+              `/wallets/${enc(activeSubstrate)}/activations/${enc(activeActivation)}/networks/${enc(networkId)}/wirepackets`,
+            );
+            if (
+              cancelled ||
+              !isContextLocked(
+                activeSubstrate,
+                activeEvent,
+                activeActivation,
+                epoch,
+                generation,
+              )
+            ) {
+              return;
+            }
+            if (
+              metadata?.activation != null &&
+              String(metadata.activation) !== activeActivation
+            ) {
+              return;
+            }
+            setWirePackets((current) => ({ ...current, [networkId]: metadata }));
+          } catch {
+            // Poll failures stay local.
+          }
+        }),
+      );
+
+      if (!cancelled) {
+        timeoutId = window.setTimeout(pollWirePackets, WIREPACKETS_POLL_MS);
+      }
+    };
+
+    timeoutId = window.setTimeout(pollWirePackets, 0);
+
+    return () => {
+      cancelled = true;
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    };
+  }, [
+    substrate,
+    selectedActivation,
+    runningBitcoinNetworkIds,
+    isContextLocked,
+  ]);
+
+  const appendStreamResult = (networkId, label, body) => {
+    setStreamResults((current) => ({
+      ...current,
+      [networkId]: [
+        ...(current[networkId] || []),
+        {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          label,
+          time: new Date().toLocaleTimeString(),
+          body,
+        },
+      ].slice(-60),
+    }));
+  };
+
+  const observationScope = (network) => {
+    const id = normalizeNetworkId(network?.id);
+    const activeSubstrate = substrate;
+    const activeActivation = String(selectedActivation);
+    const activeEvent = selectedEventRef.current;
+    const epoch = substrateEpochRef.current;
+    const generation = contextGenRef.current;
+
+    return {
+      id,
+      valid:
+        Boolean(id) &&
+        Boolean(activeSubstrate) &&
+        /^\d+$/.test(activeActivation),
+      route: `/wallets/${enc(activeSubstrate)}/activations/${enc(activeActivation)}/networks/${enc(id)}/observation`,
+      activation: activeActivation,
+      stale: () =>
+        !isContextLocked(
+          activeSubstrate,
+          activeEvent,
+          activeActivation,
+          epoch,
+          generation,
+        ),
+    };
+  };
+
+  const readObservationStatus = async (scope) => {
+    const status = await apiRequest(scope.route);
+    if (scope.stale()) return null;
+    if (!observationMatches(status, scope.id, scope.activation)) {
+      throw new Error("Observation status response did not match this network.");
+    }
+    setObservations((current) => ({ ...current, [scope.id]: status }));
+    return status;
+  };
+
+  const refreshStream = async (network) => {
+    const scope = observationScope(network);
+    if (!scope.valid) return;
+    const { id } = scope;
+    setBusyObservation((current) => ({ ...current, [id]: true }));
+    setObservationErrors((current) => ({ ...current, [id]: "" }));
+    try {
+      await readObservationStatus(scope);
+    } catch (err) {
+      if (!scope.stale()) {
+        setObservationErrors((current) => ({
+          ...current,
+          [id]:
+            err instanceof Error
+              ? err.message
+              : "Unable to retrieve bit-miner process status.",
+        }));
+      }
+    } finally {
+      if (!scope.stale()) {
+        setBusyObservation((current) => ({ ...current, [id]: false }));
+      }
+    }
+  };
+
+  const streamAction = async (action, network) => {
+    const scope = observationScope(network);
+    if (!scope.valid) return;
+    const { id } = scope;
+    setBusyObservation((current) => ({ ...current, [id]: true }));
+    setObservationErrors((current) => ({ ...current, [id]: "" }));
+    try {
+      const result = await apiRequest(scope.route, {
+        method: action === "start" ? "POST" : "DELETE",
+      });
+      if (scope.stale()) return;
+      appendStreamResult(id, `${action.toUpperCase()} observation response`, result);
+
+      const status = await readObservationStatus(scope);
+      if (status === null) return;
+      appendStreamResult(
+        id,
+        action === "start" ? "Initial process status" : "Process status after stop",
+        status,
+      );
+    } catch (err) {
+      if (scope.stale()) return;
+      const failure = {
+        error:
+          err instanceof Error
+            ? err.message
+            : "Bitcoin bit-miner request failed.",
+      };
+      appendStreamResult(id, `${action.toUpperCase()} request error`, failure);
+      setObservationErrors((current) => ({ ...current, [id]: failure.error }));
+    } finally {
+      if (!scope.stale()) {
+        setBusyObservation((current) => ({ ...current, [id]: false }));
+      }
+    }
+  };
+
+  const saveBudget = async (network, draft) => {
+    const id = normalizeNetworkId(network.id);
+    const activeSubstrate = substrate;
+    const activeActivation = String(selectedActivation);
+    const activeEvent = selectedEventRef.current;
+    const epoch = substrateEpochRef.current;
+    const generation = contextGenRef.current;
+
+    if (!id || !/^\d+$/.test(activeActivation)) return;
+
+    const stale = () =>
+      !isContextLocked(
+        activeSubstrate,
+        activeEvent,
+        activeActivation,
+        epoch,
+        generation,
+      );
+
+    setBudgetErrors((current) => ({ ...current, [id]: "" }));
+    setBudgetNotices((current) => ({ ...current, [id]: "" }));
+
+    const minEvents = Number(draft.min_events);
+    const maxEvents = Number(draft.max_events);
+    if (
+      !Number.isInteger(minEvents) ||
+      minEvents < 0 ||
+      !Number.isInteger(maxEvents) ||
+      maxEvents < 0
+    ) {
+      setBudgetErrors((current) => ({
+        ...current,
+        [id]: "Min events and max events must be non-negative integers.",
+      }));
+      return;
+    }
+
+    setSavingBudgets((current) => ({ ...current, [id]: true }));
+
+    try {
+      await apiRequest(
+        `/wallets/${enc(activeSubstrate)}/activations/${enc(activeActivation)}/networks/${enc(id)}/budgets`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            min_events: minEvents,
+            max_events: maxEvents,
+          }),
+        },
+      );
+      if (stale()) return;
+      await loadBudgetsForDerivedNetworks(
+        activeSubstrate,
+        activeEvent,
+        activeActivation,
+        derivedNetworks,
+        epoch,
+        generation,
+      );
+      if (stale()) return;
+      setBudgetNotices((current) => ({
+        ...current,
+        [id]: `Saved budget (${minEvents} … ${maxEvents}).`,
+      }));
+    } catch (err) {
+      if (stale()) return;
+      setBudgetErrors((current) => ({
+        ...current,
+        [id]:
+          err instanceof Error
+            ? err.message
+            : "Unable to save network budget.",
+      }));
+    } finally {
+      if (!stale()) {
+        setSavingBudgets((current) => ({ ...current, [id]: false }));
+      }
+    }
+  };
+
+  const activeLogViewer =
+    logViewer &&
+    logViewer.substrate === substrate &&
+    logViewer.activation === String(selectedActivation) &&
+    bitcoinSlots.some((slot) => slot.network?.id === logViewer.network)
+      ? logViewer
+      : null;
+
+  const openBitMinerLogs = (network) => {
+    if (!substrate || !network?.id || !/^\d+$/.test(String(selectedActivation))) {
+      return;
+    }
+    setLogViewer({
+      substrate,
+      activation: String(selectedActivation),
+      network: network.id,
+    });
+  };
+
+  const closeBitMinerLogs = useCallback(() => setLogViewer(null), []);
+
+  const eventsEmptyText = substrate
+    ? loadingHistory
+      ? "Loading persisted events from runtime…"
+      : "No persisted event records were returned."
+    : "A substrate must be supplied by the parent route.";
+
+  const eventPlaceholder = loadingHistory
+    ? "Loading events…"
+    : eventOptions.length === 0
+      ? "No selectable events"
+      : "Select an event";
+
+  const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
+
+  return (
+    <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
+      <style>{QTM_STYLES}</style>
+
+      <div
+        className="mx-auto flex w-full max-w-7xl flex-col gap-4"
+        inert={activeLogViewer ? true : undefined}
+        aria-hidden={activeLogViewer ? true : undefined}
+      >
+        <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div className="min-w-0">
+            <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
+              QTM Event Store
+            </h1>
+            <p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 sm:text-sm dark:text-zinc-400">
+              Event-heritage driven payloads, derived networks, network budgets, payload boards, Bitcoin observation and API-owned wirepackets.
+              Choose any persisted event below to derive its activation context.
+            </p>
+          </div>
+
+          <div className="flex min-w-0 flex-col gap-2 sm:w-96">
+            <div className="grid grid-cols-2 gap-2">
+              <a href="/network" className={BUTTON}>
+                Network
+              </a>
+              <a href="/" className={BUTTON}>
+                QTM
+              </a>
+            </div>
+
+            <label className="block min-w-0">
+              <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                Persisted event
+              </span>
+              <select
+                aria-label="Select persisted event"
+                className={INPUT}
+                value={selectedEvent}
+                disabled={!substrate || loadingHistory || eventOptions.length === 0}
+                onChange={(changeEvent) => handleSelectEvent(changeEvent.target.value)}
+              >
+                {!selectedEvent && (
+                  <option value="" disabled>
+                    {eventPlaceholder}
+                  </option>
+                )}
+                {eventOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </header>
+
+        {error && <Notice>{error}</Notice>}
+        {notice && <Notice type="success">{notice}</Notice>}
+
+        <Card
+          defaultOpen
+          title="Overview"
+          subtitle={
+            substrate
+              ? `${substrate} · Event ${selectedEvent || "—"}`
+              : "No context from parent route"
+          }
+          badge={overviewBadge}
+          className="w-full"
+        >
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+            <Stat label="Substrate" value={substrate || "—"} wide />
+            <Stat label="Event" value={selectedEvent || "—"} wide />
+            <Stat label="Heritage activation" value={selectedActivation || "—"} />
+            <Stat label="Events (activation)" value={selectedEvents.length} />
+            <Stat label="All events" value={historyRows.length} />
+            <Stat label="Derived networks" value={derivedNetworks.length} />
+            <Stat label="Retained mass" value={retainedMass.toString()} />
+            <Stat label="API base" value={API_BASE} wide />
+            {historyDirectory && (
+              <Stat label="Substrate directory" value={historyDirectory} wide />
+            )}
+            {focusedEvent && (
+              <Stat label="Focused kind" value={money(focusedEvent.kind)} />
+            )}
+          </div>
+        </Card>
+
+        {bitcoinSlots.map((slot, index) => {
+          const id = slot.network?.id;
+          return (
+            <NetworkCard
+              key={id || `placeholder-${slot.kind}`}
+              kind={slot.kind}
+              network={slot.network}
+              defaultOpen={index === 0}
+              index={index}
+              activation={selectedActivation}
+              budgetRow={id ? networkBudgetById.get(id) : undefined}
+              group={(id && payloadGroups.get(id)) || emptyGroup}
+              board={id ? boards[id] : undefined}
+              wire={id ? wirePackets[id] : undefined}
+              observation={id ? observations[id] : undefined}
+              observationError={id ? observationErrors[id] : ""}
+              busy={id ? busyObservation[id] === true : false}
+              results={(id && streamResults[id]) || []}
+              loadingBoard={id ? loadingBoards[id] === true : false}
+              loadingBudget={id ? loadingBudgets[id] === true : false}
+              savingBudget={id ? savingBudgets[id] === true : false}
+              loadingWire={id ? loadingWire[id] === true : false}
+              loadingObservation={id ? loadingObservations[id] === true : false}
+              budgetError={id ? budgetErrors[id] : ""}
+              budgetNotice={id ? budgetNotices[id] : ""}
+              onSaveBudget={saveBudget}
+              onStreamAction={streamAction}
+              onRefreshStream={refreshStream}
+              onViewLogs={openBitMinerLogs}
+            />
+          );
+        })}
+
+        <SectionHeading title="Other chains" meta="derived from event heritage">
+          Derived non-Bitcoin networks for this activation alongside planned chain slots.
+        </SectionHeading>
+
+        <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {COIN_TYPES.filter((coin) => coin.key !== "bitcoin").map((coin, index) => {
+            const derivedCount = derivedNetworks.filter(
+              (network) => coinKey(network) === coin.key,
+            ).length;
+
+            return (
+              <Card
+                key={coin.key}
+                title={coin.name}
+                subtitle={`coin type ${coin.type}`}
+                badge={
+                  <Pill tone={derivedCount > 0 ? "ok" : "warn"}>
+                    {derivedCount > 0 ? `${derivedCount} derived` : "Planned"}
+                  </Pill>
+                }
+                style={{ animationDelay: `${index * 60}ms` }}
+              >
+                <Fields min="7rem">
+                  <Field label="Registry path">
+                    <span className="break-all font-mono text-xs">
+                      {coin.path}
+                    </span>
+                  </Field>
+                  <Field label="Derived networks">{derivedCount}</Field>
+                </Fields>
+              </Card>
+            );
+          })}
+        </div>
+
+        <SectionHeading title="Diagnostics" />
+
+        <Card
+          defaultOpen
+          scroll
+          title="Persisted event records"
+          subtitle="Runtime listEvents / GET /wallets/:name/events"
+          badge={<Pill>{historyRows.length}</Pill>}
+          className="w-full"
+        >
+          <div className="hidden overflow-x-auto rounded-xl border border-zinc-200 lg:block dark:border-zinc-800">
+            <table className="w-full min-w-[850px] border-collapse text-left text-sm">
+              <thead className="bg-zinc-100 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                <tr>
+                  {[
+                    "Activation",
+                    "Event type",
+                    "Record reference",
+                    "Dimension",
+                    "Structural value (Σ)",
+                    "Depth objects",
+                    "Retained mass",
+                  ].map((heading) => (
+                    <th key={heading} className="px-4 py-3 font-semibold">
+                      {heading}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                {historyRows.map((row, index) => {
+                  const state = row?.heritage?.state;
+                  const isFocused =
+                    Boolean(selectedEvent) &&
+                    String(row?.record ?? "") === String(selectedEvent);
+                  return (
+                    <tr
+                      key={`${row?.record ?? "row"}-${index}`}
+                      className={`align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/50 ${
+                        isFocused ? "bg-emerald-50/60 dark:bg-emerald-950/30" : ""
+                      }`}
+                    >
+                      <td className="whitespace-nowrap px-4 py-3 font-mono">
+                        {activationFromHeritage(row) ?? money(row?.activation)}
+                      </td>
+                      <td className="px-4 py-3">{money(row?.kind)}</td>
+                      <td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">
+                        {money(row?.record)}
+                        {isFocused && (
+                          <span className="ml-2 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
+                            focused
+                          </span>
+                        )}
+                      </td>
+                      <td className="break-all px-4 py-3 font-mono">
+                        {money(row?.dimension ?? state?.dimension)}
+                      </td>
+                      <td className="break-all px-4 py-3 font-mono">
+                        {money(row?.structural_value ?? state?.structural_value)}
+                      </td>
+                      <td className="px-4 py-3">{money(row?.depth_objects)}</td>
+                      <td className="break-all px-4 py-3 font-mono">
+                        {money(row?.retained_mass ?? state?.retained_mass)}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {historyRows.length === 0 && (
+                  <tr>
+                    <td
+                      colSpan={7}
+                      className="px-4 py-10 text-center text-sm text-zinc-500"
+                    >
+                      {eventsEmptyText}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:hidden">
+            {historyRows.map((row, index) => {
+              const state = row?.heritage?.state;
+              const isFocused =
+                Boolean(selectedEvent) &&
+                String(row?.record ?? "") === String(selectedEvent);
+              return (
+                <article
+                  key={`${row?.record ?? "row"}-card-${index}`}
+                  className={`${INNER} p-3 ${
+                    isFocused ? "ring-2 ring-emerald-400/60" : ""
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <h4 className="min-w-0 break-all text-sm font-semibold">
+                      {money(row?.kind)}
+                    </h4>
+                    <Pill>
+                      Act. {activationFromHeritage(row) ?? money(row?.activation)}
+                    </Pill>
+                  </div>
+                  <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">
+                    {money(row?.record)}
+                    {isFocused && (
+                      <span className="ml-2 text-[10px] font-semibold text-emerald-600">
+                        focused
+                      </span>
+                    )}
+                  </p>
+                  <div className="mt-3">
+                    <Fields min="7rem">
+                      <Field label="Dimension">
+                        {money(row?.dimension ?? state?.dimension)}
+                      </Field>
+                      <Field label="Structural value (Σ)">
+                        {money(row?.structural_value ?? state?.structural_value)}
+                      </Field>
+                      <Field label="Depth objects">
+                        {money(row?.depth_objects)}
+                      </Field>
+                      <Field label="Retained mass">
+                        {money(row?.retained_mass ?? state?.retained_mass)}
+                      </Field>
+                    </Fields>
+                  </div>
+                </article>
+              );
+            })}
+            {historyRows.length === 0 && (
+              <p className="col-span-full rounded-xl border border-zinc-200 p-4 text-sm text-zinc-500 dark:border-zinc-800">
+                {eventsEmptyText}
+              </p>
+            )}
+          </div>
+        </Card>
+
+        <footer className="border-t border-zinc-200 pt-4 text-xs text-zinc-500 dark:border-zinc-800">
+          QTM Event Store · {API_BASE}
+        </footer>
+      </div>
+
+      {activeLogViewer && (
+        <BitMinerLogPopup
+          key={`${activeLogViewer.substrate}|${activeLogViewer.activation}|${activeLogViewer.network}`}
+          substrate={activeLogViewer.substrate}
+          activation={activeLogViewer.activation}
+          network={activeLogViewer.network}
+          running={observations[activeLogViewer.network]?.running === true}
+          onClose={closeBitMinerLogs}
+          onRefreshStatus={() => refreshStream({ id: activeLogViewer.network })}
+        />
+      )}
+    </main>
+  );
 }
-const requestId = ++historyRequestRef.current;
-setPersistedHistory((current) => ({
-substrate: name,
-rows: current.substrate === name ? current.rows : [],
-directory: current.substrate === name ? current.directory : "",
-loading: true,
-error: "",
-}));
-try {
-const response = await callRuntime("listEvents", { name });
-if (requestId !== historyRequestRef.current || !isSubstrateLocked(name, epoch)) {
-return null;
-}
-const normalized = normalizePersistedHistoryResponse(response);
-setPersistedHistory({
-substrate: name,
-rows: normalized.rows,
-directory: normalized.directory,
-loading: false,
-error: "",
-});
-return normalized.rows;
-} catch (err) {
-if (requestId !== historyRequestRef.current || !isSubstrateLocked(name, epoch)) {
-return null;
-}
-const message =
-err instanceof Error && err.message
-? err.message
-: "Unable to read persisted events from the runtime.";
-setPersistedHistory({
-substrate: name,
-rows: [],
-directory: "",
-loading: false,
-error: message,
-});
-setError(message);
-return null;
-}
-},
-[isSubstrateLocked],
-);
-// Stage 5a: Activation-scoped event payloads.
-const loadPayloadsForRecord = useCallback(
-async (name, record, activationValue, epoch, generation, signal) => {
-const actStr = String(activationValue ?? "");
-const recStr = String(record ?? "");
-if (!name || !recStr || !/^\d+$/.test(actStr)) {
-setPayloads([]);
-setLoadingPayloads(false);
-return [];
-}
-const requestId = ++payloadRequestRef.current;
-const current = () =>
-requestId === payloadRequestRef.current &&
-isContextLocked(name, recStr, actStr, epoch, generation);
-setLoadingPayloads(true);
-try {
-const body = await apiRequest(
-⁠/wallets/${enc(name)}/events/${enc(recStr)}/payloads⁠,
-{ signal },
-);
-if (!current()) return null;
-const rows = Array.isArray(body?.payloads) ? body.payloads : [];
-const unique = new Map();
-rows.forEach((entry) => {
-const normalized = normalizePayload(entry, recStr);
-if (!normalized) return;
-const key = payloadRowKey(normalized);
-if (!unique.has(key)) unique.set(key, normalized);
-});
-const collected = [...unique.values()];
-setPayloads(collected);
-return collected;
-} catch (err) {
-if (err?.name !== "AbortError" && current()) {
-setPayloads([]);
-setError(
-⁠Unable to load payload records: ${ err instanceof Error ? err.message : "unknown API error" }⁠,
-);
-}
-return null;
-} finally {
-if (requestId === payloadRequestRef.current) {
-setLoadingPayloads(false);
-}
-}
-},
-[isContextLocked],
-);
-// Stage 5b: Activation- and network-scoped budget loader (⁠event/<activation>/<network>/budget⁠).
-// Executes strictly after derived networks are established for the active context.
-const loadBudgetsForDerivedNetworks = useCallback(
-async (name, record, activationValue, networkRows, epoch, generation, signal) => {
-const actStr = String(activationValue ?? "");
-const networkIds = (networkRows || [])
-.map((network) => normalizeNetworkId(network?.id))
-.filter(Boolean);
-if (!name || !/^\d+$/.test(actStr) || networkIds.length === 0) {
-setBudgetsByNetwork({});
-setLoadingBudgets({});
-return {};
-}
-const idsSet = new Set(networkIds);
-setLoadingBudgets(() => {
-const next = {};
-for (const id of networkIds) next[id] = true;
-return next;
-});
-setBudgetErrors(() => {
-const next = {};
-for (const id of networkIds) next[id] = "";
-return next;
-});
-const perNetworkReqId = {};
-for (const id of networkIds) {
-perNetworkReqId[id] = (budgetRequestRef.current[id] =
-(budgetRequestRef.current[id] || 0) + 1);
-}
-const isNetworkRequestCurrent = (id) =>
-budgetRequestRef.current[id] === perNetworkReqId[id] &&
-isContextLocked(name, record, actStr, epoch, generation);
-try {
-const body = await apiRequest(
-⁠/wallets/${enc(name)}/activations/${enc(actStr)}/budgets⁠,
-{ signal },
-);
-if (!isContextLocked(name, record, actStr, epoch, generation)) {
-return null;
-}
-const rows = Array.isArray(body?.budgets) ? body.budgets : [];
-const nextMap = {};
-for (const row of rows) {
-if (row?.activation != null && String(row.activation) !== actStr) continue;
-const net = normalizeDerivedNetwork(row?.network ?? row?.network_id);
-if (!net || !idsSet.has(net.id)) continue;
-nextMap[net.id] = row;
-}
-setBudgetsByNetwork((prev) => {
-if (!isContextLocked(name, record, actStr, epoch, generation)) {
-return prev;
-}
-const scoped = {};
-for (const id of networkIds) {
-scoped[id] = nextMap[id] ?? null;
-}
-return scoped;
-});
-return nextMap;
-} catch (err) {
-if (err?.name !== "AbortError" && isContextLocked(name, record, actStr, epoch, generation)) {
-const message = err instanceof Error ? err.message : "API error";
-setBudgetsByNetwork(() => {
-const scoped = {};
-for (const id of networkIds) scoped[id] = null;
-return scoped;
-});
-setBudgetErrors(() => {
-const next = {};
-for (const id of networkIds) {
-next[id] = ⁠Unable to load budget for event/${actStr}/${id}/budget: ${message}⁠;
-}
-return next;
-});
-}
-return null;
-} finally {
-setLoadingBudgets((prev) => {
-const next = { ...prev };
-for (const id of networkIds) {
-if (!isNetworkRequestCurrent(id) || !isContextLocked(name, record, actStr, epoch, generation)) {
-delete next[id];
-} else {
-next[id] = false;
-}
-}
-return next;
-});
-}
-},
-[isContextLocked],
-);
-// Stage 5c: Activation-scoped payload board per derived network.
-const loadPayloadBoardForNetwork = useCallback(
-async (name, record, activationValue, network, epoch, generation, signal) => {
-const id = normalizeNetworkId(network?.id);
-const actStr = String(activationValue ?? "");
-if (!name || !id || !/^\d+$/.test(actStr)) return;
-const requestId = (boardRequestRef.current[id] =
-(boardRequestRef.current[id] || 0) + 1);
-const current = () =>
-boardRequestRef.current[id] === requestId &&
-isContextLocked(name, record, actStr, epoch, generation);
-setLoadingBoards((c) => ({ ...c, [id]: true }));
-try {
-const body = await apiRequest(
-⁠/wallets/${enc(name)}/activations/${enc(actStr)}/networks/${enc(id)}/payload-board⁠,
-{ signal },
-);
-if (!current()) return;
-if (body?.activation != null && String(body.activation) !== actStr) return;
-setBoards((c) => ({ ...c, [id]: body }));
-} catch {
-// Error surfaced inside board state if provided.
-} finally {
-if (boardRequestRef.current[id] === requestId) {
-setLoadingBoards((c) => ({ ...c, [id]: false }));
-}
-}
-},
-[isContextLocked],
-);
-// Stage 5d: Activation-scoped WirePackets per derived Bitcoin network.
-const loadWirePacketsForNetwork = useCallback(
-async (name, record, activationValue, network, epoch, generation, signal) => {
-const id = normalizeNetworkId(network?.id);
-const actStr = String(activationValue ?? "");
-if (!name || !id || !/^\d+$/.test(actStr) || !bitcoinNetwork(network)) return;
-const requestId = (wireRequestRef.current[id] =
-(wireRequestRef.current[id] || 0) + 1);
-const current = () =>
-wireRequestRef.current[id] === requestId &&
-isContextLocked(name, record, actStr, epoch, generation);
-setLoadingWire((c) => ({ ...c, [id]: true }));
-try {
-const metadata = await apiRequest(
-⁠/wallets/${enc(name)}/activations/${enc(actStr)}/networks/${enc(id)}/wirepackets⁠,
-{ signal },
-);
-if (!current()) return;
-if (metadata?.activation != null && String(metadata.activation) !== actStr) return;
-setWirePackets((c) => ({ ...c, [id]: metadata }));
-} catch {
-// Handled per card / poll.
-} finally {
-if (wireRequestRef.current[id] === requestId) {
-setLoadingWire((c) => ({ ...c, [id]: false }));
-}
-}
-},
-[isContextLocked],
-);
-// Stage 5e: Activation-scoped Bit-Miner observation status per derived Bitcoin network.
-const loadObservationForNetwork = useCallback(
-async (name, record, activationValue, network, epoch, generation, signal) => {
-const id = normalizeNetworkId(network?.id);
-const actStr = String(activationValue ?? "");
-if (!name || !id || !/^\d+$/.test(actStr) || !bitcoinNetwork(network)) return;
-const requestId = (observationRequestRef.current[id] =
-(observationRequestRef.current[id] || 0) + 1);
-const current = () =>
-observationRequestRef.current[id] === requestId &&
-isContextLocked(name, record, actStr, epoch, generation);
-setLoadingObservations((c) => ({ ...c, [id]: true }));
-setObservationErrors((c) => ({ ...c, [id]: "" }));
-try {
-const status = await apiRequest(
-⁠/wallets/${enc(name)}/activations/${enc(actStr)}/networks/${enc(id)}/observation⁠,
-{ signal },
-);
-if (!current()) return;
-if (!observationMatches(status, id, actStr)) {
-setObservationErrors((c) => ({
-...c,
-[id]: "Observation status response did not match this network.",
-}));
-return;
-}
-setObservations((c) => ({ ...c, [id]: status }));
-} catch (err) {
-if (err?.name !== "AbortError" && current()) {
-setObservationErrors((c) => ({
-...c,
-[id]:
-err instanceof Error
-? err.message
-: "Unable to load observation status.",
-}));
-}
-} finally {
-if (observationRequestRef.current[id] === requestId) {
-setLoadingObservations((c) => ({ ...c, [id]: false }));
-}
-}
-},
-[isContextLocked],
-);
-// Stages 3 -> 4 -> 5:
-// Extract heritage activation from selected event -> derive networks -> then load budgets & resources.
-const activateSelectedEvent = useCallback(
-async (name, eventRow, epoch, generation) => {
-const record = recordOf(eventRow);
-const activationValue = activationFromHeritage(eventRow);
-cancelAndClearActivationState();
-selectedEventRef.current = record;
-selectedActivationRef.current = activationValue ?? "";
-setSelectedEvent(record);
-setSelectedActivation(activationValue ?? "");
-if (!record || activationValue === null) {
-setError(
-"The selected persisted event does not report a valid heritage activation.",
-);
-return;
-}
-const dedupeKey = ⁠${epoch}:${generation}:${name}:${record}:${activationValue}⁠;
-if (inflightNetworkKeyRef.current === dedupeKey) {
-return;
-}
-inflightNetworkKeyRef.current = dedupeKey;
-const controller = new AbortController();
-activationAbortRef.current = controller;
-const { signal } = controller;
-// Stage 4: Derive networks for this heritage activation.
-const netReqId = ++networkRequestRef.current;
-setLoadingNetworks(true);
-let derivedResult;
-try {
-derivedResult = await fetchDerivedNetworksForActivation(
-name,
-activationValue,
-signal,
-);
-} catch (err) {
-if (
-err?.name !== "AbortError" &&
-netReqId === networkRequestRef.current &&
-isContextLocked(name, record, activationValue, epoch, generation)
-) {
-setDerivedNetworks([]);
-setError(
-⁠Unable to derive networks for activation ${activationValue}: ${ err instanceof Error ? err.message : "unknown API error" }⁠,
-);
-}
-return;
-} finally {
-if (inflightNetworkKeyRef.current === dedupeKey) {
-inflightNetworkKeyRef.current = "";
-}
-if (netReqId === networkRequestRef.current) {
-setLoadingNetworks(false);
-}
-}
-if (
-netReqId !== networkRequestRef.current ||
-!isContextLocked(name, record, activationValue, epoch, generation)
-) {
-return;
-}
-const networkRows = derivedResult.networks;
-setDerivedEventSnapshot(derivedResult.event);
-setDerivedNetworks(networkRows);
-// Stage 5: Execute strictly after derived networks are established.
-void loadPayloadsForRecord(
-name,
-record,
-activationValue,
-epoch,
-generation,
-signal,
-);
-void loadBudgetsForDerivedNetworks(
-name,
-record,
-activationValue,
-networkRows,
-epoch,
-generation,
-signal,
-);
-for (const network of networkRows) {
-void loadPayloadBoardForNetwork(
-name,
-record,
-activationValue,
-network,
-epoch,
-generation,
-signal,
-);
-if (bitcoinNetwork(network)) {
-void loadObservationForNetwork(
-name,
-record,
-activationValue,
-network,
-epoch,
-generation,
-signal,
-);
-void loadWirePacketsForNetwork(
-name,
-record,
-activationValue,
-network,
-epoch,
-generation,
-signal,
-);
-}
-}
-},
-[
-cancelAndClearActivationState,
-isContextLocked,
-loadPayloadsForRecord,
-loadBudgetsForDerivedNetworks,
-loadPayloadBoardForNetwork,
-loadObservationForNetwork,
-loadWirePacketsForNetwork,
-],
-);
-// Lifecycle Entry:
-// substrate -> persisted events -> initial selected event -> heritage activation -> derive_network_data -> budgets + resources.
-useEffect(() => {
-const epoch = ++substrateEpochRef.current;
-const generation = ++contextGenRef.current;
-lockedSubstrateRef.current = substrate;
-setError("");
-setNotice("");
-if (!substrate) {
-clearSubstrateScopedState("");
-setError("Event Store requires a substrate query parameter.");
-return;
-}
-clearSubstrateScopedState(substrate);
-void (async () => {
-const rows = await fetchRuntimeHistory(substrate, epoch);
-if (!rows || !isSubstrateLocked(substrate, epoch)) return;
-if (rows.length === 0) {
-setNotice("No persisted event records found for this substrate.");
-return;
-}
-const selectable = extractSelectableEvents(rows);
-if (selectable.length === 0) {
-setNotice(
-"Persisted history loaded; no event row carries both a record reference and a heritage activation.",
-);
-return;
-}
-await activateSelectedEvent(substrate, selectable[0], epoch, generation);
-})();
-return () => {
-activationAbortRef.current?.abort();
-};
-}, [
-substrate,
-clearSubstrateScopedState,
-fetchRuntimeHistory,
-isSubstrateLocked,
-activateSelectedEvent,
-]);
-// Event selection handler: switches authoritative event & heritage activation context.
-const handleSelectEvent = useCallback(
-(value) => {
-const requested = String(value ?? "");
-if (!requested) return;
-const candidate = extractSelectableEvents(historyRows).find(
-(row) => String(row.record) === requested,
-);
-if (!candidate) return;
-const nextRecord = String(candidate.record);
-const nextActivation = String(candidate.activation);
-if (
-nextRecord === selectedEventRef.current &&
-nextActivation === selectedActivationRef.current
-) {
-return;
-}
-const name = lockedSubstrateRef.current;
-const epoch = substrateEpochRef.current;
-if (!isSubstrateLocked(name, epoch)) return;
-const generation = ++contextGenRef.current;
-setError("");
-setNotice("");
-void activateSelectedEvent(name, candidate, epoch, generation);
-},
-[historyRows, isSubstrateLocked, activateSelectedEvent],
-);
-const eventOptions = useMemo(
-() =>
-extractSelectableEvents(historyRows).map((row) => {
-const record = String(row.record);
-const rowActivation = activationFromHeritage(row);
-const kind = row?.kind ? String(row.kind) : "";
-return {
-value: record,
-label: ⁠${kind ? ⁠${kind} · ⁠ : ""}Activation ${rowActivation} · ${record}⁠,
-};
-}),
-[historyRows],
-);
-const selectedEvents = useMemo(
-() =>
-/^\d+$/.test(String(selectedActivation))
-? historyRows.filter(
-(row) => activationFromHeritage(row) === String(selectedActivation),
-)
-: [],
-[historyRows, selectedActivation],
-);
-const focusedEvent = useMemo(
-() =>
-derivedEventSnapshot ||
-historyRows.find(
-(row) => String(row?.record ?? "") === String(selectedEvent),
-) ||
-null,
-[derivedEventSnapshot, historyRows, selectedEvent],
-);
-const retainedMass = useMemo(
-() =>
-selectedEvents.reduce((sum, row) => {
-const value =
-row?.retained_mass ?? row?.heritage?.state?.retained_mass ?? "0";
-return /^\d+$/.test(String(value)) ? sum + BigInt(value) : sum;
-}, 0n),
-[selectedEvents],
-);
-const payloadGroups = useMemo(() => {
-const groups = new Map();
-for (const payload of payloads) {
-const id = payload.network.id;
-if (!groups.has(id)) {
-groups.set(id, {
-transit_inputs: [],
-exile_outputs: [],
-unclassified: [],
-});
-}
-groups.get(id)[payload.direction].push(payload);
-}
-return groups;
-}, [payloads]);
-const networkBudgetById = useMemo(() => {
-const result = new Map();
-for (const [id, row] of Object.entries(budgetsByNetwork)) {
-if (!row) continue;
-const net = normalizeDerivedNetwork(row.network ?? row.network_id) || { id };
-result.set(id, { ...row, network: net });
-}
-return result;
-}, [budgetsByNetwork]);
-const bitcoinSlots = useMemo(() => {
-const buckets = { legacy: [], segwit: [], other: [] };
-for (const network of derivedNetworks) {
-if (bitcoinNetwork(network)) buckets[bitcoinKind(network)].push(network);
-}
-const slots = [];
-for (const kind of ["segwit", "legacy"]) {
-if (buckets[kind].length === 0) slots.push({ kind, network: null });
-else buckets[kind].forEach((network) => slots.push({ kind, network }));
-}
-buckets.other.forEach((network) => slots.push({ kind: "other", network }));
-return slots;
-}, [derivedNetworks]);
-const activationSelected =
-Boolean(substrate) && /^\d+$/.test(String(selectedActivation));
-const observationRunning = derivedNetworks.some(
-(network) =>
-bitcoinNetwork(network) && observations[network.id]?.running === true,
-);
-const anyNetworkLoading =
-loadingNetworks ||
-Object.values(loadingObservations).some(Boolean) ||
-Object.values(loadingBoards).some(Boolean) ||
-Object.values(loadingWire).some(Boolean) ||
-Object.values(loadingBudgets).some(Boolean) ||
-Object.values(savingBudgets).some(Boolean);
-const overviewBadge = (() => {
-if (!substrate) return <Pill tone="warn">Missing substrate</Pill>;
-if (loadingHistory) return <Pill>Loading history</Pill>;
-if (!activationSelected) return <Pill tone="neutral">No event selected</Pill>;
-if (loadingNetworks) return <Pill>Deriving networks</Pill>;
-if (observationRunning) return <Pill tone="ok">Syncing</Pill>;
-if (anyNetworkLoading || loadingPayloads) return <Pill>Loading data</Pill>;
-if (Object.values(budgetErrors).some(Boolean)) return <Pill tone="warn">Budget error</Pill>;
-if (error || persistedHistory.error) return <Pill tone="warn">Partial</Pill>;
-return <Pill tone="ok">Ready</Pill>;
-})();
-const runningBitcoinNetworkIds = useMemo(
-() =>
-JSON.stringify(
-derivedNetworks
-.filter(bitcoinNetwork)
-.filter((network) => observations[network.id]?.running === true)
-.map((network) => network.id),
-),
-[derivedNetworks, observations],
-);
-useEffect(() => {
-if (!substrate || !/^\d+$/.test(String(selectedActivation))) return;
-const networkIds = JSON.parse(runningBitcoinNetworkIds);
-if (!networkIds.length) return;
-const activeSubstrate = substrate;
-const activeActivation = String(selectedActivation);
-const activeEvent = selectedEventRef.current;
-const epoch = substrateEpochRef.current;
-const generation = contextGenRef.current;
-let cancelled = false;
-let timeoutId = null;
-const pollWirePackets = async () => {
-await Promise.allSettled(
-networkIds.map(async (networkId) => {
-try {
-const metadata = await apiRequest(
-⁠/wallets/${enc(activeSubstrate)}/activations/${enc(activeActivation)}/networks/${enc(networkId)}/wirepackets⁠,
-);
-if (
-cancelled ||
-!isContextLocked(
-activeSubstrate,
-activeEvent,
-activeActivation,
-epoch,
-generation,
-)
-) {
-return;
-}
-if (
-metadata?.activation != null &&
-String(metadata.activation) !== activeActivation
-) {
-return;
-}
-setWirePackets((current) => ({ ...current, [networkId]: metadata }));
-} catch {
-// Poll failures stay local.
-}
-}),
-);
-if (!cancelled) {
-timeoutId = window.setTimeout(pollWirePackets, WIREPACKETS_POLL_MS);
-}
-};
-timeoutId = window.setTimeout(pollWirePackets, 0);
-return () => {
-cancelled = true;
-if (timeoutId !== null) window.clearTimeout(timeoutId);
-};
-}, [
-substrate,
-selectedActivation,
-runningBitcoinNetworkIds,
-isContextLocked,
-]);
-const appendStreamResult = (networkId, label, body) => {
-setStreamResults((current) => ({
-...current,
-[networkId]: [
-...(current[networkId] || []),
-{
-id: ⁠${Date.now()}-${Math.random().toString(36).slice(2)}⁠,
-label,
-time: new Date().toLocaleTimeString(),
-body,
-},
-].slice(-60),
-}));
-};
-const observationScope = (network) => {
-const id = normalizeNetworkId(network?.id);
-const activeSubstrate = substrate;
-const activeActivation = String(selectedActivation);
-const activeEvent = selectedEventRef.current;
-const epoch = substrateEpochRef.current;
-const generation = contextGenRef.current;
-return {
-id,
-valid:
-Boolean(id) &&
-Boolean(activeSubstrate) &&
-/^\d+$/.test(activeActivation),
-route: ⁠/wallets/${enc(activeSubstrate)}/activations/${enc(activeActivation)}/networks/${enc(id)}/observation⁠,
-activation: activeActivation,
-stale: () =>
-!isContextLocked(
-activeSubstrate,
-activeEvent,
-activeActivation,
-epoch,
-generation,
-),
-};
-};
-const readObservationStatus = async (scope) => {
-const status = await apiRequest(scope.route);
-if (scope.stale()) return null;
-if (!observationMatches(status, scope.id, scope.activation)) {
-throw new Error("Observation status response did not match this network.");
-}
-setObservations((current) => ({ ...current, [scope.id]: status }));
-return status;
-};
-const refreshStream = async (network) => {
-const scope = observationScope(network);
-if (!scope.valid) return;
-const { id } = scope;
-setBusyObservation((current) => ({ ...current, [id]: true }));
-setObservationErrors((current) => ({ ...current, [id]: "" }));
-try {
-await readObservationStatus(scope);
-} catch (err) {
-if (!scope.stale()) {
-setObservationErrors((current) => ({
-...current,
-[id]:
-err instanceof Error
-? err.message
-: "Unable to retrieve bit-miner process status.",
-}));
-}
-} finally {
-if (!scope.stale()) {
-setBusyObservation((current) => ({ ...current, [id]: false }));
-}
-}
-};
-const streamAction = async (action, network) => {
-const scope = observationScope(network);
-if (!scope.valid) return;
-const { id } = scope;
-setBusyObservation((current) => ({ ...current, [id]: true }));
-setObservationErrors((current) => ({ ...current, [id]: "" }));
-try {
-const result = await apiRequest(scope.route, {
-method: action === "start" ? "POST" : "DELETE",
-});
-if (scope.stale()) return;
-appendStreamResult(id, ⁠${action.toUpperCase()} observation response⁠, result);
-const status = await readObservationStatus(scope);
-if (status === null) return;
-appendStreamResult(
-id,
-action === "start" ? "Initial process status" : "Process status after stop",
-status,
-);
-} catch (err) {
-if (scope.stale()) return;
-const failure = {
-error:
-err instanceof Error
-? err.message
-: "Bitcoin bit-miner request failed.",
-};
-appendStreamResult(id, ⁠${action.toUpperCase()} request error⁠, failure);
-setObservationErrors((current) => ({ ...current, [id]: failure.error }));
-} finally {
-if (!scope.stale()) {
-setBusyObservation((current) => ({ ...current, [id]: false }));
-}
-}
-};
-const saveBudget = async (network, draft) => {
-const id = normalizeNetworkId(network.id);
-const activeSubstrate = substrate;
-const activeActivation = String(selectedActivation);
-const activeEvent = selectedEventRef.current;
-const epoch = substrateEpochRef.current;
-const generation = contextGenRef.current;
-if (!id || !/^\d+$/.test(activeActivation)) return;
-const stale = () =>
-!isContextLocked(
-activeSubstrate,
-activeEvent,
-activeActivation,
-epoch,
-generation,
-);
-setBudgetErrors((current) => ({ ...current, [id]: "" }));
-setBudgetNotices((current) => ({ ...current, [id]: "" }));
-const minEvents = Number(draft.min_events);
-const maxEvents = Number(draft.max_events);
-if (
-!Number.isInteger(minEvents) ||
-minEvents < 0 ||
-!Number.isInteger(maxEvents) ||
-maxEvents < 0
-) {
-setBudgetErrors((current) => ({
-...current,
-[id]: "Min events and max events must be non-negative integers.",
-}));
-return;
-}
-setSavingBudgets((current) => ({ ...current, [id]: true }));
-try {
-await apiRequest(
-⁠/wallets/${enc(activeSubstrate)}/activations/${enc(activeActivation)}/networks/${enc(id)}/budgets⁠,
-{
-method: "PUT",
-body: JSON.stringify({
-min_events: minEvents,
-max_events: maxEvents,
-}),
-},
-);
-if (stale()) return;
-await loadBudgetsForDerivedNetworks(
-activeSubstrate,
-activeEvent,
-activeActivation,
-derivedNetworks,
-epoch,
-generation,
-);
-if (stale()) return;
-setBudgetNotices((current) => ({
-...current,
-[id]: ⁠Saved budget (${minEvents} … ${maxEvents}).⁠,
-}));
-} catch (err) {
-if (stale()) return;
-setBudgetErrors((current) => ({
-...current,
-[id]:
-err instanceof Error
-? err.message
-: "Unable to save network budget.",
-}));
-} finally {
-if (!stale()) {
-setSavingBudgets((current) => ({ ...current, [id]: false }));
-}
-}
-};
-const activeLogViewer =
-logViewer &&
-logViewer.substrate === substrate &&
-logViewer.activation === String(selectedActivation) &&
-bitcoinSlots.some((slot) => slot.network?.id === logViewer.network)
-? logViewer
-: null;
-const openBitMinerLogs = (network) => {
-if (!substrate || !network?.id || !/^\d+$/.test(String(selectedActivation))) {
-return;
-}
-setLogViewer({
-substrate,
-activation: String(selectedActivation),
-network: network.id,
-});
-};
-const closeBitMinerLogs = useCallback(() => setLogViewer(null), []);
-const eventsEmptyText = substrate
-? loadingHistory
-? "Loading persisted events from runtime…"
-: "No persisted event records were returned."
-: "A substrate must be supplied by the parent route.";
-const eventPlaceholder = loadingHistory
-? "Loading events…"
-: eventOptions.length === 0
-? "No selectable events"
-: "Select an event";
-const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
-return (
-<main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
-<style>{QTM_STYLES}</style>
-<div
-className="mx-auto flex w-full max-w-7xl flex-col gap-4"
-inert={activeLogViewer ? true : undefined}
-aria-hidden={activeLogViewer ? true : undefined}
->
-<header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-<div className="min-w-0">
-<h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
-QTM Event Store
-</h1>
-<p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 sm:text-sm dark:text-zinc-400">
-Event-heritage driven payloads, derived networks, network budgets, payload boards, Bitcoin observation and API-owned wirepackets.
-Choose any persisted event below to derive its activation context.
-</p>
-</div>
-<div className="flex min-w-0 flex-col gap-2 sm:w-96">
-<div className="grid grid-cols-2 gap-2">
-<a href="/network" className={BUTTON}>
-Network
-</a>
-<a
-href={⁠/?substrate=${encodeURIComponent(substrate)}⁠}
-className={BUTTON}
->
-QTM
-</a>
-</div>
-<label className="block min-w-0">
-<span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-Persisted event
-</span>
-<select
-aria-label="Select persisted event"
-className={INPUT}
-value={selectedEvent}
-disabled={!substrate || loadingHistory || eventOptions.length === 0}
-onChange={(changeEvent) => handleSelectEvent(changeEvent.target.value)}
->
-{!selectedEvent && (
-<option value="" disabled>
-{eventPlaceholder}
-</option>
-)}
-{eventOptions.map((option) => (
-<option key={option.value} value={option.value}>
-{option.label}
-</option>
-))}
-</select>
-</label>
-</div>
-</header>
-{error && <Notice>{error}</Notice>}
-{notice && <Notice type="success">{notice}</Notice>}
-<Card
-defaultOpen
-title="Overview"
-subtitle={
-substrate
-? ⁠${substrate} · Event ${selectedEvent || "—"}⁠
-: "No context from parent route"
-}
-badge={overviewBadge}
-className="w-full"
->
-<div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
-<Stat label="Substrate" value={substrate || "—"} wide />
-<Stat label="Event" value={selectedEvent || "—"} wide />
-<Stat label="Heritage activation" value={selectedActivation || "—"} />
-<Stat label="Events (activation)" value={selectedEvents.length} />
-<Stat label="All events" value={historyRows.length} />
-<Stat label="Derived networks" value={derivedNetworks.length} />
-<Stat label="Retained mass" value={retainedMass.toString()} />
-<Stat label="API base" value={API_BASE} wide />
-{historyDirectory && (
-<Stat label="Substrate directory" value={historyDirectory} wide />
-)}
-{focusedEvent && (
-<Stat label="Focused kind" value={money(focusedEvent.kind)} />
-)}
-</div>
-</Card>
-{bitcoinSlots.map((slot, index) => {
-const id = slot.network?.id;
-return (
-<NetworkCard
-key={id || ⁠placeholder-${slot.kind}⁠}
-kind={slot.kind}
-network={slot.network}
-defaultOpen={index === 0}
-index={index}
-activation={selectedActivation}
-budgetRow={id ? networkBudgetById.get(id) : undefined}
-group={(id && payloadGroups.get(id)) || emptyGroup}
-board={id ? boards[id] : undefined}
-wire={id ? wirePackets[id] : undefined}
-observation={id ? observations[id] : undefined}
-observationError={id ? observationErrors[id] : ""}
-busy={id ? busyObservation[id] === true : false}
-results={(id && streamResults[id]) || []}
-loadingBoard={id ? loadingBoards[id] === true : false}
-loadingBudget={id ? loadingBudgets[id] === true : false}
-savingBudget={id ? savingBudgets[id] === true : false}
-loadingWire={id ? loadingWire[id] === true : false}
-loadingObservation={id ? loadingObservations[id] === true : false}
-budgetError={id ? budgetErrors[id] : ""}
-budgetNotice={id ? budgetNotices[id] : ""}
-onSaveBudget={saveBudget}
-onStreamAction={streamAction}
-onRefreshStream={refreshStream}
-onViewLogs={openBitMinerLogs}
-/>
-);
-})}
-<SectionHeading title="Other chains" meta="derived from event heritage">
-Derived non-Bitcoin networks for this activation alongside planned chain slots.
-</SectionHeading>
-<div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2 xl:grid-cols-3">
-{COIN_TYPES.filter((coin) => coin.key !== "bitcoin").map((coin, index) => {
-const derivedCount = derivedNetworks.filter(
-(network) => coinKey(network) === coin.key,
-).length;
-return (
-<Card
-key={coin.key}
-title={coin.name}
-subtitle={⁠coin type ${coin.type}⁠}
-badge={
-<Pill tone={derivedCount > 0 ? "ok" : "warn"}>
-{derivedCount > 0 ? ⁠${derivedCount} derived⁠ : "Planned"}
-</Pill>
-}
-style={{ animationDelay: ⁠${index * 60}ms⁠ }}
->
-<Fields min="7rem">
-<Field label="Registry path">
-<span className="break-all font-mono text-xs">
-{coin.path}
-</span>
-</Field>
-<Field label="Derived networks">{derivedCount}</Field>
-</Fields>
-</Card>
-);
-})}
-</div>
-<SectionHeading title="Diagnostics" />
-<Card
-defaultOpen
-scroll
-title="Persisted event records"
-subtitle="Runtime listEvents / GET /wallets/:name/events"
-badge={<Pill>{historyRows.length}</Pill>}
-className="w-full"
->
-<div className="hidden overflow-x-auto rounded-xl border border-zinc-200 lg:block dark:border-zinc-800">
-<table className="w-full min-w-[850px] border-collapse text-left text-sm">
-<thead className="bg-zinc-100 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-<tr>
-{[
-"Activation",
-"Event type",
-"Record reference",
-"Dimension",
-"Structural value (Σ)",
-"Depth objects",
-"Retained mass",
-].map((heading) => (
-<th key={heading} className="px-4 py-3 font-semibold">
-{heading}
-</th>
-))}
-</tr>
-</thead>
-<tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-{historyRows.map((row, index) => {
-const state = row?.heritage?.state;
-const isFocused =
-Boolean(selectedEvent) &&
-String(row?.record ?? "") === String(selectedEvent);
-return (
-<tr
-key={⁠${row?.record ?? "row"}-${index}⁠}
-className={⁠align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/50 ${ isFocused ? "bg-emerald-50/60 dark:bg-emerald-950/30" : "" }⁠}
->
-<td className="whitespace-nowrap px-4 py-3 font-mono">
-{activationFromHeritage(row) ?? money(row?.activation)}
-</td>
-<td className="px-4 py-3">{money(row?.kind)}</td>
-<td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">
-{money(row?.record)}
-{isFocused && (
-<span className="ml-2 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
-focused
-</span>
-)}
-</td>
-<td className="break-all px-4 py-3 font-mono">
-{money(row?.dimension ?? state?.dimension)}
-</td>
-<td className="break-all px-4 py-3 font-mono">
-{money(row?.structural_value ?? state?.structural_value)}
-</td>
-<td className="px-4 py-3">{money(row?.depth_objects)}</td>
-<td className="break-all px-4 py-3 font-mono">
-{money(row?.retained_mass ?? state?.retained_mass)}
-</td>
-</tr>
-);
-})}
-{historyRows.length === 0 && (
-<tr>
-<td
-colSpan={7}
-className="px-4 py-10 text-center text-sm text-zinc-500"
->
-{eventsEmptyText}
-</td>
-</tr>
-)}
-</tbody>
-</table>
-</div>
-<div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:hidden">
-{historyRows.map((row, index) => {
-const state = row?.heritage?.state;
-const isFocused =
-Boolean(selectedEvent) &&
-String(row?.record ?? "") === String(selectedEvent);
-return (
-<article
-key={⁠${row?.record ?? "row"}-card-${index}⁠}
-className={⁠${INNER} p-3 ${ isFocused ? "ring-2 ring-emerald-400/60" : "" }⁠}
->
-<div className="flex items-start justify-between gap-2">
-<h4 className="min-w-0 break-all text-sm font-semibold">
-{money(row?.kind)}
-</h4>
-<Pill>
-Act. {activationFromHeritage(row) ?? money(row?.activation)}
-</Pill>
-</div>
-<p className="mt-1 break-all font-mono text-[11px] text-zinc-500">
-{money(row?.record)}
-{isFocused && (
-<span className="ml-2 text-[10px] font-semibold text-emerald-600">
-focused
-</span>
-)}
-</p>
-<div className="mt-3">
-<Fields min="7rem">
-<Field label="Dimension">
-{money(row?.dimension ?? state?.dimension)}
-</Field>
-<Field label="Structural value (Σ)">
-{money(row?.structural_value ?? state?.structural_value)}
-</Field>
-<Field label="Depth objects">
-{money(row?.depth_objects)}
-</Field>
-<Field label="Retained mass">
-{money(row?.retained_mass ?? state?.retained_mass)}
-</Field>
-</Fields>
-</div>
-</article>
-);
-})}
-{historyRows.length === 0 && (
-<p className="col-span-full rounded-xl border border-zinc-200 p-4 text-sm text-zinc-500 dark:border-zinc-800">
-{eventsEmptyText}
-</p>
-)}
-</div>
-</Card>
-<footer className="border-t border-zinc-200 pt-4 text-xs text-zinc-500 dark:border-zinc-800">
-QTM Event Store · {API_BASE}
-</footer>
-</div>
-{activeLogViewer && (
-<BitMinerLogPopup
-key={⁠${activeLogViewer.substrate}|${activeLogViewer.activation}|${activeLogViewer.network}⁠}
-substrate={activeLogViewer.substrate}
-activation={activeLogViewer.activation}
-network={activeLogViewer.network}
-running={observations[activeLogViewer.network]?.running === true}
-onClose={closeBitMinerLogs}
-onRefreshStatus={() => refreshStream({ id: activeLogViewer.network })}
-/>
-)}
-</main>
-);
-}
+
 export default function EventStorePage() {
-return (
-<Suspense
-fallback={
-<main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
-<div className="mx-auto w-full max-w-7xl">
-<p className="text-sm text-zinc-500">Loading QTM Event Store…</p>
-</div>
-</main>
-}
->
-<EventStoreContent />
-</Suspense>
-);
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
+          <div className="mx-auto w-full max-w-7xl">
+            <p className="text-sm text-zinc-500">Loading QTM Event Store…</p>
+          </div>
+        </main>
+      }
+    >
+      <EventStoreContent />
+    </Suspense>
+  );
 }
