@@ -136,8 +136,8 @@ listSubstrates: () => ["GET", "/wallets"],
 listNetworks: () => ["GET", "/networks"],
 createSubstrate: () => ["POST", "/wallets"],
 openSubstrate: ({ name, activation }) => [
-"GET",
-⁠/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/open⁠,
+  "GET",
+  `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/open`,
 ],
 receive: ({ name }) => [
 "POST",
