@@ -3,11 +3,20 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
-// Same API origin configuration as the main page (src/app/page.js).
 const API_BASE = (
   process.env.NEXT_PUBLIC_QTM_API_BASE ||
   "https://qtm-api.onrender.com"
 ).replace(/\/+$/, "");
+
+// TODO(verify-in-qtm-api-main-rs): Set to the exact verified route builder once
+// derive_activation_network() is inspected in floriddasoftware/qtm-api/src/main.rs.
+// Must remain null until verified so no speculative endpoint is called.
+const UNVERIFIED_DERIVE_ACTIVATION_NETWORK_ROUTE = null;
+
+// TODO(verify-in-qtm-api-main-rs): Set to the exact verified clip-specific event getter
+// route in floriddasoftware/qtm-api/src/main.rs if different from this convention.
+const SELECTED_CLIP_EVENT_ROUTE = ({ substrate, activation }) =>
+  `/wallets/${enc(substrate)}/activations/${enc(activation)}/event`;
 
 const COIN_TYPES = [
   { key: "bitcoin", name: "Bitcoin", symbol: "BTC", type: 0, path: "m/44'/0'/0'/0/0" },
@@ -54,6 +63,46 @@ const QTM_STYLES = `
 
 const WIREPACKETS_POLL_MS = 2000;
 
+function enc(value) {
+  return encodeURIComponent(String(value));
+}
+
+function parseActivationNumber(value) {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  }
+  if (typeof value === "bigint") {
+    return value >= 0n && value <= BigInt(Number.MAX_SAFE_INTEGER)
+      ? Number(value)
+      : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!/^\d+$/.test(trimmed)) return null;
+    const parsed = Number(trimmed);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+  }
+  return null;
+}
+
+function createActiveClip(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const substrate =
+    typeof input.substrate === "string" ? input.substrate.trim() : "";
+  const activation = parseActivationNumber(input.activation);
+  if (!substrate || activation === null) return null;
+  return Object.freeze({ substrate, activation });
+}
+
+function sameActiveClip(a, b) {
+  if (!a || !b) return false;
+  return a.substrate === b.substrate && a.activation === b.activation;
+}
+
+function derivationKey(substrate, activation, network) {
+  return `${String(substrate)}::${String(activation)}::${String(network)}`;
+}
+
 async function apiRequest(path, options = {}) {
   let response;
   try {
@@ -96,53 +145,6 @@ async function apiRequest(path, options = {}) {
   return body;
 }
 
-function enc(value) {
-  return encodeURIComponent(String(value));
-}
-
-/* ───────────── Canonical ActiveClip model (mirrors bit_miner::ActiveClip) ───────────── */
-
-function parseActivationNumber(value) {
-  if (typeof value === "number") {
-    return Number.isSafeInteger(value) && value >= 0 ? value : null;
-  }
-  if (typeof value === "bigint") {
-    return value >= 0n && value <= BigInt(Number.MAX_SAFE_INTEGER)
-      ? Number(value)
-      : null;
-  }
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!/^\d+$/.test(trimmed)) return null;
-    const parsed = Number(trimmed);
-    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
-  }
-  return null;
-}
-
-function createActiveClip(input) {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
-  const substrate =
-    typeof input.substrate === "string" ? input.substrate.trim() : "";
-  const activation = parseActivationNumber(input.activation);
-  if (!substrate || activation === null) return null;
-  return Object.freeze({
-    substrate,
-    activation,
-  });
-}
-
-function activeClipKey(clip) {
-  return clip ? `${clip.substrate}:${clip.activation}` : "";
-}
-
-function sameActiveClip(a, b) {
-  if (!a || !b) return false;
-  return a.substrate === b.substrate && a.activation === b.activation;
-}
-
-/* ───────────── Runtime call (mirrors callRuntime in src/app/page.js) ───────────── */
-
 function nativeInvoke() {
   if (typeof window === "undefined") return null;
   return (
@@ -154,323 +156,42 @@ function nativeInvoke() {
 
 const NATIVE_COMMANDS = {
   resolveClipEvent: "qtm_clip_event",
-  listEvents: "qtm_events",
 };
 
-const API_ROUTES = {
-  resolveClipEvent: ({ clip }) => [
-    "GET",
-    `/wallets/${enc(clip.substrate)}/activations/${enc(clip.activation)}/event`,
-  ],
-  listEvents: ({ name }) => ["GET", `/wallets/${enc(name)}/events`],
-};
-
-async function callRuntime(operation, args = {}, options = {}) {
-  const command = NATIVE_COMMANDS[operation];
-  if (!command) {
-    throw new Error(`Unsupported QP runtime operation: ${String(operation)}.`);
-  }
-
+async function fetchSelectedClipEvent(clip, signal) {
   const invoke = nativeInvoke();
-
   if (invoke) {
     try {
-      return await invoke(command, args);
+      return await invoke(NATIVE_COMMANDS.resolveClipEvent, { clip });
     } catch (cause) {
       throw new Error(
         typeof cause === "string" && cause.trim()
           ? cause.trim()
           : cause instanceof Error && cause.message
             ? cause.message
-            : "The QP runtime reported an error.",
+            : "The QP runtime reported an error while resolving the selected clip event.",
       );
     }
   }
-
-  const route = API_ROUTES[operation];
-  if (typeof route !== "function") {
-    throw new Error(`Unsupported QP runtime operation: ${String(operation)}.`);
-  }
-  const [method, path] = route(args || {});
-  return apiRequest(path, { method, signal: options.signal });
-}
-
-/* ───────────── Event Heritage & Persisted Event Resolution ───────────── */
-
-function heritageStateOf(event) {
-  if (!event || typeof event !== "object" || Array.isArray(event)) return null;
-  if (event?.heritage?.state && typeof event.heritage.state === "object" && !Array.isArray(event.heritage.state)) {
-    return event.heritage.state;
-  }
-  if (event?.heritage && typeof event.heritage === "object" && !Array.isArray(event.heritage)) {
-    return event.heritage;
-  }
-  return null;
-}
-
-function activationFromHeritageState(heritageState) {
-  if (!heritageState || typeof heritageState !== "object") return null;
-  const raw =
-    typeof heritageState.activations === "function"
-      ? heritageState.activations()
-      : heritageState.activations ??
-        heritageState.activation_count ??
-        heritageState.activation;
-  return parseActivationNumber(raw);
-}
-
-function activationFromHeritage(event) {
-  if (!event || typeof event !== "object") return null;
-  const fromState = activationFromHeritageState(heritageStateOf(event));
-  if (fromState !== null) return fromState;
-  return parseActivationNumber(event?.activation);
-}
-
-function recordOf(row) {
-  if (!row || typeof row !== "object") return "";
-  for (const key of ["record", "record_name", "filename", "id"]) {
-    const value = row?.[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return "";
-}
-
-function compareEventRows(a, b) {
-  const aa = activationFromHeritage(a);
-  const bb = activationFromHeritage(b);
-  if (aa !== bb) {
-    if (aa === null) return 1;
-    if (bb === null) return -1;
-    if (aa !== bb) return aa < bb ? -1 : 1;
-  }
-  const ra = recordOf(a);
-  const rb = recordOf(b);
-  return ra < rb ? -1 : ra > rb ? 1 : 0;
-}
-
-function extractRawEventsArray(response) {
-  if (Array.isArray(response)) return response;
-  if (!response || typeof response !== "object") return null;
-  for (const key of ["events", "items", "records"]) {
-    if (Array.isArray(response[key])) return response[key];
-  }
-  return null;
+  return apiRequest(SELECTED_CLIP_EVENT_ROUTE(clip), { method: "GET", signal });
 }
 
 /**
- * Normalizes persisted events returned by GET /wallets/{substrate}/events
- * without inventing records or assuming array index == activation.
+ * Calls the backend's activation-specific network derivation contract for
+ * { substrate, activation, network } once verified from floriddasoftware/qtm-api/src/main.rs.
  */
-function normalizePersistedEventIndex(response, substrate) {
-  const source = extractRawEventsArray(response);
-  if (!Array.isArray(source)) {
-    throw new Error("The persisted events response did not include an events array.");
-  }
-
-  const directory =
-    !Array.isArray(response) && typeof response?.directory === "string"
-      ? response.directory
-      : "";
-
-  const events = [];
-  for (const row of source) {
-    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
-
-    const heritageState = heritageStateOf(row);
-    const heritageActivation = activationFromHeritageState(heritageState);
-    const rowActivation = parseActivationNumber(row?.activation);
-    const resolvedActivation =
-      heritageActivation !== null ? heritageActivation : rowActivation;
-
-    if (resolvedActivation === null) continue;
-
-    if (
-      heritageActivation !== null &&
-      rowActivation !== null &&
-      heritageActivation !== rowActivation
-    ) {
-      continue;
-    }
-
-    if (
-      heritageState &&
-      typeof heritageState.substrate === "string" &&
-      heritageState.substrate.trim() &&
-      substrate &&
-      heritageState.substrate.trim() !== substrate
-    ) {
-      continue;
-    }
-
-    const record = recordOf(row);
-    events.push({
-      ...row,
-      ...(record ? { record } : {}),
-      activation: resolvedActivation,
-      __heritageState: heritageState,
-      __heritageVerified: heritageActivation !== null,
-      __raw: row,
-    });
-  }
-
-  return {
-    events: events.sort(compareEventRows),
-    directory,
-  };
-}
-
-/**
- * Builds Available Clips strictly from persisted events for the substrate:
- * deduplicated by activation, deterministically sorted, never fabricated.
- */
-function buildAvailableClipsFromEvents(events, substrate) {
-  if (!substrate || !Array.isArray(events) || events.length === 0) return [];
-
-  const byActivation = new Map();
-
-  for (const ev of events) {
-    const activation = activationFromHeritage(ev);
-    if (activation === null) continue;
-
-    const clip = createActiveClip({ substrate, activation });
-    if (!clip) continue;
-
-    const existing = byActivation.get(activation);
-    const candidateRecord = recordOf(ev);
-    const candidateVerified = Boolean(ev?.__heritageVerified);
-
-    if (!existing) {
-      byActivation.set(activation, {
-        clip,
-        key: activeClipKey(clip),
-        activation,
-        record: candidateRecord,
-        heritageVerified: candidateVerified,
-        eventCount: 1,
-        event: ev,
-      });
-    } else {
-      const nextEventCount = existing.eventCount + 1;
-      const preferCandidate =
-        (!existing.heritageVerified && candidateVerified) ||
-        (existing.heritageVerified === candidateVerified &&
-          Boolean(candidateRecord) &&
-          !existing.record);
-
-      byActivation.set(activation, {
-        clip: existing.clip,
-        key: existing.key,
-        activation,
-        record: preferCandidate && candidateRecord ? candidateRecord : existing.record,
-        heritageVerified: existing.heritageVerified || candidateVerified,
-        eventCount: nextEventCount,
-        event: preferCandidate ? ev : existing.event,
-      });
-    }
-  }
-
-  return [...byActivation.values()].sort((a, b) => a.activation - b.activation);
-}
-
-function normalizePersistedEventsForClip(response, clip) {
-  const { events, directory } = normalizePersistedEventIndex(
-    response,
-    clip.substrate,
-  );
-  const matching = events.filter(
-    (row) => activationFromHeritage(row) === clip.activation,
-  );
-  return {
-    rows: matching.sort(compareEventRows),
-    directory,
-  };
-}
-
-function resolveAuthoritativeEvent(rows, clip) {
-  if (!Array.isArray(rows) || rows.length === 0 || !clip) return null;
-
-  const withHeritage = rows.filter(
-    (row) =>
-      heritageStateOf(row) !== null &&
-      activationFromHeritageState(heritageStateOf(row)) === clip.activation,
-  );
-  const candidates = withHeritage.length > 0 ? withHeritage : rows;
-
-  const withRecord = candidates.filter((row) => Boolean(recordOf(row)));
-  const ordered = withRecord.length > 0 ? withRecord : candidates;
-  return ordered[ordered.length - 1] || null;
-}
-
-function isMissingRouteError(err) {
-  if (!(err instanceof Error)) return false;
-  return /HTTP (404|405)\b/i.test(err.message);
-}
-
-async function fetchPersistedEventsIndex(substrate, signal) {
-  const trimmed = typeof substrate === "string" ? substrate.trim() : "";
-  if (!trimmed) {
-    return { events: [], directory: "" };
-  }
-  const body = await callRuntime(
-    "listEvents",
-    { name: trimmed },
-    { signal },
-  );
-  return normalizePersistedEventIndex(body, trimmed);
-}
-
-async function resolveEventForClip(clip, signal, preloadedHistory = null) {
-  if (preloadedHistory && Array.isArray(preloadedHistory.events)) {
-    const matching = preloadedHistory.events.filter(
-      (row) => activationFromHeritage(row) === clip.activation,
+async function deriveActivationNetwork({ substrate, activation, network }, signal) {
+  if (typeof UNVERIFIED_DERIVE_ACTIVATION_NETWORK_ROUTE !== "function") {
+    throw new Error(
+      "derive_activation_network() contract has not been verified from floriddasoftware/qtm-api/src/main.rs yet.",
     );
-    if (matching.length > 0) {
-      return {
-        rows: matching.sort(compareEventRows),
-        directory: preloadedHistory.directory || "",
-      };
-    }
   }
-
-  try {
-    const response = await callRuntime(
-      "resolveClipEvent",
-      { clip },
-      { signal },
-    );
-    if (signal?.aborted) return null;
-
-    if (Array.isArray(response) || extractRawEventsArray(response)) {
-      return normalizePersistedEventsForClip(response, clip);
-    }
-
-    const singleEvent =
-      response?.event && typeof response.event === "object" && !Array.isArray(response.event)
-        ? response.event
-        : response && typeof response === "object" && !Array.isArray(response) && heritageStateOf(response)
-          ? response
-          : null;
-
-    if (singleEvent) {
-      return normalizePersistedEventsForClip(
-        {
-          events: [singleEvent],
-          directory: typeof response?.directory === "string" ? response.directory : "",
-        },
-        clip,
-      );
-    }
-  } catch (err) {
-    if (err?.name === "AbortError" || signal?.aborted) throw err;
-    if (!isMissingRouteError(err)) throw err;
-  }
-
-  const fallbackResponse = await callRuntime(
-    "listEvents",
-    { name: clip.substrate },
-    { signal },
-  );
-  return normalizePersistedEventsForClip(fallbackResponse, clip);
+  const path = UNVERIFIED_DERIVE_ACTIVATION_NETWORK_ROUTE({
+    substrate,
+    activation,
+    network,
+  });
+  return apiRequest(path, { method: "GET", signal });
 }
 
 function normalizeNetworkId(value) {
@@ -485,7 +206,7 @@ function observationMatches(status, networkId, activationValue) {
   return true;
 }
 
-function normalizeDerivedNetwork(entry) {
+function normalizeNetworkEntry(entry) {
   if (typeof entry === "string" || typeof entry === "number") {
     const id = normalizeNetworkId(entry);
     if (!id) return null;
@@ -521,52 +242,60 @@ function normalizeDerivedNetwork(entry) {
   };
 }
 
-async function fetchDerivedNetworksFromHeritage(clip, heritageState, signal) {
-  const authoritativeActivation = activationFromHeritageState(heritageState);
-  if (authoritativeActivation === null || authoritativeActivation !== clip.activation) {
-    throw new Error(
-      `Event heritage activation (${String(authoritativeActivation)}) does not match ActiveClip activation (${clip.activation}).`,
-    );
+function extractAvailableActivations(source, substrate) {
+  const rawList = Array.isArray(source)
+    ? source
+    : Array.isArray(source?.activations)
+      ? source.activations
+      : Array.isArray(source?.persistedActivations)
+        ? source.persistedActivations
+        : [];
+
+  const unique = new Map();
+  for (const item of rawList) {
+    if (item && typeof item === "object" && typeof item.substrate === "string") {
+      if (item.substrate.trim() && substrate && item.substrate.trim() !== substrate) {
+        continue;
+      }
+    }
+    const rawAct =
+      typeof item === "object" && item !== null
+        ? (item.activation ?? item.id ?? item.index)
+        : item;
+    const parsed = parseActivationNumber(rawAct);
+    if (parsed !== null && !unique.has(parsed)) {
+      unique.set(parsed, parsed);
+    }
   }
+  return [...unique.values()];
+}
 
-  const body = await apiRequest(
-    `/wallets/${enc(clip.substrate)}/activations/${enc(authoritativeActivation)}/networks`,
-    { signal },
-  );
-
-  if (body?.activation != null && String(body.activation) !== String(authoritativeActivation)) {
-    throw new Error(
-      `Derived networks activation mismatch (expected ${authoritativeActivation}, got ${body.activation}).`,
-    );
-  }
-
-  const rawList = Array.isArray(body)
-    ? body
-    : Array.isArray(body?.networks)
-      ? body.networks
-      : [];
+function extractAvailableNetworks(source) {
+  const rawList = Array.isArray(source)
+    ? source
+    : Array.isArray(source?.networks)
+      ? source.networks
+      : Array.isArray(source?.availableNetworks)
+        ? source.availableNetworks
+        : [];
 
   const unique = new Map();
   for (const item of rawList) {
     if (item && typeof item === "object" && item.registered === false) continue;
-    const normalized = normalizeDerivedNetwork(item);
+    const normalized = normalizeNetworkEntry(item);
     if (normalized && !unique.has(normalized.id)) {
       unique.set(normalized.id, normalized);
     }
   }
-
-  return {
-    event: body?.event && typeof body.event === "object" ? body.event : null,
-    networks: [...unique.values()],
-  };
+  return [...unique.values()];
 }
 
 function normalizePayload(entry, fallbackRecord) {
-  const network = normalizeDerivedNetwork(entry?.network);
+  const network = normalizeNetworkEntry(entry?.network);
   const path = entry?.path ?? entry?.payload_path;
   const depth = entry?.depth_identifier ?? entry?.depthIdentifier ?? entry?.depth_id;
   if (!network || typeof path !== "string" || depth == null) return null;
-  const record = String(entry?.record ?? fallbackRecord);
+  const record = String(entry?.record ?? fallbackRecord ?? "");
   const rawDirection = String(entry?.direction || "").toLowerCase();
   const direction =
     rawDirection === "transit_inputs" || rawDirection === "transit"
@@ -657,8 +386,8 @@ function money(value) {
   return String(value);
 }
 
-function pickEventField(event, heritageState, keys) {
-  const sources = [event, heritageState].filter(Boolean);
+function pickField(eventObj, heritageState, keys) {
+  const sources = [eventObj, heritageState].filter(Boolean);
   for (const src of sources) {
     for (const key of keys) {
       if (Object.prototype.hasOwnProperty.call(src, key)) {
@@ -913,7 +642,7 @@ async function fetchBitMinerLog({ clip, network, signal }) {
       const parsed = JSON.parse(text);
       detail = parsed?.error || parsed?.message || parsed?.detail || detail;
     } catch {
-      // Keep the raw error body.
+      // Keep raw error body.
     }
     throw new Error(detail ? String(detail).slice(0, 400) : `Log request failed with HTTP ${response.status}.`);
   }
@@ -1320,19 +1049,40 @@ function PayloadRecordsBody({ group }) {
 }
 
 function NetworkCard({
-  kind, network, defaultOpen, index, clip, budgetRow, group, board, wire,
-  observation, observationError, busy, results,
-  loadingBoard, loadingBudget, savingBudget, loadingWire, loadingObservation,
-  budgetError, budgetNotice, onSaveBudget, onStreamAction, onRefreshStream, onViewLogs,
+  kind,
+  network,
+  defaultOpen,
+  index,
+  clip,
+  derivationRecord,
+  budgetRow,
+  group,
+  board,
+  wire,
+  observation,
+  observationError,
+  busy,
+  results,
+  loadingBoard,
+  loadingBudget,
+  savingBudget,
+  loadingWire,
+  loadingObservation,
+  budgetError,
+  budgetNotice,
+  onSaveBudget,
+  onStreamAction,
+  onRefreshStream,
+  onViewLogs,
 }) {
   const meta = BITCOIN_KINDS[kind];
   const style = { animationDelay: `${Math.min(index, 6) * 60}ms` };
 
   if (!network) {
     return (
-      <Card title={meta.label} subtitle={meta.note} badge={<Pill tone="warn">Not derived</Pill>} className="w-full" style={style}>
+      <Card title={meta.label} subtitle={meta.note} badge={<Pill tone="warn">Unassigned</Pill>} className="w-full" style={style}>
         <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-          No {meta.label} network was derived from the persisted event&apos;s heritage state for this ActiveClip.
+          No {meta.label} network is present in the available networks for this selection.
         </p>
       </Card>
     );
@@ -1354,7 +1104,14 @@ function NetworkCard({
         <Fields min="7rem">
           <Field label="Purpose">{money(network.purpose)}</Field>
           <Field label="Derivation path"><span className="break-all font-mono text-xs">{money(network.path)}</span></Field>
+          <Field label="Activation derivation status">
+            {derivationRecord ? money(derivationRecord.status) : "Not requested"}
+          </Field>
         </Fields>
+
+        {derivationRecord?.error && (
+          <Notice>{derivationRecord.error}</Notice>
+        )}
 
         <Card
           inner
@@ -1404,691 +1161,568 @@ function NetworkCard({
   );
 }
 
-/* ───────────────────────── ActiveClip-driven Event Store ───────────────────────── */
+/* ───────────────────────── ActiveClip Event Store ───────────────────────── */
 
-const EMPTY_CLIP_STORE = Object.freeze({
-  clipKey: "",
-  loadingEvent: false,
-  eventRows: [],
-  directory: "",
-  authoritativeEvent: null,
-  heritageState: null,
-  derivedEventSnapshot: null,
-  derivedNetworks: [],
-  loadingNetworks: false,
-  payloads: [],
-  loadingPayloads: false,
-  budgetsByNetwork: {},
-  loadingBudgets: {},
-  savingBudgets: {},
-  budgetErrors: {},
-  budgetNotices: {},
-  boards: {},
-  loadingBoards: {},
-  wirePackets: {},
-  loadingWire: {},
-  observations: {},
-  busyObservation: {},
-  observationErrors: {},
-  loadingObservations: {},
-  streamResults: {},
-  error: "",
-  notice: "",
-});
+export function EventStoreView({
+  clip,
+  persistedActivations = [],
+  availableNetworks = [],
+  onSelectActivation,
+}) {
+  const activeClip = useMemo(() => createActiveClip(clip), [clip]);
+  const substrate = activeClip?.substrate ?? "";
+  const activation = activeClip?.activation ?? null;
 
-export function EventStoreView({ clip }) {
-  const initialClip = useMemo(() => createActiveClip(clip), [clip]);
+  const activations = useMemo(
+    () => extractAvailableActivations(persistedActivations, substrate),
+    [persistedActivations, substrate],
+  );
 
-  const [activeClip, setActiveClip] = useState(initialClip);
-  const [historyState, setHistoryState] = useState({
-    substrate: "",
-    loading: false,
-    events: [],
-    directory: "",
-    error: "",
-  });
-  const [store, setStore] = useState(EMPTY_CLIP_STORE);
+  const networks = useMemo(
+    () => extractAvailableNetworks(availableNetworks),
+    [availableNetworks],
+  );
+
+  const [selectedEventPayload, setSelectedEventPayload] = useState(null);
+  const [loadingEvent, setLoadingEvent] = useState(false);
+  const [eventError, setEventError] = useState("");
+
+  // Keyed strictly by `${substrate}::${activation}::${network}`.
+  const [derivationsByKey, setDerivationsByKey] = useState({});
+
+  const [payloads, setPayloads] = useState([]);
+  const [loadingPayloads, setLoadingPayloads] = useState(false);
+
+  const [budgetsByNetwork, setBudgetsByNetwork] = useState({});
+  const [loadingBudgets, setLoadingBudgets] = useState({});
+  const [savingBudgets, setSavingBudgets] = useState({});
+  const [budgetErrors, setBudgetErrors] = useState({});
+  const [budgetNotices, setBudgetNotices] = useState({});
+
+  const [boards, setBoards] = useState({});
+  const [loadingBoards, setLoadingBoards] = useState({});
+
+  const [wirePackets, setWirePackets] = useState({});
+  const [loadingWire, setLoadingWire] = useState({});
+
+  const [observations, setObservations] = useState({});
+  const [busyObservation, setBusyObservation] = useState({});
+  const [observationErrors, setObservationErrors] = useState({});
+  const [loadingObservations, setLoadingObservations] = useState({});
+  const [streamResults, setStreamResults] = useState({});
+
   const [logViewer, setLogViewer] = useState(null);
 
-  // Monotonic lifecycle generation & cancellation controller scoped exclusively to activeClip.
-  const lifecycleGenRef = useRef(0);
-  const activeClipKeyRef = useRef("");
-  const abortControllerRef = useRef(null);
-  const historyGenRef = useRef(0);
-  const historyAbortRef = useRef(null);
+  const clipGenRef = useRef(0);
+  const clipAbortRef = useRef(null);
+  const prevSubstrateRef = useRef("");
+  const derivationAbortRef = useRef(new Map());
 
-  const clipKey = useMemo(() => activeClipKey(activeClip), [activeClip]);
-
-  const isClipCurrent = useCallback(
-    (targetKey, generation) =>
-      Boolean(targetKey) &&
-      generation === lifecycleGenRef.current &&
-      activeClipKeyRef.current === targetKey,
+  const isCurrentClipGen = useCallback(
+    (gen) => gen === clipGenRef.current,
     [],
   );
 
-  // Scoped state updater: drops any update from an invalidated clip.
-  const updateScopedStore = useCallback(
-    (targetKey, generation, updater) => {
-      if (!isClipCurrent(targetKey, generation)) return;
-      setStore((prev) => {
-        if (prev.clipKey !== targetKey) return prev;
-        const patch = typeof updater === "function" ? updater(prev) : updater;
-        return { ...prev, ...patch };
-      });
-    },
-    [isClipCurrent],
-  );
-
-  // Fetch authoritative persisted event history via GET /wallets/{substrate}/events.
-  const loadPersistedHistory = useCallback(async (substrate, options = {}) => {
-    const trimmed = typeof substrate === "string" ? substrate.trim() : "";
-    historyAbortRef.current?.abort();
-
-    if (!trimmed) {
-      historyGenRef.current += 1;
-      setHistoryState({
-        substrate: "",
-        loading: false,
-        events: [],
-        directory: "",
-        error: "",
-      });
-      return { events: [], directory: "" };
-    }
-
-    const gen = ++historyGenRef.current;
-    const controller = new AbortController();
-    historyAbortRef.current = controller;
-
-    setHistoryState((prev) => ({
-      substrate: trimmed,
-      loading: true,
-      events: prev.substrate === trimmed ? prev.events : [],
-      directory: prev.substrate === trimmed ? prev.directory : "",
-      error: "",
-    }));
-
-    try {
-      const normalized = await fetchPersistedEventsIndex(
-        trimmed,
-        options.signal ?? controller.signal,
-      );
-      if (gen !== historyGenRef.current) return null;
-      setHistoryState({
-        substrate: trimmed,
-        loading: false,
-        events: normalized.events,
-        directory: normalized.directory,
-        error: "",
-      });
-      return normalized;
-    } catch (err) {
-      if (err?.name === "AbortError" || gen !== historyGenRef.current) return null;
-      const message =
-        err instanceof Error && err.message
-          ? err.message
-          : "Unable to load persisted event history.";
-      setHistoryState((prev) => ({
-        substrate: trimmed,
-        loading: false,
-        events: prev.substrate === trimmed ? prev.events : [],
-        directory: prev.substrate === trimmed ? prev.directory : "",
-        error: message,
-      }));
-      return null;
-    }
-  }, []);
-
-  // Reconcile incoming route clip when substrate or activation changes from parent/URL.
+  // When substrate changes, invalidate prior substrate's derivation collection.
   useEffect(() => {
-    const nextClip = createActiveClip(clip);
-    if (!nextClip) {
-      setActiveClip(null);
+    const previousSubstrate = prevSubstrateRef.current;
+    if (previousSubstrate && previousSubstrate !== substrate) {
+      for (const [key, controller] of derivationAbortRef.current.entries()) {
+        if (key.startsWith(`${previousSubstrate}::`)) {
+          controller.abort();
+          derivationAbortRef.current.delete(key);
+        }
+      }
+      setDerivationsByKey((prev) => {
+        const next = {};
+        for (const [k, record] of Object.entries(prev)) {
+          if (!k.startsWith(`${previousSubstrate}::`)) {
+            next[k] = record;
+          }
+        }
+        return next;
+      });
+    }
+    prevSubstrateRef.current = substrate;
+  }, [substrate]);
+
+  // Derive network data for available persisted activations & networks using deriveActivationNetwork().
+  useEffect(() => {
+    if (!substrate || activations.length === 0 || networks.length === 0) return;
+
+    const targets = [];
+    for (const act of activations) {
+      for (const net of networks) {
+        targets.push({ substrate, activation: act, network: net.id });
+      }
+    }
+
+    if (typeof UNVERIFIED_DERIVE_ACTIVATION_NETWORK_ROUTE !== "function") {
+      setDerivationsByKey((prev) => {
+        const next = { ...prev };
+        for (const t of targets) {
+          const key = derivationKey(t.substrate, t.activation, t.network);
+          next[key] = {
+            key,
+            substrate: t.substrate,
+            activation: t.activation,
+            network: t.network,
+            status: "unverified_contract",
+            data: null,
+            error:
+              "Cannot call derive_activation_network() until its exact route in floriddasoftware/qtm-api/src/main.rs is verified.",
+          };
+        }
+        return next;
+      });
       return;
     }
 
-    setActiveClip((prev) => {
-      if (!prev || prev.substrate !== nextClip.substrate) {
-        return nextClip;
+    const batchControllers = [];
+    setDerivationsByKey((prev) => {
+      const next = { ...prev };
+      for (const t of targets) {
+        const key = derivationKey(t.substrate, t.activation, t.network);
+        next[key] = {
+          ...(prev[key] || {}),
+          key,
+          substrate: t.substrate,
+          activation: t.activation,
+          network: t.network,
+          status: "loading",
+          error: "",
+        };
       }
-      if (prev.activation !== nextClip.activation) {
-        return nextClip;
-      }
-      return prev;
+      return next;
     });
-  }, [clip]);
 
-  // Load persisted event history whenever substrate changes.
-  useEffect(() => {
-    const substrate = activeClip?.substrate ?? "";
-    void loadPersistedHistory(substrate);
-    return () => {
-      historyAbortRef.current?.abort();
-    };
-  }, [activeClip?.substrate, loadPersistedHistory]);
+    void Promise.allSettled(
+      targets.map(async (target) => {
+        const key = derivationKey(target.substrate, target.activation, target.network);
+        derivationAbortRef.current.get(key)?.abort();
+        const controller = new AbortController();
+        derivationAbortRef.current.set(key, controller);
+        batchControllers.push(controller);
 
-  const availableClips = useMemo(() => {
-    if (!activeClip?.substrate || historyState.substrate !== activeClip.substrate) {
-      return [];
-    }
-    return buildAvailableClipsFromEvents(historyState.events, activeClip.substrate);
-  }, [activeClip?.substrate, historyState.substrate, historyState.events]);
-
-  // Reconcile ActiveClip with persisted Available Clips once history finishes loading.
-  useEffect(() => {
-    if (!activeClip) return;
-    if (historyState.substrate !== activeClip.substrate || historyState.loading) {
-      return;
-    }
-
-    if (availableClips.length === 0) {
-      return;
-    }
-
-    const matched = availableClips.find(
-      (item) => item.activation === activeClip.activation,
+        try {
+          const data = await deriveActivationNetwork(target, controller.signal);
+          if (controller.signal.aborted) return;
+          setDerivationsByKey((prev) => ({
+            ...prev,
+            [key]: {
+              key,
+              substrate: target.substrate,
+              activation: target.activation,
+              network: target.network,
+              status: "ok",
+              data,
+              error: "",
+            },
+          }));
+        } catch (err) {
+          if (err?.name === "AbortError" || controller.signal.aborted) return;
+          setDerivationsByKey((prev) => ({
+            ...prev,
+            [key]: {
+              key,
+              substrate: target.substrate,
+              activation: target.activation,
+              network: target.network,
+              status: "error",
+              data: null,
+              error:
+                err instanceof Error
+                  ? err.message
+                  : "Activation network derivation failed.",
+            },
+          }));
+        }
+      }),
     );
-    if (!matched) {
-      // Reconcile to the first available persisted clip rather than keeping a non-existent activation.
-      setActiveClip(availableClips[0].clip);
-    }
-  }, [
-    activeClip,
-    availableClips,
-    historyState.substrate,
-    historyState.loading,
-  ]);
 
-  const selectAvailableClip = useCallback(
-    (nextActivation) => {
-      if (!activeClip?.substrate) return;
-      const parsed = parseActivationNumber(nextActivation);
-      if (parsed === null) return;
-      const matchingEntry = availableClips.find(
-        (item) => item.activation === parsed,
-      );
-      if (!matchingEntry) return;
-      if (sameActiveClip(activeClip, matchingEntry.clip)) return;
+    return () => {
+      for (const c of batchControllers) c.abort();
+    };
+  }, [substrate, activations, networks]);
 
-      // Immediately invalidate previous clip view before committing new ActiveClip.
-      abortControllerRef.current?.abort();
-      lifecycleGenRef.current += 1;
-      setStore(EMPTY_CLIP_STORE);
-      setLogViewer(null);
-      setActiveClip(matchingEntry.clip);
-    },
-    [activeClip, availableClips],
-  );
-
-  // Stage 5b helper: load budgets for the derived networks of the active clip's heritage state.
-  const loadBudgetsForClip = useCallback(
-    async (targetClip, targetKey, generation, networkRows, signal) => {
-      const networkIds = (networkRows || [])
-        .map((network) => normalizeNetworkId(network?.id))
-        .filter(Boolean);
-
-      if (networkIds.length === 0) {
-        updateScopedStore(targetKey, generation, {
-          budgetsByNetwork: {},
-          loadingBudgets: {},
-        });
-        return {};
-      }
-
-      const idsSet = new Set(networkIds);
-      updateScopedStore(targetKey, generation, (prev) => ({
-        loadingBudgets: Object.fromEntries(networkIds.map((id) => [id, true])),
-        budgetErrors: {
-          ...prev.budgetErrors,
-          ...Object.fromEntries(networkIds.map((id) => [id, ""])),
-        },
-      }));
-
-      try {
-        const body = await apiRequest(
-          `/wallets/${enc(targetClip.substrate)}/activations/${enc(targetClip.activation)}/budgets`,
-          { signal },
-        );
-        if (!isClipCurrent(targetKey, generation)) return null;
-
-        const rows = Array.isArray(body?.budgets) ? body.budgets : [];
-        const nextMap = {};
-        for (const row of rows) {
-          if (row?.activation != null && String(row.activation) !== String(targetClip.activation)) {
-            continue;
-          }
-          const net = normalizeDerivedNetwork(row?.network ?? row?.network_id);
-          if (!net || !idsSet.has(net.id)) continue;
-          nextMap[net.id] = row;
-        }
-
-        const scoped = Object.fromEntries(
-          networkIds.map((id) => [id, nextMap[id] ?? null]),
-        );
-
-        updateScopedStore(targetKey, generation, {
-          budgetsByNetwork: scoped,
-          loadingBudgets: Object.fromEntries(networkIds.map((id) => [id, false])),
-        });
-        return scoped;
-      } catch (err) {
-        if (err?.name !== "AbortError" && isClipCurrent(targetKey, generation)) {
-          const message = err instanceof Error ? err.message : "API error";
-          updateScopedStore(targetKey, generation, {
-            budgetsByNetwork: Object.fromEntries(networkIds.map((id) => [id, null])),
-            loadingBudgets: Object.fromEntries(networkIds.map((id) => [id, false])),
-            budgetErrors: Object.fromEntries(
-              networkIds.map((id) => [
-                id,
-                `Unable to load budget for event/${targetClip.activation}/${id}/budget: ${message}`,
-              ]),
-            ),
-          });
-        }
-        return null;
-      }
-    },
-    [isClipCurrent, updateScopedStore],
-  );
-
-  // Stage 5a helper: load complete persistent payload storage belonging to the resolved clip events.
-  const loadPersistentPayloadsForClip = useCallback(
-    async (targetClip, targetKey, generation, eventRows, signal) => {
-      const records = [
-        ...new Set(
-          (eventRows || [])
-            .map((row) => recordOf(row))
-            .filter(Boolean),
-        ),
-      ];
-
-      if (records.length === 0) {
-        updateScopedStore(targetKey, generation, {
-          payloads: [],
-          loadingPayloads: false,
-        });
-        return [];
-      }
-
-      updateScopedStore(targetKey, generation, { loadingPayloads: true });
-
-      try {
-        const responses = await Promise.all(
-          records.map((rec) =>
-            apiRequest(
-              `/wallets/${enc(targetClip.substrate)}/events/${enc(rec)}/payloads`,
-              { signal },
-            ).then((body) => ({ rec, body })),
-          ),
-        );
-        if (!isClipCurrent(targetKey, generation)) return null;
-
-        const unique = new Map();
-        for (const { rec, body } of responses) {
-          const rows = Array.isArray(body?.payloads) ? body.payloads : [];
-          for (const entry of rows) {
-            const normalized = normalizePayload(entry, rec);
-            if (!normalized) continue;
-            const key = payloadRowKey(normalized);
-            if (!unique.has(key)) unique.set(key, normalized);
-          }
-        }
-
-        const collected = [...unique.values()];
-        updateScopedStore(targetKey, generation, {
-          payloads: collected,
-          loadingPayloads: false,
-        });
-        return collected;
-      } catch (err) {
-        if (err?.name !== "AbortError" && isClipCurrent(targetKey, generation)) {
-          updateScopedStore(targetKey, generation, {
-            payloads: [],
-            loadingPayloads: false,
-            error: `Unable to load payload records: ${
-              err instanceof Error ? err.message : "unknown API error"
-            }`,
-          });
-        }
-        return null;
-      }
-    },
-    [isClipCurrent, updateScopedStore],
-  );
-
-  // Canonical ActiveClip Initialization Sequence:
-  // 1. Receive the ActiveClip.
-  // 2. Resolve the persisted event corresponding to that clip.
-  // 3. Obtain the authoritative event heritage state from `event.heritage.state`.
-  // 4. Resolve the applicable network derivations from the event's authoritative state.
-  // 5. Load the persistent storage belonging to that clip.
-  // 6. Render the complete Event Store.
+  // Synchronize selected ActiveClip overview, authoritative event, and clip-scoped resources.
   useEffect(() => {
-    abortControllerRef.current?.abort();
-    abortControllerRef.current = null;
-
-    const generation = ++lifecycleGenRef.current;
-    activeClipKeyRef.current = clipKey;
+    clipAbortRef.current?.abort();
+    const gen = ++clipGenRef.current;
     setLogViewer(null);
 
     if (!activeClip) {
-      setStore({
-        ...EMPTY_CLIP_STORE,
-        error:
-          "Event Store requires a valid ActiveClip ({ substrate, activation }).",
-      });
+      setSelectedEventPayload(null);
+      setEventError("Valid ActiveClip ({ substrate, activation }) is required.");
+      setLoadingEvent(false);
+      setPayloads([]);
+      setBudgetsByNetwork({});
+      setBoards({});
+      setWirePackets({});
+      setObservations({});
       return;
     }
 
     const controller = new AbortController();
-    abortControllerRef.current = controller;
+    clipAbortRef.current = controller;
     const { signal } = controller;
 
-    setStore({
-      ...EMPTY_CLIP_STORE,
-      clipKey,
-      loadingEvent: true,
-    });
+    // Clear stale clip-specific overview & clip resources on ActiveClip change.
+    setSelectedEventPayload(null);
+    setEventError("");
+    setLoadingEvent(true);
+    setPayloads([]);
+    setBudgetsByNetwork({});
+    setBudgetErrors({});
+    setBudgetNotices({});
+    setBoards({});
+    setWirePackets({});
+    setObservations({});
+    setObservationErrors({});
+
+    const currentClip = activeClip;
 
     void (async () => {
-      const preloaded =
-        historyState.substrate === activeClip.substrate && !historyState.loading
-          ? historyState
-          : null;
-
-      // Step 2: Resolve the persisted event corresponding to this ActiveClip.
-      let normalizedHistory;
       try {
-        normalizedHistory = await resolveEventForClip(
-          activeClip,
-          signal,
-          preloaded,
-        );
-        if (!normalizedHistory || !isClipCurrent(clipKey, generation)) return;
-      } catch (err) {
-        if (err?.name === "AbortError" || !isClipCurrent(clipKey, generation)) {
-          return;
-        }
-        updateScopedStore(clipKey, generation, {
-          loadingEvent: false,
-          error:
-            err instanceof Error && err.message
-              ? err.message
-              : "Unable to resolve persisted event for ActiveClip.",
-        });
-        return;
-      }
+        const eventBody = await fetchSelectedClipEvent(currentClip, signal);
+        if (!isCurrentClipGen(gen) || signal.aborted) return;
+        setSelectedEventPayload(eventBody);
+        setLoadingEvent(false);
 
-      const clipEventRows = normalizedHistory.rows;
-      const authoritativeEvent = resolveAuthoritativeEvent(
-        clipEventRows,
-        activeClip,
-      );
+        const eventObj =
+          eventBody?.event && typeof eventBody.event === "object"
+            ? eventBody.event
+            : eventBody && typeof eventBody === "object"
+              ? eventBody
+              : null;
+        const recordName =
+          typeof eventObj?.record === "string" && eventObj.record.trim()
+            ? eventObj.record.trim()
+            : typeof eventObj?.record_name === "string" && eventObj.record_name.trim()
+              ? eventObj.record_name.trim()
+              : "";
 
-      if (!authoritativeEvent) {
-        updateScopedStore(clipKey, generation, {
-          loadingEvent: false,
-          eventRows: [],
-          directory: normalizedHistory.directory,
-          notice:
-            preloaded && preloaded.events.length === 0
-              ? `No persisted events exist for substrate "${activeClip.substrate}".`
-              : `No persisted event found for ActiveClip (${activeClip.substrate} · activation ${activeClip.activation}).`,
-        });
-        return;
-      }
-
-      // Step 3: Obtain the authoritative event heritage state from `event.heritage.state`.
-      const heritageState = heritageStateOf(authoritativeEvent);
-      if (!heritageState) {
-        updateScopedStore(clipKey, generation, {
-          loadingEvent: false,
-          eventRows: clipEventRows,
-          directory: normalizedHistory.directory,
-          authoritativeEvent,
-          error:
-            "Resolved event is missing authoritative event.heritage.state.",
-        });
-        return;
-      }
-
-      const heritageActivation = activationFromHeritageState(heritageState);
-      if (heritageActivation !== activeClip.activation) {
-        updateScopedStore(clipKey, generation, {
-          loadingEvent: false,
-          eventRows: clipEventRows,
-          directory: normalizedHistory.directory,
-          authoritativeEvent,
-          heritageState,
-          error: `Event heritage activation (${String(heritageActivation)}) does not match ActiveClip (${activeClip.activation}).`,
-        });
-        return;
-      }
-
-      updateScopedStore(clipKey, generation, {
-        loadingEvent: false,
-        eventRows: clipEventRows,
-        directory: normalizedHistory.directory,
-        authoritativeEvent,
-        heritageState,
-        loadingNetworks: true,
-      });
-
-      // Step 4: Resolve applicable network derivations from the event's authoritative heritage state.
-      let derivedResult;
-      try {
-        derivedResult = await fetchDerivedNetworksFromHeritage(
-          activeClip,
-          heritageState,
-          signal,
-        );
-      } catch (err) {
-        if (err?.name === "AbortError" || !isClipCurrent(clipKey, generation)) {
-          return;
-        }
-        updateScopedStore(clipKey, generation, {
-          loadingNetworks: false,
-          error: `Unable to derive networks from event heritage state: ${
-            err instanceof Error ? err.message : "unknown API error"
-          }`,
-        });
-        return;
-      }
-
-      if (!isClipCurrent(clipKey, generation)) return;
-
-      const networkRows = derivedResult.networks;
-      updateScopedStore(clipKey, generation, {
-        loadingNetworks: false,
-        derivedEventSnapshot: derivedResult.event,
-        derivedNetworks: networkRows,
-      });
-
-      // Step 5: Load the complete persistent storage belonging to this ActiveClip.
-      void loadPersistentPayloadsForClip(
-        activeClip,
-        clipKey,
-        generation,
-        clipEventRows,
-        signal,
-      );
-
-      void loadBudgetsForClip(
-        activeClip,
-        clipKey,
-        generation,
-        networkRows,
-        signal,
-      );
-
-      for (const network of networkRows) {
-        const netId = normalizeNetworkId(network?.id);
-        if (!netId) continue;
-
-        // Payload board per derived network
-        updateScopedStore(clipKey, generation, (prev) => ({
-          loadingBoards: { ...prev.loadingBoards, [netId]: true },
-        }));
-        void apiRequest(
-          `/wallets/${enc(activeClip.substrate)}/activations/${enc(heritageActivation)}/networks/${enc(netId)}/payload-board`,
-          { signal },
-        )
-          .then((boardBody) => {
-            if (!isClipCurrent(clipKey, generation)) return;
-            if (
-              boardBody?.activation != null &&
-              String(boardBody.activation) !== String(heritageActivation)
-            ) {
-              return;
-            }
-            updateScopedStore(clipKey, generation, (prev) => ({
-              boards: { ...prev.boards, [netId]: boardBody },
-            }));
-          })
-          .catch(() => {})
-          .finally(() => {
-            updateScopedStore(clipKey, generation, (prev) => ({
-              loadingBoards: { ...prev.loadingBoards, [netId]: false },
-            }));
-          });
-
-        if (bitcoinNetwork(network)) {
-          // Observation status per derived Bitcoin network
-          updateScopedStore(clipKey, generation, (prev) => ({
-            loadingObservations: { ...prev.loadingObservations, [netId]: true },
-            observationErrors: { ...prev.observationErrors, [netId]: "" },
-          }));
-          void apiRequest(
-            `/wallets/${enc(activeClip.substrate)}/activations/${enc(heritageActivation)}/networks/${enc(netId)}/observation`,
+        if (recordName) {
+          setLoadingPayloads(true);
+          apiRequest(
+            `/wallets/${enc(currentClip.substrate)}/events/${enc(recordName)}/payloads`,
             { signal },
           )
-            .then((status) => {
-              if (!isClipCurrent(clipKey, generation)) return;
-              if (!observationMatches(status, netId, heritageActivation)) {
-                updateScopedStore(clipKey, generation, (prev) => ({
-                  observationErrors: {
-                    ...prev.observationErrors,
-                    [netId]: "Observation status response did not match this network.",
-                  },
-                }));
-                return;
+            .then((body) => {
+              if (!isCurrentClipGen(gen) || signal.aborted) return;
+              const rows = Array.isArray(body?.payloads) ? body.payloads : [];
+              const unique = new Map();
+              for (const row of rows) {
+                const norm = normalizePayload(row, recordName);
+                if (norm) unique.set(payloadRowKey(norm), norm);
               }
-              updateScopedStore(clipKey, generation, (prev) => ({
-                observations: { ...prev.observations, [netId]: status },
-              }));
-            })
-            .catch((err) => {
-              if (err?.name === "AbortError" || !isClipCurrent(clipKey, generation)) {
-                return;
-              }
-              updateScopedStore(clipKey, generation, (prev) => ({
-                observationErrors: {
-                  ...prev.observationErrors,
-                  [netId]:
-                    err instanceof Error
-                      ? err.message
-                      : "Unable to load observation status.",
-                },
-              }));
-            })
-            .finally(() => {
-              updateScopedStore(clipKey, generation, (prev) => ({
-                loadingObservations: { ...prev.loadingObservations, [netId]: false },
-              }));
-            });
-
-          // WirePackets persistent storage per derived Bitcoin network
-          updateScopedStore(clipKey, generation, (prev) => ({
-            loadingWire: { ...prev.loadingWire, [netId]: true },
-          }));
-          void apiRequest(
-            `/wallets/${enc(activeClip.substrate)}/activations/${enc(heritageActivation)}/networks/${enc(netId)}/wirepackets`,
-            { signal },
-          )
-            .then((metadata) => {
-              if (!isClipCurrent(clipKey, generation)) return;
-              if (
-                metadata?.activation != null &&
-                String(metadata.activation) !== String(heritageActivation)
-              ) {
-                return;
-              }
-              updateScopedStore(clipKey, generation, (prev) => ({
-                wirePackets: { ...prev.wirePackets, [netId]: metadata },
-              }));
+              setPayloads([...unique.values()]);
             })
             .catch(() => {})
             .finally(() => {
-              updateScopedStore(clipKey, generation, (prev) => ({
-                loadingWire: { ...prev.loadingWire, [netId]: false },
-              }));
+              if (isCurrentClipGen(gen)) setLoadingPayloads(false);
+            });
+        }
+      } catch (err) {
+        if (err?.name === "AbortError" || !isCurrentClipGen(gen)) return;
+        setLoadingEvent(false);
+        setEventError(
+          err instanceof Error
+            ? err.message
+            : "Unable to retrieve authoritative event for selected ActiveClip.",
+        );
+      }
+    })();
+
+    const networkIds = networks.map((n) => n.id);
+    if (networkIds.length > 0) {
+      setLoadingBudgets(Object.fromEntries(networkIds.map((id) => [id, true])));
+      apiRequest(
+        `/wallets/${enc(currentClip.substrate)}/activations/${enc(currentClip.activation)}/budgets`,
+        { signal },
+      )
+        .then((body) => {
+          if (!isCurrentClipGen(gen) || signal.aborted) return;
+          const rows = Array.isArray(body?.budgets) ? body.budgets : [];
+          const next = {};
+          for (const row of rows) {
+            if (row?.activation != null && String(row.activation) !== String(currentClip.activation)) {
+              continue;
+            }
+            const net = normalizeNetworkEntry(row?.network ?? row?.network_id);
+            if (net) next[net.id] = row;
+          }
+          setBudgetsByNetwork(next);
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (isCurrentClipGen(gen)) setLoadingBudgets({});
+        });
+
+      for (const net of networks) {
+        const netId = net.id;
+        setLoadingBoards((prev) => ({ ...prev, [netId]: true }));
+        apiRequest(
+          `/wallets/${enc(currentClip.substrate)}/activations/${enc(currentClip.activation)}/networks/${enc(netId)}/payload-board`,
+          { signal },
+        )
+          .then((boardBody) => {
+            if (!isCurrentClipGen(gen) || signal.aborted) return;
+            setBoards((prev) => ({ ...prev, [netId]: boardBody }));
+          })
+          .catch(() => {})
+          .finally(() => {
+            if (isCurrentClipGen(gen)) {
+              setLoadingBoards((prev) => ({ ...prev, [netId]: false }));
+            }
+          });
+
+        if (bitcoinNetwork(net)) {
+          setLoadingObservations((prev) => ({ ...prev, [netId]: true }));
+          apiRequest(
+            `/wallets/${enc(currentClip.substrate)}/activations/${enc(currentClip.activation)}/networks/${enc(netId)}/observation`,
+            { signal },
+          )
+            .then((status) => {
+              if (!isCurrentClipGen(gen) || signal.aborted) return;
+              if (!observationMatches(status, netId, currentClip.activation)) return;
+              setObservations((prev) => ({ ...prev, [netId]: status }));
+            })
+            .catch(() => {})
+            .finally(() => {
+              if (isCurrentClipGen(gen)) {
+                setLoadingObservations((prev) => ({ ...prev, [netId]: false }));
+              }
+            });
+
+          setLoadingWire((prev) => ({ ...prev, [netId]: true }));
+          apiRequest(
+            `/wallets/${enc(currentClip.substrate)}/activations/${enc(currentClip.activation)}/networks/${enc(netId)}/wirepackets`,
+            { signal },
+          )
+            .then((metadata) => {
+              if (!isCurrentClipGen(gen) || signal.aborted) return;
+              setWirePackets((prev) => ({ ...prev, [netId]: metadata }));
+            })
+            .catch(() => {})
+            .finally(() => {
+              if (isCurrentClipGen(gen)) {
+                setLoadingWire((prev) => ({ ...prev, [netId]: false }));
+              }
             });
         }
       }
-    })();
+    }
 
     return () => {
       controller.abort();
     };
-  }, [
-    activeClip,
-    clipKey,
-    historyState.substrate,
-    historyState.loading,
-    historyState.events,
-    historyState.directory,
-    isClipCurrent,
-    updateScopedStore,
-    loadPersistentPayloadsForClip,
-    loadBudgetsForClip,
-  ]);
+  }, [activeClip, networks, isCurrentClipGen]);
 
-  const scopedStore = store.clipKey === clipKey ? store : EMPTY_CLIP_STORE;
-  const authoritativeEvent = scopedStore.authoritativeEvent;
-  const heritageState = scopedStore.heritageState;
-  const focusedEvent = authoritativeEvent || scopedStore.derivedEventSnapshot || null;
-  const authoritativeRecord = recordOf(authoritativeEvent);
+  const runningBitcoinNetworkIds = useMemo(
+    () =>
+      JSON.stringify(
+        networks
+          .filter(bitcoinNetwork)
+          .filter((network) => observations[network.id]?.running === true)
+          .map((network) => network.id),
+      ),
+    [networks, observations],
+  );
 
-  const retainedMass = useMemo(() => {
-    const rawMass = pickEventField(authoritativeEvent, heritageState, [
-      "retained_mass",
-    ]);
-    if (rawMass !== null && /^-?\d+$/.test(String(rawMass))) {
-      return BigInt(rawMass).toString();
+  useEffect(() => {
+    if (!activeClip) return;
+    const networkIds = JSON.parse(runningBitcoinNetworkIds);
+    if (!networkIds.length) return;
+
+    const currentClip = activeClip;
+    const gen = clipGenRef.current;
+    let cancelled = false;
+    let timeoutId = null;
+
+    const pollWirePackets = async () => {
+      await Promise.allSettled(
+        networkIds.map(async (networkId) => {
+          try {
+            const metadata = await apiRequest(
+              `/wallets/${enc(currentClip.substrate)}/activations/${enc(currentClip.activation)}/networks/${enc(networkId)}/wirepackets`,
+            );
+            if (cancelled || !isCurrentClipGen(gen)) return;
+            setWirePackets((prev) => ({ ...prev, [networkId]: metadata }));
+          } catch {
+            // Keep transient poll errors local.
+          }
+        }),
+      );
+
+      if (!cancelled && isCurrentClipGen(gen)) {
+        timeoutId = window.setTimeout(pollWirePackets, WIREPACKETS_POLL_MS);
+      }
+    };
+
+    timeoutId = window.setTimeout(pollWirePackets, 0);
+    return () => {
+      cancelled = true;
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    };
+  }, [activeClip, runningBitcoinNetworkIds, isCurrentClipGen]);
+
+  const appendStreamResult = useCallback((networkId, label, body) => {
+    setStreamResults((prev) => ({
+      ...prev,
+      [networkId]: [
+        ...(prev[networkId] || []),
+        {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          label,
+          time: new Date().toLocaleTimeString(),
+          body,
+        },
+      ].slice(-60),
+    }));
+  }, []);
+
+  const refreshStream = async (network) => {
+    if (!activeClip || !network?.id) return;
+    const id = normalizeNetworkId(network.id);
+    const currentClip = activeClip;
+    const gen = clipGenRef.current;
+    setBusyObservation((prev) => ({ ...prev, [id]: true }));
+    setObservationErrors((prev) => ({ ...prev, [id]: "" }));
+    try {
+      const status = await apiRequest(
+        `/wallets/${enc(currentClip.substrate)}/activations/${enc(currentClip.activation)}/networks/${enc(id)}/observation`,
+      );
+      if (!isCurrentClipGen(gen) || !sameActiveClip(activeClip, currentClip)) return;
+      if (!observationMatches(status, id, currentClip.activation)) {
+        throw new Error("Observation status did not match selected ActiveClip and network.");
+      }
+      setObservations((prev) => ({ ...prev, [id]: status }));
+    } catch (err) {
+      if (!isCurrentClipGen(gen)) return;
+      setObservationErrors((prev) => ({
+        ...prev,
+        [id]: err instanceof Error ? err.message : "Unable to refresh observation status.",
+      }));
+    } finally {
+      if (isCurrentClipGen(gen)) {
+        setBusyObservation((prev) => ({ ...prev, [id]: false }));
+      }
     }
-    return rawMass !== null ? money(rawMass) : "—";
-  }, [authoritativeEvent, heritageState]);
+  };
+
+  const streamAction = async (action, network) => {
+    if (!activeClip || !network?.id) return;
+    const id = normalizeNetworkId(network.id);
+    const currentClip = activeClip;
+    const gen = clipGenRef.current;
+    setBusyObservation((prev) => ({ ...prev, [id]: true }));
+    setObservationErrors((prev) => ({ ...prev, [id]: "" }));
+    try {
+      const result = await apiRequest(
+        `/wallets/${enc(currentClip.substrate)}/activations/${enc(currentClip.activation)}/networks/${enc(id)}/observation`,
+        { method: action === "start" ? "POST" : "DELETE" },
+      );
+      if (!isCurrentClipGen(gen) || !sameActiveClip(activeClip, currentClip)) return;
+      appendStreamResult(id, `${action.toUpperCase()} observation response`, result);
+      await refreshStream(network);
+    } catch (err) {
+      if (!isCurrentClipGen(gen)) return;
+      const message = err instanceof Error ? err.message : "Bit-miner action failed.";
+      appendStreamResult(id, `${action.toUpperCase()} request error`, { error: message });
+      setObservationErrors((prev) => ({ ...prev, [id]: message }));
+    } finally {
+      if (isCurrentClipGen(gen)) {
+        setBusyObservation((prev) => ({ ...prev, [id]: false }));
+      }
+    }
+  };
+
+  const saveBudget = async (network, draft) => {
+    if (!activeClip || !network?.id) return;
+    const id = normalizeNetworkId(network.id);
+    const currentClip = activeClip;
+    const gen = clipGenRef.current;
+
+    setBudgetErrors((prev) => ({ ...prev, [id]: "" }));
+    setBudgetNotices((prev) => ({ ...prev, [id]: "" }));
+
+    const minEvents = Number(draft.min_events);
+    const maxEvents = Number(draft.max_events);
+    if (!Number.isInteger(minEvents) || minEvents < 0 || !Number.isInteger(maxEvents) || maxEvents < 0) {
+      setBudgetErrors((prev) => ({
+        ...prev,
+        [id]: "Min events and max events must be non-negative integers.",
+      }));
+      return;
+    }
+
+    setSavingBudgets((prev) => ({ ...prev, [id]: true }));
+    try {
+      await apiRequest(
+        `/wallets/${enc(currentClip.substrate)}/activations/${enc(currentClip.activation)}/networks/${enc(id)}/budgets`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ min_events: minEvents, max_events: maxEvents }),
+        },
+      );
+      if (!isCurrentClipGen(gen) || !sameActiveClip(activeClip, currentClip)) return;
+      const refreshed = await apiRequest(
+        `/wallets/${enc(currentClip.substrate)}/activations/${enc(currentClip.activation)}/budgets`,
+      );
+      if (!isCurrentClipGen(gen) || !sameActiveClip(activeClip, currentClip)) return;
+      const rows = Array.isArray(refreshed?.budgets) ? refreshed.budgets : [];
+      const found = rows.find(
+        (r) => normalizeNetworkEntry(r?.network ?? r?.network_id)?.id === id,
+      );
+      if (found) {
+        setBudgetsByNetwork((prev) => ({ ...prev, [id]: found }));
+      }
+      setBudgetNotices((prev) => ({
+        ...prev,
+        [id]: `Saved budget (${minEvents} … ${maxEvents}).`,
+      }));
+    } catch (err) {
+      if (!isCurrentClipGen(gen)) return;
+      setBudgetErrors((prev) => ({
+        ...prev,
+        [id]: err instanceof Error ? err.message : "Unable to save budget.",
+      }));
+    } finally {
+      if (isCurrentClipGen(gen)) {
+        setSavingBudgets((prev) => ({ ...prev, [id]: false }));
+      }
+    }
+  };
+
+  const selectedEventObj =
+    selectedEventPayload?.event && typeof selectedEventPayload.event === "object"
+      ? selectedEventPayload.event
+      : selectedEventPayload && typeof selectedEventPayload === "object"
+        ? selectedEventPayload
+        : null;
+  const heritageState =
+    selectedEventObj?.heritage?.state && typeof selectedEventObj.heritage.state === "object"
+      ? selectedEventObj.heritage.state
+      : selectedEventObj?.heritage && typeof selectedEventObj.heritage === "object"
+        ? selectedEventObj.heritage
+        : null;
 
   const payloadGroups = useMemo(() => {
     const groups = new Map();
-    for (const payload of scopedStore.payloads) {
+    for (const payload of payloads) {
       const id = payload.network.id;
       if (!groups.has(id)) {
-        groups.set(id, {
-          transit_inputs: [],
-          exile_outputs: [],
-          unclassified: [],
-        });
+        groups.set(id, { transit_inputs: [], exile_outputs: [], unclassified: [] });
       }
       groups.get(id)[payload.direction].push(payload);
     }
     return groups;
-  }, [scopedStore.payloads]);
-
-  const networkBudgetById = useMemo(() => {
-    const result = new Map();
-    for (const [id, row] of Object.entries(scopedStore.budgetsByNetwork)) {
-      if (!row) continue;
-      const net = normalizeDerivedNetwork(row.network ?? row.network_id) || { id };
-      result.set(id, { ...row, network: net });
-    }
-    return result;
-  }, [scopedStore.budgetsByNetwork]);
+  }, [payloads]);
 
   const bitcoinSlots = useMemo(() => {
     const buckets = { legacy: [], segwit: [], other: [] };
-    for (const network of scopedStore.derivedNetworks) {
+    for (const network of networks) {
       if (bitcoinNetwork(network)) buckets[bitcoinKind(network)].push(network);
     }
     const slots = [];
@@ -2098,323 +1732,7 @@ export function EventStoreView({ clip }) {
     }
     buckets.other.forEach((network) => slots.push({ kind: "other", network }));
     return slots;
-  }, [scopedStore.derivedNetworks]);
-
-  const observationRunning = scopedStore.derivedNetworks.some(
-    (network) =>
-      bitcoinNetwork(network) &&
-      scopedStore.observations[network.id]?.running === true,
-  );
-
-  const anyNetworkLoading =
-    scopedStore.loadingNetworks ||
-    Object.values(scopedStore.loadingObservations).some(Boolean) ||
-    Object.values(scopedStore.loadingBoards).some(Boolean) ||
-    Object.values(scopedStore.loadingWire).some(Boolean) ||
-    Object.values(scopedStore.loadingBudgets).some(Boolean) ||
-    Object.values(scopedStore.savingBudgets).some(Boolean);
-
-  const overviewBadge = (() => {
-    if (!activeClip) return <Pill tone="warn">Missing ActiveClip</Pill>;
-    if (historyState.loading || scopedStore.loadingEvent) return <Pill>Resolving event</Pill>;
-    if (availableClips.length === 0 && !historyState.error) return <Pill tone="neutral">No persisted clips</Pill>;
-    if (!heritageState) return <Pill tone="warn">No heritage state</Pill>;
-    if (scopedStore.loadingNetworks) return <Pill>Deriving networks</Pill>;
-    if (observationRunning) return <Pill tone="ok">Syncing</Pill>;
-    if (anyNetworkLoading || scopedStore.loadingPayloads) return <Pill>Loading storage</Pill>;
-    if (Object.values(scopedStore.budgetErrors).some(Boolean)) return <Pill tone="warn">Budget error</Pill>;
-    if (historyState.error || scopedStore.error) return <Pill tone="warn">Partial</Pill>;
-    return <Pill tone="ok">Ready</Pill>;
-  })();
-
-  const runningBitcoinNetworkIds = useMemo(
-    () =>
-      JSON.stringify(
-        scopedStore.derivedNetworks
-          .filter(bitcoinNetwork)
-          .filter((network) => scopedStore.observations[network.id]?.running === true)
-          .map((network) => network.id),
-      ),
-    [scopedStore.derivedNetworks, scopedStore.observations],
-  );
-
-  // Clip-scoped WirePackets polling when bit-miner is running.
-  useEffect(() => {
-    if (!activeClip || !heritageState) return;
-
-    const networkIds = JSON.parse(runningBitcoinNetworkIds);
-    if (!networkIds.length) return;
-
-    const targetClip = activeClip;
-    const targetKey = clipKey;
-    const generation = lifecycleGenRef.current;
-
-    let cancelled = false;
-    let timeoutId = null;
-
-    const pollWirePackets = async () => {
-      await Promise.allSettled(
-        networkIds.map(async (networkId) => {
-          try {
-            const metadata = await apiRequest(
-              `/wallets/${enc(targetClip.substrate)}/activations/${enc(targetClip.activation)}/networks/${enc(networkId)}/wirepackets`,
-            );
-            if (cancelled || !isClipCurrent(targetKey, generation)) return;
-            if (
-              metadata?.activation != null &&
-              String(metadata.activation) !== String(targetClip.activation)
-            ) {
-              return;
-            }
-            updateScopedStore(targetKey, generation, (prev) => ({
-              wirePackets: { ...prev.wirePackets, [networkId]: metadata },
-            }));
-          } catch {
-            // Poll failures stay local.
-          }
-        }),
-      );
-
-      if (!cancelled && isClipCurrent(targetKey, generation)) {
-        timeoutId = window.setTimeout(pollWirePackets, WIREPACKETS_POLL_MS);
-      }
-    };
-
-    timeoutId = window.setTimeout(pollWirePackets, 0);
-
-    return () => {
-      cancelled = true;
-      if (timeoutId !== null) window.clearTimeout(timeoutId);
-    };
-  }, [
-    activeClip,
-    clipKey,
-    heritageState,
-    runningBitcoinNetworkIds,
-    isClipCurrent,
-    updateScopedStore,
-  ]);
-
-  const appendStreamResult = useCallback(
-    (targetKey, generation, networkId, label, body) => {
-      updateScopedStore(targetKey, generation, (prev) => ({
-        streamResults: {
-          ...prev.streamResults,
-          [networkId]: [
-            ...(prev.streamResults[networkId] || []),
-            {
-              id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-              label,
-              time: new Date().toLocaleTimeString(),
-              body,
-            },
-          ].slice(-60),
-        },
-      }));
-    },
-    [updateScopedStore],
-  );
-
-  const observationScope = (network) => {
-    const id = normalizeNetworkId(network?.id);
-    const targetClip = activeClip;
-    const targetKey = clipKey;
-    const generation = lifecycleGenRef.current;
-
-    return {
-      id,
-      targetClip,
-      targetKey,
-      generation,
-      valid: Boolean(id) && Boolean(targetClip) && Boolean(heritageState),
-      route: targetClip
-        ? `/wallets/${enc(targetClip.substrate)}/activations/${enc(targetClip.activation)}/networks/${enc(id)}/observation`
-        : "",
-      activation: targetClip ? String(targetClip.activation) : "",
-      stale: () => !isClipCurrent(targetKey, generation),
-    };
-  };
-
-  const readObservationStatus = async (scope) => {
-    const status = await apiRequest(scope.route);
-    if (scope.stale()) return null;
-    if (!observationMatches(status, scope.id, scope.activation)) {
-      throw new Error("Observation status response did not match this network.");
-    }
-    updateScopedStore(scope.targetKey, scope.generation, (prev) => ({
-      observations: { ...prev.observations, [scope.id]: status },
-    }));
-    return status;
-  };
-
-  const refreshStream = async (network) => {
-    const scope = observationScope(network);
-    if (!scope.valid) return;
-    const { id, targetKey, generation } = scope;
-    updateScopedStore(targetKey, generation, (prev) => ({
-      busyObservation: { ...prev.busyObservation, [id]: true },
-      observationErrors: { ...prev.observationErrors, [id]: "" },
-    }));
-    try {
-      await readObservationStatus(scope);
-    } catch (err) {
-      if (!scope.stale()) {
-        updateScopedStore(targetKey, generation, (prev) => ({
-          observationErrors: {
-            ...prev.observationErrors,
-            [id]:
-              err instanceof Error
-                ? err.message
-                : "Unable to retrieve bit-miner process status.",
-          },
-        }));
-      }
-    } finally {
-      if (!scope.stale()) {
-        updateScopedStore(targetKey, generation, (prev) => ({
-          busyObservation: { ...prev.busyObservation, [id]: false },
-        }));
-      }
-    }
-  };
-
-  const streamAction = async (action, network) => {
-    const scope = observationScope(network);
-    if (!scope.valid) return;
-    const { id, targetKey, generation } = scope;
-    updateScopedStore(targetKey, generation, (prev) => ({
-      busyObservation: { ...prev.busyObservation, [id]: true },
-      observationErrors: { ...prev.observationErrors, [id]: "" },
-    }));
-    try {
-      const result = await apiRequest(scope.route, {
-        method: action === "start" ? "POST" : "DELETE",
-      });
-      if (scope.stale()) return;
-      appendStreamResult(
-        targetKey,
-        generation,
-        id,
-        `${action.toUpperCase()} observation response`,
-        result,
-      );
-
-      const status = await readObservationStatus(scope);
-      if (status === null) return;
-      appendStreamResult(
-        targetKey,
-        generation,
-        id,
-        action === "start" ? "Initial process status" : "Process status after stop",
-        status,
-      );
-    } catch (err) {
-      if (scope.stale()) return;
-      const failure = {
-        error:
-          err instanceof Error
-            ? err.message
-            : "Bitcoin bit-miner request failed.",
-      };
-      appendStreamResult(
-        targetKey,
-        generation,
-        id,
-        `${action.toUpperCase()} request error`,
-        failure,
-      );
-      updateScopedStore(targetKey, generation, (prev) => ({
-        observationErrors: { ...prev.observationErrors, [id]: failure.error },
-      }));
-    } finally {
-      if (!scope.stale()) {
-        updateScopedStore(targetKey, generation, (prev) => ({
-          busyObservation: { ...prev.busyObservation, [id]: false },
-        }));
-      }
-    }
-  };
-
-  const saveBudget = async (network, draft) => {
-    const id = normalizeNetworkId(network.id);
-    const targetClip = activeClip;
-    const targetKey = clipKey;
-    const generation = lifecycleGenRef.current;
-
-    if (!id || !targetClip || !heritageState) return;
-
-    const stale = () => !isClipCurrent(targetKey, generation);
-
-    updateScopedStore(targetKey, generation, (prev) => ({
-      budgetErrors: { ...prev.budgetErrors, [id]: "" },
-      budgetNotices: { ...prev.budgetNotices, [id]: "" },
-    }));
-
-    const minEvents = Number(draft.min_events);
-    const maxEvents = Number(draft.max_events);
-    if (
-      !Number.isInteger(minEvents) ||
-      minEvents < 0 ||
-      !Number.isInteger(maxEvents) ||
-      maxEvents < 0
-    ) {
-      updateScopedStore(targetKey, generation, (prev) => ({
-        budgetErrors: {
-          ...prev.budgetErrors,
-          [id]: "Min events and max events must be non-negative integers.",
-        },
-      }));
-      return;
-    }
-
-    updateScopedStore(targetKey, generation, (prev) => ({
-      savingBudgets: { ...prev.savingBudgets, [id]: true },
-    }));
-
-    try {
-      await apiRequest(
-        `/wallets/${enc(targetClip.substrate)}/activations/${enc(targetClip.activation)}/networks/${enc(id)}/budgets`,
-        {
-          method: "PUT",
-          body: JSON.stringify({
-            min_events: minEvents,
-            max_events: maxEvents,
-          }),
-        },
-      );
-      if (stale()) return;
-      await loadBudgetsForClip(
-        targetClip,
-        targetKey,
-        generation,
-        scopedStore.derivedNetworks,
-      );
-      if (stale()) return;
-      updateScopedStore(targetKey, generation, (prev) => ({
-        budgetNotices: {
-          ...prev.budgetNotices,
-          [id]: `Saved budget (${minEvents} … ${maxEvents}).`,
-        },
-      }));
-    } catch (err) {
-      if (stale()) return;
-      updateScopedStore(targetKey, generation, (prev) => ({
-        budgetErrors: {
-          ...prev.budgetErrors,
-          [id]:
-            err instanceof Error
-              ? err.message
-              : "Unable to save network budget.",
-        },
-      }));
-    } finally {
-      if (!stale()) {
-        updateScopedStore(targetKey, generation, (prev) => ({
-          savingBudgets: { ...prev.savingBudgets, [id]: false },
-        }));
-      }
-    }
-  };
+  }, [networks]);
 
   const activeLogViewer =
     logViewer &&
@@ -2424,57 +1742,7 @@ export function EventStoreView({ clip }) {
       ? logViewer
       : null;
 
-  const openBitMinerLogs = (network) => {
-    if (!activeClip || !network?.id) return;
-    setLogViewer({
-      clip: activeClip,
-      network: network.id,
-    });
-  };
-
-  const closeBitMinerLogs = useCallback(() => setLogViewer(null), []);
-
-  const eventsEmptyText = activeClip
-    ? scopedStore.loadingEvent || historyState.loading
-      ? "Resolving persisted event for ActiveClip…"
-      : "No persisted event records matched this ActiveClip."
-    : "An ActiveClip ({ substrate, activation }) must be supplied.";
-
   const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
-
-  // Overview board fields sourced directly from the matching persisted event (and its heritage state).
-  const overviewKind = pickEventField(focusedEvent, heritageState, ["kind"]);
-  const overviewRecord =
-    authoritativeRecord ||
-    money(pickEventField(focusedEvent, heritageState, ["record", "record_name"]));
-  const overviewActivation =
-    heritageState
-      ? activationFromHeritageState(heritageState) ??
-        pickEventField(focusedEvent, null, ["activation"])
-      : pickEventField(focusedEvent, null, ["activation"]);
-  const overviewDimension = pickEventField(focusedEvent, heritageState, [
-    "dimension",
-  ]);
-  const overviewStructuralValue = pickEventField(focusedEvent, heritageState, [
-    "structural_value",
-  ]);
-  const overviewDepthObjects = pickEventField(focusedEvent, heritageState, [
-    "depth_objects",
-  ]);
-  const overviewDelta = pickEventField(focusedEvent, heritageState, ["delta"]);
-  const overviewTau = pickEventField(focusedEvent, heritageState, ["tau"]);
-  const overviewGrossWork = pickEventField(focusedEvent, heritageState, [
-    "gross_work",
-  ]);
-  const overviewNetWork = pickEventField(focusedEvent, heritageState, [
-    "net_work",
-  ]);
-  const overviewCommitment = pickEventField(focusedEvent, heritageState, [
-    "commitment",
-  ]);
-  const overviewCoordinate = pickEventField(focusedEvent, heritageState, [
-    "coordinate",
-  ]);
 
   return (
     <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
@@ -2485,38 +1753,32 @@ export function EventStoreView({ clip }) {
         inert={activeLogViewer ? true : undefined}
         aria-hidden={activeLogViewer ? true : undefined}
       >
-        {/* Header */}
         <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div className="min-w-0">
             <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
               QTM Event Store
             </h1>
-
             <p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 sm:text-sm dark:text-zinc-400">
-              Persisted event history index, Available Clips derived from
-              persisted events, ActiveClip-scoped overview, derived networks,
-              budgets, payload boards, Bitcoin observation, and wirepackets.
+              Scoped to the selected ActiveClip and per-activation network derivations.
             </p>
           </div>
 
           <div className="flex min-w-0 flex-col gap-2 sm:w-96">
-            {/* Navigation */}
             <div className="grid grid-cols-2 gap-2">
               <a
                 href={
                   activeClip
-                    ? `/network?substrate=${encodeURIComponent(activeClip.substrate)}&activation=${encodeURIComponent(String(activeClip.activation))}`
+                    ? `/network?substrate=${enc(activeClip.substrate)}&activation=${enc(activeClip.activation)}`
                     : "/network"
                 }
                 className={BUTTON}
               >
                 Network
               </a>
-
               <a
                 href={
                   activeClip
-                    ? `/?substrate=${encodeURIComponent(activeClip.substrate)}`
+                    ? `/?substrate=${enc(activeClip.substrate)}`
                     : "/"
                 }
                 className={BUTTON}
@@ -2525,42 +1787,41 @@ export function EventStoreView({ clip }) {
               </a>
             </div>
 
-            {/* ActiveClip substrate & persisted Available Clips selector */}
             <div className="rounded-xl border border-zinc-200 bg-white px-3 py-2 dark:border-zinc-700 dark:bg-zinc-950">
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 <div className="min-w-0">
                   <span className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                     ActiveClip substrate
                   </span>
-
                   <span className="mt-0.5 block truncate font-mono text-xs">
-                    {activeClip?.substrate ?? "No ActiveClip"}
+                    {substrate || "—"}
                   </span>
                 </div>
 
                 <label className="block min-w-0">
                   <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                    Available clip
+                    Activation
                   </span>
-
                   <select
-                    aria-label="Select persisted activation clip"
-                    value={activeClip ? String(activeClip.activation) : ""}
-                    onChange={(event) => selectAvailableClip(event.target.value)}
-                    disabled={!activeClip || availableClips.length === 0}
+                    aria-label="Select persisted activation"
+                    value={activation !== null ? String(activation) : ""}
+                    onChange={(e) => {
+                      const nextAct = parseActivationNumber(e.target.value);
+                      if (nextAct !== null && typeof onSelectActivation === "function") {
+                        onSelectActivation(nextAct);
+                      }
+                    }}
+                    disabled={activations.length === 0 || typeof onSelectActivation !== "function"}
                     className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-emerald-600 dark:border-zinc-700 dark:bg-zinc-900"
                   >
-                    {availableClips.length === 0 ? (
+                    {activations.length === 0 ? (
                       <option value="">
-                        {historyState.loading
-                          ? "Loading clips…"
-                          : "No persisted clips"}
+                        {activation !== null ? `Activation ${activation}` : "No activation"}
                       </option>
                     ) : (
-                      availableClips.map((entry) => (
-                        <option key={entry.key} value={String(entry.activation)}>
-                          Activation {entry.activation}
-                          {entry.record ? ` · ${entry.record}` : ""}
+                      activations.map((act) => (
+                        <option key={act} value={String(act)}>
+                          Activation {act}
                         </option>
                       ))
                     )}
@@ -2571,126 +1832,62 @@ export function EventStoreView({ clip }) {
           </div>
         </header>
 
-        {/* Notifications */}
-        {historyState.error && <Notice>{historyState.error}</Notice>}
-        {scopedStore.error && <Notice>{scopedStore.error}</Notice>}
-        {scopedStore.notice && <Notice type="success">{scopedStore.notice}</Notice>}
+        {eventError && <Notice>{eventError}</Notice>}
 
-        {/* Available Clips strip (populated strictly from persisted events) */}
-        <section
-          aria-label="Available clips"
-          className="qtm-pop rounded-2xl border border-zinc-200 bg-white p-3.5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-600 dark:text-zinc-300">
-                Available clips
-              </h2>
-              <Pill>{availableClips.length}</Pill>
-              {activeClip && (
-                <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
-                  {clipKey}
-                </span>
-              )}
-            </div>
-
-            <button
-              type="button"
-              className={LOG_BUTTON}
-              disabled={!activeClip?.substrate || historyState.loading}
-              onClick={() => loadPersistedHistory(activeClip?.substrate)}
-            >
-              {historyState.loading ? "Refreshing…" : "Refresh events"}
-            </button>
-          </div>
-
-          {historyState.loading && availableClips.length === 0 ? (
-            <p className="mt-2.5 text-xs text-zinc-500">
-              Loading persisted events for {activeClip?.substrate}…
-            </p>
-          ) : availableClips.length === 0 ? (
-            <p className="mt-2.5 text-xs text-zinc-500">
-              No persisted events found for this substrate. No clips are
-              synthesized when persisted history is empty.
-            </p>
-          ) : (
-            <div className="mt-2.5 flex flex-wrap gap-2">
-              {availableClips.map((entry) => {
-                const selected =
-                  activeClip && entry.activation === activeClip.activation;
-                return (
-                  <button
-                    key={entry.key}
-                    type="button"
-                    aria-pressed={selected}
-                    onClick={() => selectAvailableClip(entry.activation)}
-                    className={`rounded-xl border px-3 py-2 text-left transition ${
-                      selected
-                        ? "border-emerald-600 bg-emerald-50/80 text-emerald-950 dark:border-emerald-500 dark:bg-emerald-950/50 dark:text-emerald-100"
-                        : "border-zinc-200 bg-zinc-50/70 text-zinc-800 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-950/60 dark:text-zinc-200 dark:hover:bg-zinc-800/70"
-                    }`}
-                  >
-                    <div className="flex items-center gap-2 text-xs font-semibold">
-                      <span>Activation {entry.activation}</span>
-                      <Pill tone={entry.heritageVerified ? "ok" : "neutral"}>
-                        {entry.heritageVerified ? "Heritage" : "Persisted"}
-                      </Pill>
-                    </div>
-                    <p className="mt-0.5 max-w-[16rem] truncate font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
-                      {entry.record || "Record unavailable"}
-                    </p>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </section>
-
-        {/* Overview Board (populated directly from the matching persisted event) */}
+        {/* Selected ActiveClip Overview */}
         <Card
-          key={clipKey || "no-clip"}
+          key={activeClip ? `${activeClip.substrate}:${activeClip.activation}` : "empty-clip"}
           defaultOpen
-          title="Overview"
-          subtitle={
-            activeClip
-              ? `${clipKey}${overviewRecord && overviewRecord !== "—" ? ` · ${overviewRecord}` : ""}`
-              : "No ActiveClip context"
-          }
-          badge={overviewBadge}
+          title="Selected ActiveClip overview"
+          subtitle={activeClip ? `${activeClip.substrate} · activation ${activeClip.activation}` : "No ActiveClip"}
+          badge={<Pill tone={loadingEvent ? "neutral" : selectedEventObj ? "ok" : "warn"}>{loadingEvent ? "Loading" : selectedEventObj ? "Selected clip" : "Pending"}</Pill>}
           className="w-full"
         >
-          {!focusedEvent ? (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+            <Stat label="Kind" value={money(pickField(selectedEventObj, heritageState, ["kind"]))} />
+            <Stat label="Record" value={money(pickField(selectedEventObj, heritageState, ["record", "record_name"]))} wide />
+            <Stat label="Activation" value={money(activeClip?.activation ?? pickField(selectedEventObj, heritageState, ["activation"]))} />
+            <Stat label="Dimension" value={money(pickField(selectedEventObj, heritageState, ["dimension"]))} />
+            <Stat label="Structural value" value={money(pickField(selectedEventObj, heritageState, ["structural_value"]))} />
+            <Stat label="Depth objects" value={money(pickField(selectedEventObj, heritageState, ["depth_objects"]))} />
+            <Stat label="Retained mass" value={money(pickField(selectedEventObj, heritageState, ["retained_mass"]))} />
+            <Stat label="Commitment" value={money(pickField(selectedEventObj, heritageState, ["commitment"]))} wide />
+          </div>
+        </Card>
+
+        {/* Activation / Network Derivation Matrix */}
+        <Card
+          defaultOpen
+          scroll
+          title="Activation network derivations"
+          subtitle={substrate ? `substrate=${substrate}` : "No substrate"}
+          badge={<Pill>{Object.keys(derivationsByKey).length}</Pill>}
+          className="w-full"
+        >
+          {Object.keys(derivationsByKey).length === 0 ? (
             <p className="text-xs text-zinc-500">
-              {scopedStore.loadingEvent || historyState.loading
-                ? "Loading persisted event summary for the selected clip…"
-                : "No persisted event summary available for this ActiveClip."}
+              No persisted activation and network derivation entries in current context.
             </p>
           ) : (
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
-              <Stat label="Kind" value={money(overviewKind)} />
-              <Stat label="Record" value={money(overviewRecord)} wide />
-              <Stat label="Activation" value={money(overviewActivation)} />
-              <Stat label="Dimension" value={money(overviewDimension)} />
-              <Stat
-                label="Structural value"
-                value={money(overviewStructuralValue)}
-              />
-              <Stat label="Depth objects" value={money(overviewDepthObjects)} />
-              <Stat label="Retained mass" value={retainedMass} />
-              <Stat label="Delta" value={money(overviewDelta)} />
-              <Stat label="Tau" value={money(overviewTau)} />
-              <Stat label="Gross work" value={money(overviewGrossWork)} />
-              <Stat label="Net work" value={money(overviewNetWork)} />
-              <Stat
-                label="Commitment"
-                value={money(overviewCommitment)}
-                wide
-              />
-              <Stat
-                label="Coordinate"
-                value={money(overviewCoordinate)}
-                wide
-              />
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {Object.values(derivationsByKey).map((entry) => (
+                <div key={entry.key} className={`${INNER} p-3`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono text-xs font-semibold">
+                      act {entry.activation} · {entry.network}
+                    </span>
+                    <Pill tone={entry.status === "ok" ? "ok" : entry.status === "error" || entry.status === "unverified_contract" ? "warn" : "neutral"}>
+                      {entry.status}
+                    </Pill>
+                  </div>
+                  <p className="mt-1 break-all font-mono text-[10px] text-zinc-500">{entry.key}</p>
+                  {entry.error && (
+                    <p className="mt-1.5 break-words text-[11px] text-amber-700 dark:text-amber-300">
+                      {entry.error}
+                    </p>
+                  )}
+                </div>
+              ))}
             </div>
           )}
         </Card>
@@ -2698,6 +1895,10 @@ export function EventStoreView({ clip }) {
         {/* Bitcoin network cards */}
         {bitcoinSlots.map((slot, index) => {
           const id = slot.network?.id;
+          const dKey =
+            activeClip && id
+              ? derivationKey(activeClip.substrate, activeClip.activation, id)
+              : "";
 
           return (
             <NetworkCard
@@ -2706,258 +1907,74 @@ export function EventStoreView({ clip }) {
               network={slot.network}
               defaultOpen={index === 0}
               index={index}
-              clip={heritageState ? activeClip : null}
-              budgetRow={id ? networkBudgetById.get(id) : undefined}
+              clip={activeClip}
+              derivationRecord={dKey ? derivationsByKey[dKey] : undefined}
+              budgetRow={id ? budgetsByNetwork[id] : undefined}
               group={(id && payloadGroups.get(id)) || emptyGroup}
-              board={id ? scopedStore.boards[id] : undefined}
-              wire={id ? scopedStore.wirePackets[id] : undefined}
-              observation={id ? scopedStore.observations[id] : undefined}
-              observationError={id ? scopedStore.observationErrors[id] : ""}
-              busy={id ? scopedStore.busyObservation[id] === true : false}
-              results={(id && scopedStore.streamResults[id]) || []}
-              loadingBoard={id ? scopedStore.loadingBoards[id] === true : false}
-              loadingBudget={id ? scopedStore.loadingBudgets[id] === true : false}
-              savingBudget={id ? scopedStore.savingBudgets[id] === true : false}
-              loadingWire={id ? scopedStore.loadingWire[id] === true : false}
-              loadingObservation={id ? scopedStore.loadingObservations[id] === true : false}
-              budgetError={id ? scopedStore.budgetErrors[id] : ""}
-              budgetNotice={id ? scopedStore.budgetNotices[id] : ""}
+              board={id ? boards[id] : undefined}
+              wire={id ? wirePackets[id] : undefined}
+              observation={id ? observations[id] : undefined}
+              observationError={id ? observationErrors[id] : ""}
+              busy={id ? busyObservation[id] === true : false}
+              results={(id && streamResults[id]) || []}
+              loadingBoard={id ? loadingBoards[id] === true : false}
+              loadingBudget={id ? loadingBudgets[id] === true : false}
+              savingBudget={id ? savingBudgets[id] === true : false}
+              loadingWire={id ? loadingWire[id] === true : false}
+              loadingObservation={id ? loadingObservations[id] === true : false}
+              budgetError={id ? budgetErrors[id] : ""}
+              budgetNotice={id ? budgetNotices[id] : ""}
               onSaveBudget={saveBudget}
               onStreamAction={streamAction}
               onRefreshStream={refreshStream}
-              onViewLogs={openBitMinerLogs}
+              onViewLogs={(net) =>
+                activeClip && net?.id
+                  ? setLogViewer({ clip: activeClip, network: net.id })
+                  : null
+              }
             />
           );
         })}
 
-        {/* Other chains */}
-        <SectionHeading title="Other chains" meta="derived from event heritage">
-          Derived non-Bitcoin networks for this ActiveClip alongside planned chain slots.
+        <SectionHeading title="Other chains">
+          Planned chain slots alongside available networks.
         </SectionHeading>
 
         <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {COIN_TYPES.filter((coin) => coin.key !== "bitcoin").map(
-            (coin, index) => {
-              const derivedCount = scopedStore.derivedNetworks.filter(
-                (network) => coinKey(network) === coin.key,
-              ).length;
-
-              return (
-                <Card
-                  key={coin.key}
-                  title={coin.name}
-                  subtitle={`coin type ${coin.type}`}
-                  badge={
-                    <Pill tone={derivedCount > 0 ? "ok" : "warn"}>
-                      {derivedCount > 0
-                        ? `${derivedCount} derived`
-                        : "Planned"}
-                    </Pill>
-                  }
-                  style={{ animationDelay: `${index * 60}ms` }}
-                >
-                  <Fields min="7rem">
-                    <Field label="Registry path">
-                      <span className="break-all font-mono text-xs">
-                        {coin.path}
-                      </span>
-                    </Field>
-
-                    <Field label="Derived networks">{derivedCount}</Field>
-                  </Fields>
-                </Card>
-              );
-            },
-          )}
+          {COIN_TYPES.filter((coin) => coin.key !== "bitcoin").map((coin, index) => {
+            const count = networks.filter((n) => coinKey(n) === coin.key).length;
+            return (
+              <Card
+                key={coin.key}
+                title={coin.name}
+                subtitle={`coin type ${coin.type}`}
+                badge={<Pill tone={count > 0 ? "ok" : "warn"}>{count > 0 ? `${count} active` : "Planned"}</Pill>}
+                style={{ animationDelay: `${index * 60}ms` }}
+              >
+                <Fields min="7rem">
+                  <Field label="Registry path">
+                    <span className="break-all font-mono text-xs">{coin.path}</span>
+                  </Field>
+                  <Field label="Available networks">{count}</Field>
+                </Fields>
+              </Card>
+            );
+          })}
         </div>
 
-        {/* Diagnostics */}
-        <SectionHeading title="Diagnostics" />
-
-        {/* Persisted event records */}
-        <Card
-          defaultOpen
-          scroll
-          title="Persisted clip event records"
-          subtitle="Resolved via ActiveClip → event.heritage.state"
-          badge={<Pill>{scopedStore.eventRows.length}</Pill>}
-          className="w-full"
-        >
-          {/* Desktop table */}
-          <div className="hidden overflow-x-auto rounded-xl border border-zinc-200 lg:block dark:border-zinc-800">
-            <table className="w-full min-w-[850px] border-collapse text-left text-sm">
-              <thead className="bg-zinc-100 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                <tr>
-                  {[
-                    "Activation",
-                    "Event type",
-                    "Record reference",
-                    "Dimension",
-                    "Structural value (Σ)",
-                    "Depth objects",
-                    "Retained mass",
-                  ].map((heading) => (
-                    <th key={heading} className="px-4 py-3 font-semibold">
-                      {heading}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-
-              <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                {scopedStore.eventRows.map((row, index) => {
-                  const state = heritageStateOf(row);
-                  const isFocused =
-                    Boolean(authoritativeRecord) &&
-                    recordOf(row) === authoritativeRecord;
-
-                  return (
-                    <tr
-                      key={`${row?.record ?? "row"}-${index}`}
-                      className={`align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/50 ${
-                        isFocused
-                          ? "bg-emerald-50/60 dark:bg-emerald-950/30"
-                          : ""
-                      }`}
-                    >
-                      <td className="whitespace-nowrap px-4 py-3 font-mono">
-                        {activationFromHeritage(row) ?? money(row?.activation)}
-                      </td>
-
-                      <td className="px-4 py-3">
-                        {money(row?.kind)}
-                      </td>
-
-                      <td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">
-                        {money(row?.record)}
-
-                        {isFocused && (
-                          <span className="ml-2 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
-                            authoritative
-                          </span>
-                        )}
-                      </td>
-
-                      <td className="break-all px-4 py-3 font-mono">
-                        {money(row?.dimension ?? state?.dimension)}
-                      </td>
-
-                      <td className="break-all px-4 py-3 font-mono">
-                        {money(
-                          row?.structural_value ?? state?.structural_value,
-                        )}
-                      </td>
-
-                      <td className="px-4 py-3">
-                        {money(row?.depth_objects)}
-                      </td>
-
-                      <td className="break-all px-4 py-3 font-mono">
-                        {money(row?.retained_mass ?? state?.retained_mass)}
-                      </td>
-                    </tr>
-                  );
-                })}
-
-                {scopedStore.eventRows.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={7}
-                      className="px-4 py-10 text-center text-sm text-zinc-500"
-                    >
-                      {eventsEmptyText}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Mobile cards */}
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:hidden">
-            {scopedStore.eventRows.map((row, index) => {
-              const state = heritageStateOf(row);
-              const isFocused =
-                Boolean(authoritativeRecord) &&
-                recordOf(row) === authoritativeRecord;
-
-              return (
-                <article
-                  key={`${row?.record ?? "row"}-card-${index}`}
-                  className={`${INNER} p-3 ${
-                    isFocused ? "ring-2 ring-emerald-400/60" : ""
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <h4 className="min-w-0 break-all text-sm font-semibold">
-                      {money(row?.kind)}
-                    </h4>
-
-                    <Pill>
-                      Act. {activationFromHeritage(row) ?? money(row?.activation)}
-                    </Pill>
-                  </div>
-
-                  <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">
-                    {money(row?.record)}
-
-                    {isFocused && (
-                      <span className="ml-2 text-[10px] font-semibold text-emerald-600">
-                        authoritative
-                      </span>
-                    )}
-                  </p>
-
-                  <div className="mt-3">
-                    <Fields min="7rem">
-                      <Field label="Dimension">
-                        {money(row?.dimension ?? state?.dimension)}
-                      </Field>
-
-                      <Field label="Structural value (Σ)">
-                        {money(
-                          row?.structural_value ?? state?.structural_value,
-                        )}
-                      </Field>
-
-                      <Field label="Depth objects">
-                        {money(row?.depth_objects)}
-                      </Field>
-
-                      <Field label="Retained mass">
-                        {money(row?.retained_mass ?? state?.retained_mass)}
-                      </Field>
-                    </Fields>
-                  </div>
-                </article>
-              );
-            })}
-
-            {scopedStore.eventRows.length === 0 && (
-              <p className="col-span-full rounded-xl border border-zinc-200 p-4 text-sm text-zinc-500 dark:border-zinc-800">
-                {eventsEmptyText}
-              </p>
-            )}
-          </div>
-        </Card>
-
-        {/* Footer */}
         <footer className="border-t border-zinc-200 pt-4 text-xs text-zinc-500 dark:border-zinc-800">
-          QTM Event Store · {API_BASE}
+          QTM Event Store · {API_BASE} {loadingPayloads ? "· Loading payloads…" : ""}
         </footer>
       </div>
 
-      {/* BitMiner log viewer */}
       {activeLogViewer && (
         <BitMinerLogPopup
           key={`${activeLogViewer.clip.substrate}|${activeLogViewer.clip.activation}|${activeLogViewer.network}`}
           clip={activeLogViewer.clip}
           network={activeLogViewer.network}
-          running={scopedStore.observations[activeLogViewer.network]?.running === true}
-          onClose={closeBitMinerLogs}
-          onRefreshStatus={() =>
-            refreshStream({ id: activeLogViewer.network })
-          }
+          running={observations[activeLogViewer.network]?.running === true}
+          onClose={() => setLogViewer(null)}
+          onRefreshStatus={() => refreshStream({ id: activeLogViewer.network })}
         />
       )}
     </main>
@@ -2968,22 +1985,12 @@ function EventStoreRouteBoundary() {
   const searchParams = useSearchParams();
 
   const clip = useMemo(() => {
-    // Preferred route format:
-    // /eventstore?substrate=mars-lab&activation=2
     const substrate = searchParams.get("substrate");
     const activation = searchParams.get("activation");
-
     if (substrate && activation !== null) {
-      return createActiveClip({
-        substrate,
-        activation,
-      });
+      return createActiveClip({ substrate, activation });
     }
-
-    // Backward compatibility with the JSON ActiveClip route:
-    // /eventstore?clip={"substrate":"mars-lab","activation":2}
     const rawClip = searchParams.get("clip");
-
     if (rawClip) {
       try {
         return createActiveClip(JSON.parse(rawClip));
@@ -2991,12 +1998,9 @@ function EventStoreRouteBoundary() {
         return null;
       }
     }
-
     return null;
   }, [searchParams]);
 
-  // ActiveClip is mandatory.
-  // Do not mount EventStoreView without it.
   if (!clip) {
     return (
       <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
@@ -3005,24 +2009,10 @@ function EventStoreRouteBoundary() {
             <p className="text-[10px] font-semibold uppercase tracking-wider text-amber-600 dark:text-amber-400">
               ActiveClip required
             </p>
-
-            <h1 className="mt-1 text-lg font-semibold">
-              Event Store
-            </h1>
-
+            <h1 className="mt-1 text-lg font-semibold">Event Store</h1>
             <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
-              The Event Store requires an ActiveClip containing a valid
-              substrate and activation. Open it from the main QTM page
-              after selecting the clip.
+              The Event Store requires an ActiveClip containing a valid substrate and activation.
             </p>
-
-            <div className="mt-3 rounded-lg border border-zinc-200 bg-zinc-50 p-3 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-950">
-              <p>ActiveClip</p>
-              <p className="mt-1 text-zinc-500">
-                {`{ substrate: string, activation: number }`}
-              </p>
-            </div>
-
             <a
               href="/"
               className="mt-4 inline-flex items-center rounded-lg border border-zinc-300 px-3 py-2 text-sm font-medium transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
@@ -3035,7 +2025,6 @@ function EventStoreRouteBoundary() {
     );
   }
 
-  // Only instantiate the Event Store with a validated ActiveClip.
   return <EventStoreView clip={clip} />;
 }
 
@@ -3045,9 +2034,7 @@ export default function EventStorePage() {
       fallback={
         <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
           <div className="mx-auto w-full max-w-7xl">
-            <p className="text-sm text-zinc-500">
-              Resolving ActiveClip…
-            </p>
+            <p className="text-sm text-zinc-500">Resolving ActiveClip…</p>
           </div>
         </main>
       }
