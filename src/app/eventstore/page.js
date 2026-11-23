@@ -188,19 +188,21 @@ resolveClipEvent: ({ clip }) => [
 ],
 };
 async function callRuntime(operation, args = {}) {
-const invoke = nativeInvoke();
-if (invoke) {
-try {
-return await invoke(NATIVE_COMMANDS[operation], args);
-} catch (cause) {
-throw new Error(
-typeof cause === "string" && cause.trim()
-? cause.trim()
-: cause instanceof Error && cause.message
-? cause.message
-: "The QP runtime reported an error.",
-);
-}
+  const invoke = nativeInvoke();
+
+  if (invoke) {
+    try {
+      return await invoke(NATIVE_COMMANDS[operation], args);
+    } catch (cause) {
+      throw new Error(
+        typeof cause === "string" && cause.trim()
+          ? cause.trim()
+          : cause instanceof Error && cause.message
+            ? cause.message
+            : "The QP runtime reported an error.",
+      );
+    }
+  }
 }
 const route = API_ROUTES[operation];
 if (typeof route !== "function") {
