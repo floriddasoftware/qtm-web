@@ -2284,14 +2284,19 @@ function EventStoreContent() {
           </div>
 
           <div className="flex min-w-0 flex-col gap-2 sm:w-96">
-            <div className="grid grid-cols-2 gap-2">
-              <a href="/network" className={BUTTON}>
-                Network
-              </a>
-              <a href="/" className={BUTTON}>
-                QTM
-              </a>
-            </div>
+  <div className="grid grid-cols-2 gap-2">
+    <a href="/network" className={BUTTON}>
+      Network
+    </a>
+
+    <a
+      href={`/?substrate=${encodeURIComponent(substrate)}`}
+      className={BUTTON}
+    >
+      QTM
+    </a>
+  </div>
+</div>
 
             <label className="block min-w-0">
               <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
