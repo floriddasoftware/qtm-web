@@ -203,13 +203,18 @@ async function callRuntime(operation, args = {}) {
       );
     }
   }
-}
-const route = API_ROUTES[operation];
-if (typeof route !== "function") {
-throw new Error(⁠Unsupported QP runtime operation: ${String(operation)}.⁠);
-}
-const [method, path] = route(args || {});
-return apiRequest(path, { method });
+
+  const route = API_ROUTES[operation];
+
+  if (typeof route !== "function") {
+    throw new Error(
+      `Unsupported QP runtime operation: ${String(operation)}.`,
+    );
+  }
+
+  const [method, path] = route(args || {});
+
+  return apiRequest(path, { method });
 }
 /* ───────────── Event Heritage & Direct Clip Event Resolution ───────────── */
 function heritageStateOf(event) {
