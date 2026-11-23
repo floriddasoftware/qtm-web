@@ -198,11 +198,14 @@ async function callRuntime(operation, args = {}, options = {}) {
 /* ───────────── Event Heritage & Persisted Event Resolution ───────────── */
 
 function heritageStateOf(event) {
-  if (!event || typeof event !== "object") return null;
-  const state = event?.heritage?.state;
-  return state && typeof state === "object" && !Array.isArray(state)
-    ? state
-    : null;
+  if (!event || typeof event !== "object" || Array.isArray(event)) return null;
+  if (event?.heritage?.state && typeof event.heritage.state === "object" && !Array.isArray(event.heritage.state)) {
+    return event.heritage.state;
+  }
+  if (event?.heritage && typeof event.heritage === "object" && !Array.isArray(event.heritage)) {
+    return event.heritage;
+  }
+  return null;
 }
 
 function activationFromHeritageState(heritageState) {
@@ -223,68 +226,8 @@ function activationFromHeritage(event) {
   return parseActivationNumber(event?.activation);
 }
 
-function extractSubstrateActivations(payload) {
-  const found = new Set();
-  const addValue = (candidate) => {
-    const parsed = parseActivationNumber(
-      candidate && typeof candidate === "object"
-        ? (candidate.activation ??
-            candidate.activation_number ??
-            candidate.activations ??
-            candidate.id)
-        : candidate,
-    );
-    if (parsed !== null && parsed >= 1) {
-      found.add(parsed);
-    }
-  };
-
-  if (Array.isArray(payload)) {
-    for (const item of payload) addValue(item);
-    return [...found].sort((a, b) => a - b);
-  }
-
-  if (payload && typeof payload === "object") {
-    for (const key of ["activations", "events", "items", "records"]) {
-      if (Array.isArray(payload[key])) {
-        for (const item of payload[key]) {
-          addValue(item);
-          const fromHeritage = activationFromHeritage(item);
-          if (fromHeritage !== null && fromHeritage >= 1) {
-            found.add(fromHeritage);
-          }
-        }
-      }
-    }
-  }
-
-  return [...found].sort((a, b) => a - b);
-}
-
-async function fetchSubstratePersistedActivations(substrate, signal) {
-  const trimmed = typeof substrate === "string" ? substrate.trim() : "";
-  if (!trimmed) return [];
-
-  try {
-    const body = await apiRequest(`/wallets/${enc(trimmed)}/activations`, {
-      signal,
-    });
-    const list = extractSubstrateActivations(body);
-    if (list.length > 0) return list;
-  } catch (err) {
-    if (err?.name === "AbortError" || signal?.aborted) throw err;
-    if (!isMissingRouteError(err)) throw err;
-  }
-
-  const eventsBody = await callRuntime(
-    "listEvents",
-    { name: trimmed },
-    { signal },
-  );
-  return extractSubstrateActivations(eventsBody);
-}
-
 function recordOf(row) {
+  if (!row || typeof row !== "object") return "";
   for (const key of ["record", "record_name", "filename", "id"]) {
     const value = row?.[key];
     if (typeof value === "string" && value.trim()) return value.trim();
@@ -305,34 +248,23 @@ function compareEventRows(a, b) {
   return ra < rb ? -1 : ra > rb ? 1 : 0;
 }
 
-function normalizePersistedEventsForClip(response, clip) {
-  const source = Array.isArray(response) ? response : response?.events;
-  if (!Array.isArray(source)) {
-    throw new Error("The runtime response did not include a persisted events array.");
+function extractRawEventsArray(response) {
+  if (Array.isArray(response)) return response;
+  if (!response || typeof response !== "object") return null;
+  for (const key of ["events", "items", "records"]) {
+    if (Array.isArray(response[key])) return response[key];
   }
+  return null;
+}
 
-  const matching = [];
-  for (const row of source) {
-    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
-    const rowActivation = activationFromHeritage(row);
-    if (rowActivation !== clip.activation) continue;
-
-    const heritageState = heritageStateOf(row);
-    if (
-      heritageState &&
-      typeof heritageState.substrate === "string" &&
-      heritageState.substrate.trim() &&
-      heritageState.substrate.trim() !== clip.substrate
-    ) {
-      continue;
-    }
-
-    const record = recordOf(row);
-    matching.push({
-      ...row,
-      ...(record ? { record } : {}),
-      activation: rowActivation,
-    });
+/**
+ * Normalizes persisted events returned by GET /wallets/{substrate}/events
+ * without inventing records or assuming array index == activation.
+ */
+function normalizePersistedEventIndex(response, substrate) {
+  const source = extractRawEventsArray(response);
+  if (!Array.isArray(source)) {
+    throw new Error("The persisted events response did not include an events array.");
   }
 
   const directory =
@@ -340,6 +272,114 @@ function normalizePersistedEventsForClip(response, clip) {
       ? response.directory
       : "";
 
+  const events = [];
+  for (const row of source) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+
+    const heritageState = heritageStateOf(row);
+    const heritageActivation = activationFromHeritageState(heritageState);
+    const rowActivation = parseActivationNumber(row?.activation);
+    const resolvedActivation =
+      heritageActivation !== null ? heritageActivation : rowActivation;
+
+    if (resolvedActivation === null) continue;
+
+    if (
+      heritageActivation !== null &&
+      rowActivation !== null &&
+      heritageActivation !== rowActivation
+    ) {
+      continue;
+    }
+
+    if (
+      heritageState &&
+      typeof heritageState.substrate === "string" &&
+      heritageState.substrate.trim() &&
+      substrate &&
+      heritageState.substrate.trim() !== substrate
+    ) {
+      continue;
+    }
+
+    const record = recordOf(row);
+    events.push({
+      ...row,
+      ...(record ? { record } : {}),
+      activation: resolvedActivation,
+      __heritageState: heritageState,
+      __heritageVerified: heritageActivation !== null,
+      __raw: row,
+    });
+  }
+
+  return {
+    events: events.sort(compareEventRows),
+    directory,
+  };
+}
+
+/**
+ * Builds Available Clips strictly from persisted events for the substrate:
+ * deduplicated by activation, deterministically sorted, never fabricated.
+ */
+function buildAvailableClipsFromEvents(events, substrate) {
+  if (!substrate || !Array.isArray(events) || events.length === 0) return [];
+
+  const byActivation = new Map();
+
+  for (const ev of events) {
+    const activation = activationFromHeritage(ev);
+    if (activation === null) continue;
+
+    const clip = createActiveClip({ substrate, activation });
+    if (!clip) continue;
+
+    const existing = byActivation.get(activation);
+    const candidateRecord = recordOf(ev);
+    const candidateVerified = Boolean(ev?.__heritageVerified);
+
+    if (!existing) {
+      byActivation.set(activation, {
+        clip,
+        key: activeClipKey(clip),
+        activation,
+        record: candidateRecord,
+        heritageVerified: candidateVerified,
+        eventCount: 1,
+        event: ev,
+      });
+    } else {
+      const nextEventCount = existing.eventCount + 1;
+      const preferCandidate =
+        (!existing.heritageVerified && candidateVerified) ||
+        (existing.heritageVerified === candidateVerified &&
+          Boolean(candidateRecord) &&
+          !existing.record);
+
+      byActivation.set(activation, {
+        clip: existing.clip,
+        key: existing.key,
+        activation,
+        record: preferCandidate && candidateRecord ? candidateRecord : existing.record,
+        heritageVerified: existing.heritageVerified || candidateVerified,
+        eventCount: nextEventCount,
+        event: preferCandidate ? ev : existing.event,
+      });
+    }
+  }
+
+  return [...byActivation.values()].sort((a, b) => a.activation - b.activation);
+}
+
+function normalizePersistedEventsForClip(response, clip) {
+  const { events, directory } = normalizePersistedEventIndex(
+    response,
+    clip.substrate,
+  );
+  const matching = events.filter(
+    (row) => activationFromHeritage(row) === clip.activation,
+  );
   return {
     rows: matching.sort(compareEventRows),
     directory,
@@ -366,7 +406,32 @@ function isMissingRouteError(err) {
   return /HTTP (404|405)\b/i.test(err.message);
 }
 
-async function resolveEventForClip(clip, signal) {
+async function fetchPersistedEventsIndex(substrate, signal) {
+  const trimmed = typeof substrate === "string" ? substrate.trim() : "";
+  if (!trimmed) {
+    return { events: [], directory: "" };
+  }
+  const body = await callRuntime(
+    "listEvents",
+    { name: trimmed },
+    { signal },
+  );
+  return normalizePersistedEventIndex(body, trimmed);
+}
+
+async function resolveEventForClip(clip, signal, preloadedHistory = null) {
+  if (preloadedHistory && Array.isArray(preloadedHistory.events)) {
+    const matching = preloadedHistory.events.filter(
+      (row) => activationFromHeritage(row) === clip.activation,
+    );
+    if (matching.length > 0) {
+      return {
+        rows: matching.sort(compareEventRows),
+        directory: preloadedHistory.directory || "",
+      };
+    }
+  }
+
   try {
     const response = await callRuntime(
       "resolveClipEvent",
@@ -375,7 +440,7 @@ async function resolveEventForClip(clip, signal) {
     );
     if (signal?.aborted) return null;
 
-    if (Array.isArray(response) || Array.isArray(response?.events)) {
+    if (Array.isArray(response) || extractRawEventsArray(response)) {
       return normalizePersistedEventsForClip(response, clip);
     }
 
@@ -582,7 +647,29 @@ function ownPayloadKind(board, network) {
 
 function money(value) {
   if (value === undefined || value === null || value === "") return "—";
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return "—";
+    }
+  }
   return String(value);
+}
+
+function pickEventField(event, heritageState, keys) {
+  const sources = [event, heritageState].filter(Boolean);
+  for (const src of sources) {
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(src, key)) {
+        const val = src[key];
+        if (val !== undefined && val !== null && val !== "") {
+          return val;
+        }
+      }
+    }
+  }
+  return null;
 }
 
 function flag(value) {
@@ -1350,56 +1437,27 @@ const EMPTY_CLIP_STORE = Object.freeze({
 });
 
 export function EventStoreView({ clip }) {
-  const activeClip = useMemo(() => createActiveClip(clip), [clip]);
-  const clipKey = useMemo(() => activeClipKey(activeClip), [activeClip]);
+  const initialClip = useMemo(() => createActiveClip(clip), [clip]);
 
-  const [selectedActivation, setSelectedActivation] = useState(
-    activeClip?.activation ?? 1,
-  );
-  const [substrateActivations, setSubstrateActivations] = useState([]);
+  const [activeClip, setActiveClip] = useState(initialClip);
+  const [historyState, setHistoryState] = useState({
+    substrate: "",
+    loading: false,
+    events: [],
+    directory: "",
+    error: "",
+  });
   const [store, setStore] = useState(EMPTY_CLIP_STORE);
   const [logViewer, setLogViewer] = useState(null);
-
-  useEffect(() => {
-    setSelectedActivation(activeClip?.activation ?? 1);
-  }, [activeClip?.substrate, activeClip?.activation]);
-
-  // Substrate-level persisted activations so cross-activation navigation is not restricted to one clip's rows.
-  useEffect(() => {
-    const substrate = activeClip?.substrate;
-    if (!substrate) {
-      setSubstrateActivations([]);
-      return;
-    }
-
-    const controller = new AbortController();
-    let cancelled = false;
-
-    void (async () => {
-      try {
-        const list = await fetchSubstratePersistedActivations(
-          substrate,
-          controller.signal,
-        );
-        if (!cancelled) {
-          setSubstrateActivations(list);
-        }
-      } catch (err) {
-        if (err?.name === "AbortError" || cancelled) return;
-        setSubstrateActivations([]);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [activeClip?.substrate]);
 
   // Monotonic lifecycle generation & cancellation controller scoped exclusively to activeClip.
   const lifecycleGenRef = useRef(0);
   const activeClipKeyRef = useRef("");
   const abortControllerRef = useRef(null);
+  const historyGenRef = useRef(0);
+  const historyAbortRef = useRef(null);
+
+  const clipKey = useMemo(() => activeClipKey(activeClip), [activeClip]);
 
   const isClipCurrent = useCallback(
     (targetKey, generation) =>
@@ -1420,6 +1478,147 @@ export function EventStoreView({ clip }) {
       });
     },
     [isClipCurrent],
+  );
+
+  // Fetch authoritative persisted event history via GET /wallets/{substrate}/events.
+  const loadPersistedHistory = useCallback(async (substrate, options = {}) => {
+    const trimmed = typeof substrate === "string" ? substrate.trim() : "";
+    historyAbortRef.current?.abort();
+
+    if (!trimmed) {
+      historyGenRef.current += 1;
+      setHistoryState({
+        substrate: "",
+        loading: false,
+        events: [],
+        directory: "",
+        error: "",
+      });
+      return { events: [], directory: "" };
+    }
+
+    const gen = ++historyGenRef.current;
+    const controller = new AbortController();
+    historyAbortRef.current = controller;
+
+    setHistoryState((prev) => ({
+      substrate: trimmed,
+      loading: true,
+      events: prev.substrate === trimmed ? prev.events : [],
+      directory: prev.substrate === trimmed ? prev.directory : "",
+      error: "",
+    }));
+
+    try {
+      const normalized = await fetchPersistedEventsIndex(
+        trimmed,
+        options.signal ?? controller.signal,
+      );
+      if (gen !== historyGenRef.current) return null;
+      setHistoryState({
+        substrate: trimmed,
+        loading: false,
+        events: normalized.events,
+        directory: normalized.directory,
+        error: "",
+      });
+      return normalized;
+    } catch (err) {
+      if (err?.name === "AbortError" || gen !== historyGenRef.current) return null;
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : "Unable to load persisted event history.";
+      setHistoryState((prev) => ({
+        substrate: trimmed,
+        loading: false,
+        events: prev.substrate === trimmed ? prev.events : [],
+        directory: prev.substrate === trimmed ? prev.directory : "",
+        error: message,
+      }));
+      return null;
+    }
+  }, []);
+
+  // Reconcile incoming route clip when substrate or activation changes from parent/URL.
+  useEffect(() => {
+    const nextClip = createActiveClip(clip);
+    if (!nextClip) {
+      setActiveClip(null);
+      return;
+    }
+
+    setActiveClip((prev) => {
+      if (!prev || prev.substrate !== nextClip.substrate) {
+        return nextClip;
+      }
+      if (prev.activation !== nextClip.activation) {
+        return nextClip;
+      }
+      return prev;
+    });
+  }, [clip]);
+
+  // Load persisted event history whenever substrate changes.
+  useEffect(() => {
+    const substrate = activeClip?.substrate ?? "";
+    void loadPersistedHistory(substrate);
+    return () => {
+      historyAbortRef.current?.abort();
+    };
+  }, [activeClip?.substrate, loadPersistedHistory]);
+
+  const availableClips = useMemo(() => {
+    if (!activeClip?.substrate || historyState.substrate !== activeClip.substrate) {
+      return [];
+    }
+    return buildAvailableClipsFromEvents(historyState.events, activeClip.substrate);
+  }, [activeClip?.substrate, historyState.substrate, historyState.events]);
+
+  // Reconcile ActiveClip with persisted Available Clips once history finishes loading.
+  useEffect(() => {
+    if (!activeClip) return;
+    if (historyState.substrate !== activeClip.substrate || historyState.loading) {
+      return;
+    }
+
+    if (availableClips.length === 0) {
+      return;
+    }
+
+    const matched = availableClips.find(
+      (item) => item.activation === activeClip.activation,
+    );
+    if (!matched) {
+      // Reconcile to the first available persisted clip rather than keeping a non-existent activation.
+      setActiveClip(availableClips[0].clip);
+    }
+  }, [
+    activeClip,
+    availableClips,
+    historyState.substrate,
+    historyState.loading,
+  ]);
+
+  const selectAvailableClip = useCallback(
+    (nextActivation) => {
+      if (!activeClip?.substrate) return;
+      const parsed = parseActivationNumber(nextActivation);
+      if (parsed === null) return;
+      const matchingEntry = availableClips.find(
+        (item) => item.activation === parsed,
+      );
+      if (!matchingEntry) return;
+      if (sameActiveClip(activeClip, matchingEntry.clip)) return;
+
+      // Immediately invalidate previous clip view before committing new ActiveClip.
+      abortControllerRef.current?.abort();
+      lifecycleGenRef.current += 1;
+      setStore(EMPTY_CLIP_STORE);
+      setLogViewer(null);
+      setActiveClip(matchingEntry.clip);
+    },
+    [activeClip, availableClips],
   );
 
   // Stage 5b helper: load budgets for the derived networks of the active clip's heritage state.
@@ -1593,10 +1792,19 @@ export function EventStoreView({ clip }) {
     });
 
     void (async () => {
+      const preloaded =
+        historyState.substrate === activeClip.substrate && !historyState.loading
+          ? historyState
+          : null;
+
       // Step 2: Resolve the persisted event corresponding to this ActiveClip.
       let normalizedHistory;
       try {
-        normalizedHistory = await resolveEventForClip(activeClip, signal);
+        normalizedHistory = await resolveEventForClip(
+          activeClip,
+          signal,
+          preloaded,
+        );
         if (!normalizedHistory || !isClipCurrent(clipKey, generation)) return;
       } catch (err) {
         if (err?.name === "AbortError" || !isClipCurrent(clipKey, generation)) {
@@ -1623,7 +1831,10 @@ export function EventStoreView({ clip }) {
           loadingEvent: false,
           eventRows: [],
           directory: normalizedHistory.directory,
-          notice: `No persisted event found for ActiveClip (${activeClip.substrate} · activation ${activeClip.activation}).`,
+          notice:
+            preloaded && preloaded.events.length === 0
+              ? `No persisted events exist for substrate "${activeClip.substrate}".`
+              : `No persisted event found for ActiveClip (${activeClip.substrate} · activation ${activeClip.activation}).`,
         });
         return;
       }
@@ -1823,6 +2034,10 @@ export function EventStoreView({ clip }) {
   }, [
     activeClip,
     clipKey,
+    historyState.substrate,
+    historyState.loading,
+    historyState.events,
+    historyState.directory,
     isClipCurrent,
     updateScopedStore,
     loadPersistentPayloadsForClip,
@@ -1832,38 +2047,18 @@ export function EventStoreView({ clip }) {
   const scopedStore = store.clipKey === clipKey ? store : EMPTY_CLIP_STORE;
   const authoritativeEvent = scopedStore.authoritativeEvent;
   const heritageState = scopedStore.heritageState;
-  const focusedEvent =
-    scopedStore.derivedEventSnapshot || authoritativeEvent || null;
+  const focusedEvent = authoritativeEvent || scopedStore.derivedEventSnapshot || null;
   const authoritativeRecord = recordOf(authoritativeEvent);
 
-  const activationOptions = useMemo(() => {
-    const values = new Set(substrateActivations);
-
-    if (activeClip && Number.isSafeInteger(activeClip.activation) && activeClip.activation >= 1) {
-      values.add(activeClip.activation);
-    }
-
-    for (const row of scopedStore.eventRows ?? []) {
-      const value = activationFromHeritage(row);
-      if (Number.isSafeInteger(value) && value >= 1) {
-        values.add(value);
-      }
-    }
-
-    return [...values].sort((a, b) => a - b);
-  }, [activeClip, scopedStore.eventRows, substrateActivations]);
-
   const retainedMass = useMemo(() => {
-    const fromHeritage = heritageState?.retained_mass;
-    if (fromHeritage !== undefined && fromHeritage !== null && /^\d+$/.test(String(fromHeritage))) {
-      return BigInt(fromHeritage);
+    const rawMass = pickEventField(authoritativeEvent, heritageState, [
+      "retained_mass",
+    ]);
+    if (rawMass !== null && /^-?\d+$/.test(String(rawMass))) {
+      return BigInt(rawMass).toString();
     }
-    return scopedStore.eventRows.reduce((sum, row) => {
-      const value =
-        row?.retained_mass ?? row?.heritage?.state?.retained_mass ?? "0";
-      return /^\d+$/.test(String(value)) ? sum + BigInt(value) : sum;
-    }, 0n);
-  }, [heritageState, scopedStore.eventRows]);
+    return rawMass !== null ? money(rawMass) : "—";
+  }, [authoritativeEvent, heritageState]);
 
   const payloadGroups = useMemo(() => {
     const groups = new Map();
@@ -1921,13 +2116,14 @@ export function EventStoreView({ clip }) {
 
   const overviewBadge = (() => {
     if (!activeClip) return <Pill tone="warn">Missing ActiveClip</Pill>;
-    if (scopedStore.loadingEvent) return <Pill>Resolving event</Pill>;
+    if (historyState.loading || scopedStore.loadingEvent) return <Pill>Resolving event</Pill>;
+    if (availableClips.length === 0 && !historyState.error) return <Pill tone="neutral">No persisted clips</Pill>;
     if (!heritageState) return <Pill tone="warn">No heritage state</Pill>;
     if (scopedStore.loadingNetworks) return <Pill>Deriving networks</Pill>;
     if (observationRunning) return <Pill tone="ok">Syncing</Pill>;
     if (anyNetworkLoading || scopedStore.loadingPayloads) return <Pill>Loading storage</Pill>;
     if (Object.values(scopedStore.budgetErrors).some(Boolean)) return <Pill tone="warn">Budget error</Pill>;
-    if (scopedStore.error) return <Pill tone="warn">Partial</Pill>;
+    if (historyState.error || scopedStore.error) return <Pill tone="warn">Partial</Pill>;
     return <Pill tone="ok">Ready</Pill>;
   })();
 
@@ -2239,12 +2435,46 @@ export function EventStoreView({ clip }) {
   const closeBitMinerLogs = useCallback(() => setLogViewer(null), []);
 
   const eventsEmptyText = activeClip
-    ? scopedStore.loadingEvent
+    ? scopedStore.loadingEvent || historyState.loading
       ? "Resolving persisted event for ActiveClip…"
       : "No persisted event records matched this ActiveClip."
     : "An ActiveClip ({ substrate, activation }) must be supplied.";
 
   const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
+
+  // Overview board fields sourced directly from the matching persisted event (and its heritage state).
+  const overviewKind = pickEventField(focusedEvent, heritageState, ["kind"]);
+  const overviewRecord =
+    authoritativeRecord ||
+    money(pickEventField(focusedEvent, heritageState, ["record", "record_name"]));
+  const overviewActivation =
+    heritageState
+      ? activationFromHeritageState(heritageState) ??
+        pickEventField(focusedEvent, null, ["activation"])
+      : pickEventField(focusedEvent, null, ["activation"]);
+  const overviewDimension = pickEventField(focusedEvent, heritageState, [
+    "dimension",
+  ]);
+  const overviewStructuralValue = pickEventField(focusedEvent, heritageState, [
+    "structural_value",
+  ]);
+  const overviewDepthObjects = pickEventField(focusedEvent, heritageState, [
+    "depth_objects",
+  ]);
+  const overviewDelta = pickEventField(focusedEvent, heritageState, ["delta"]);
+  const overviewTau = pickEventField(focusedEvent, heritageState, ["tau"]);
+  const overviewGrossWork = pickEventField(focusedEvent, heritageState, [
+    "gross_work",
+  ]);
+  const overviewNetWork = pickEventField(focusedEvent, heritageState, [
+    "net_work",
+  ]);
+  const overviewCommitment = pickEventField(focusedEvent, heritageState, [
+    "commitment",
+  ]);
+  const overviewCoordinate = pickEventField(focusedEvent, heritageState, [
+    "coordinate",
+  ]);
 
   return (
     <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
@@ -2263,9 +2493,9 @@ export function EventStoreView({ clip }) {
             </h1>
 
             <p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 sm:text-sm dark:text-zinc-400">
-              Single-ActiveClip persistent event storage, authoritative event
-              heritage state, derived networks, network budgets, payload boards,
-              Bitcoin observation, and API-owned wirepackets.
+              Persisted event history index, Available Clips derived from
+              persisted events, ActiveClip-scoped overview, derived networks,
+              budgets, payload boards, Bitcoin observation, and wirepackets.
             </p>
           </div>
 
@@ -2295,7 +2525,7 @@ export function EventStoreView({ clip }) {
               </a>
             </div>
 
-            {/* ActiveClip substrate & activation selector */}
+            {/* ActiveClip substrate & persisted Available Clips selector */}
             <div className="rounded-xl border border-zinc-200 bg-white px-3 py-2 dark:border-zinc-700 dark:bg-zinc-950">
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 <div className="min-w-0">
@@ -2310,37 +2540,30 @@ export function EventStoreView({ clip }) {
 
                 <label className="block min-w-0">
                   <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                    Activation
+                    Available clip
                   </span>
 
                   <select
-                    value={selectedActivation}
-                    onChange={(event) => {
-                      const next = Number(event.target.value);
-
-                      if (!activeClip || !Number.isSafeInteger(next) || next < 1) {
-                        return;
-                      }
-
-                      const nextClip = createActiveClip({
-                        substrate: activeClip.substrate,
-                        activation: next,
-                      });
-                      if (!nextClip) return;
-
-                      setSelectedActivation(nextClip.activation);
-                      window.location.href =
-                        `/eventstore?substrate=${encodeURIComponent(nextClip.substrate)}` +
-                        `&activation=${encodeURIComponent(String(nextClip.activation))}`;
-                    }}
-                    disabled={!activeClip || activationOptions.length === 0}
+                    aria-label="Select persisted activation clip"
+                    value={activeClip ? String(activeClip.activation) : ""}
+                    onChange={(event) => selectAvailableClip(event.target.value)}
+                    disabled={!activeClip || availableClips.length === 0}
                     className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-emerald-600 dark:border-zinc-700 dark:bg-zinc-900"
                   >
-                    {activationOptions.map((value) => (
-                      <option key={value} value={value}>
-                        Activation {value}
+                    {availableClips.length === 0 ? (
+                      <option value="">
+                        {historyState.loading
+                          ? "Loading clips…"
+                          : "No persisted clips"}
                       </option>
-                    ))}
+                    ) : (
+                      availableClips.map((entry) => (
+                        <option key={entry.key} value={String(entry.activation)}>
+                          Activation {entry.activation}
+                          {entry.record ? ` · ${entry.record}` : ""}
+                        </option>
+                      ))
+                    )}
                   </select>
                 </label>
               </div>
@@ -2349,48 +2572,127 @@ export function EventStoreView({ clip }) {
         </header>
 
         {/* Notifications */}
+        {historyState.error && <Notice>{historyState.error}</Notice>}
         {scopedStore.error && <Notice>{scopedStore.error}</Notice>}
         {scopedStore.notice && <Notice type="success">{scopedStore.notice}</Notice>}
 
-        {/* Overview */}
+        {/* Available Clips strip (populated strictly from persisted events) */}
+        <section
+          aria-label="Available clips"
+          className="qtm-pop rounded-2xl border border-zinc-200 bg-white p-3.5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-600 dark:text-zinc-300">
+                Available clips
+              </h2>
+              <Pill>{availableClips.length}</Pill>
+              {activeClip && (
+                <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+                  {clipKey}
+                </span>
+              )}
+            </div>
+
+            <button
+              type="button"
+              className={LOG_BUTTON}
+              disabled={!activeClip?.substrate || historyState.loading}
+              onClick={() => loadPersistedHistory(activeClip?.substrate)}
+            >
+              {historyState.loading ? "Refreshing…" : "Refresh events"}
+            </button>
+          </div>
+
+          {historyState.loading && availableClips.length === 0 ? (
+            <p className="mt-2.5 text-xs text-zinc-500">
+              Loading persisted events for {activeClip?.substrate}…
+            </p>
+          ) : availableClips.length === 0 ? (
+            <p className="mt-2.5 text-xs text-zinc-500">
+              No persisted events found for this substrate. No clips are
+              synthesized when persisted history is empty.
+            </p>
+          ) : (
+            <div className="mt-2.5 flex flex-wrap gap-2">
+              {availableClips.map((entry) => {
+                const selected =
+                  activeClip && entry.activation === activeClip.activation;
+                return (
+                  <button
+                    key={entry.key}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => selectAvailableClip(entry.activation)}
+                    className={`rounded-xl border px-3 py-2 text-left transition ${
+                      selected
+                        ? "border-emerald-600 bg-emerald-50/80 text-emerald-950 dark:border-emerald-500 dark:bg-emerald-950/50 dark:text-emerald-100"
+                        : "border-zinc-200 bg-zinc-50/70 text-zinc-800 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-950/60 dark:text-zinc-200 dark:hover:bg-zinc-800/70"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 text-xs font-semibold">
+                      <span>Activation {entry.activation}</span>
+                      <Pill tone={entry.heritageVerified ? "ok" : "neutral"}>
+                        {entry.heritageVerified ? "Heritage" : "Persisted"}
+                      </Pill>
+                    </div>
+                    <p className="mt-0.5 max-w-[16rem] truncate font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
+                      {entry.record || "Record unavailable"}
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        {/* Overview Board (populated directly from the matching persisted event) */}
         <Card
+          key={clipKey || "no-clip"}
           defaultOpen
           title="Overview"
           subtitle={
             activeClip
-              ? `${activeClip.substrate} · Activation ${activeClip.activation}${
-                  authoritativeRecord ? ` · ${authoritativeRecord}` : ""
-                }`
+              ? `${clipKey}${overviewRecord && overviewRecord !== "—" ? ` · ${overviewRecord}` : ""}`
               : "No ActiveClip context"
           }
           badge={overviewBadge}
           className="w-full"
         >
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
-            <Stat label="Clip substrate" value={activeClip ? activeClip.substrate : "—"} wide />
-            <Stat label="Clip activation" value={activeClip ? String(activeClip.activation) : "—"} />
-            <Stat label="Authoritative event" value={authoritativeRecord || "—"} wide />
-            <Stat
-              label="Heritage activation"
-              value={
-                heritageState
-                  ? String(activationFromHeritageState(heritageState) ?? "—")
-                  : "—"
-              }
-            />
-            <Stat label="Persisted clip events" value={scopedStore.eventRows.length} />
-            <Stat label="Derived networks" value={scopedStore.derivedNetworks.length} />
-            <Stat label="Retained mass" value={retainedMass.toString()} />
-            <Stat label="API base" value={API_BASE} wide />
-
-            {scopedStore.directory && (
-              <Stat label="Storage directory" value={scopedStore.directory} wide />
-            )}
-
-            {focusedEvent && (
-              <Stat label="Event kind" value={money(focusedEvent.kind)} />
-            )}
-          </div>
+          {!focusedEvent ? (
+            <p className="text-xs text-zinc-500">
+              {scopedStore.loadingEvent || historyState.loading
+                ? "Loading persisted event summary for the selected clip…"
+                : "No persisted event summary available for this ActiveClip."}
+            </p>
+          ) : (
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+              <Stat label="Kind" value={money(overviewKind)} />
+              <Stat label="Record" value={money(overviewRecord)} wide />
+              <Stat label="Activation" value={money(overviewActivation)} />
+              <Stat label="Dimension" value={money(overviewDimension)} />
+              <Stat
+                label="Structural value"
+                value={money(overviewStructuralValue)}
+              />
+              <Stat label="Depth objects" value={money(overviewDepthObjects)} />
+              <Stat label="Retained mass" value={retainedMass} />
+              <Stat label="Delta" value={money(overviewDelta)} />
+              <Stat label="Tau" value={money(overviewTau)} />
+              <Stat label="Gross work" value={money(overviewGrossWork)} />
+              <Stat label="Net work" value={money(overviewNetWork)} />
+              <Stat
+                label="Commitment"
+                value={money(overviewCommitment)}
+                wide
+              />
+              <Stat
+                label="Coordinate"
+                value={money(overviewCoordinate)}
+                wide
+              />
+            </div>
+          )}
         </Card>
 
         {/* Bitcoin network cards */}
