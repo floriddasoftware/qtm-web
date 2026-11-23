@@ -87,7 +87,7 @@ rows.push([prefix, "No details returned"]);
 entries.forEach(([key, child]) => {
 flatten(
 child,
-prefix ? ⁠${prefix} · ${formatKey(key)}⁠ : formatKey(key),
+prefix ? `${prefix} · ${formatKey(key)}` : formatKey(key),
 rows
 );
 });
