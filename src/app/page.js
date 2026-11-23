@@ -77,7 +77,7 @@ if (!value.length && prefix) {
 rows.push([prefix, "None"]);
 }
 value.forEach((item, index) => {
-flatten(item, ⁠${prefix || "Item"} ${index + 1}⁠, rows);
+flatten(item, `${prefix || "Item"} ${index + 1}`, rows);
 });
 } else if (isRecord(value)) {
 const entries = Object.entries(value);
