@@ -108,6 +108,8 @@ async function apiRequest(path, options = {}) {
 
   let body = {};
 
+    let body = {};
+
   if (raw) {
     try {
       body = JSON.parse(raw);
@@ -115,16 +117,18 @@ async function apiRequest(path, options = {}) {
       body = { response_text: raw };
     }
   }
-if (!response.ok) {
-throw new Error(
-body?.error ||
-body?.message ||
-body?.detail ||
-body?.response_text ||
-⁠Request failed with HTTP ${response.status}⁠,
-);
-}
-return body;
+
+  if (!response.ok) {
+    throw new Error(
+      body?.error ||
+        body?.message ||
+        body?.detail ||
+        body?.response_text ||
+        `Request failed with HTTP ${response.status}`,
+    );
+  }
+
+  return body;
 }
 function enc(value) {
 return encodeURIComponent(String(value));
