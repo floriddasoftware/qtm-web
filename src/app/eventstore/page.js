@@ -378,10 +378,13 @@ registered: entry.registered ?? true,
 }
 async function fetchDerivedNetworksFromHeritage(clip, heritageState, signal) {
 const authoritativeActivation = activationFromHeritageState(heritageState);
-if (authoritativeActivation === null || authoritativeActivation !== clip.activation) {
-throw new Error(
-⁠Event heritage activation (${String(authoritativeActivation)}) does not match ActiveClip activation (${clip.activation}).⁠,
-);
+if (
+  authoritativeActivation === null ||
+  authoritativeActivation !== clip.activation
+) {
+  throw new Error(
+    `Event heritage activation (${String(authoritativeActivation)}) does not match ActiveClip activation (${clip.activation}).`,
+  );
 }
 const body = await apiRequest(
 ⁠/wallets/${enc(clip.substrate)}/activations/${enc(authoritativeActivation)}/networks⁠,
