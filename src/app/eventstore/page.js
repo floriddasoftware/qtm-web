@@ -163,7 +163,7 @@ activation,
 });
 }
 function activeClipKey(clip) {
-return clip ? ⁠${clip.substrate}:${clip.activation}⁠ : "";
+  return clip ? `${clip.substrate}:${clip.activation}` : "";
 }
 function sameActiveClip(a, b) {
 if (!a || !b) return false;
