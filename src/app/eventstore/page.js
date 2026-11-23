@@ -2264,6 +2264,7 @@ function EventStoreContent() {
   const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
 
 
+
 return (
   <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
     <style>{QTM_STYLES}</style>
@@ -2273,11 +2274,13 @@ return (
       inert={activeLogViewer ? true : undefined}
       aria-hidden={activeLogViewer ? true : undefined}
     >
+      {/* Header */}
       <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div className="min-w-0">
           <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
             QTM Event Store
           </h1>
+
           <p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 sm:text-sm dark:text-zinc-400">
             Event-heritage driven payloads, derived networks, network budgets,
             payload boards, Bitcoin observation and API-owned wirepackets.
@@ -2286,6 +2289,7 @@ return (
         </div>
 
         <div className="flex min-w-0 flex-col gap-2 sm:w-96">
+          {/* Navigation */}
           <div className="grid grid-cols-2 gap-2">
             <a href="/network" className={BUTTON}>
               Network
@@ -2299,6 +2303,7 @@ return (
             </a>
           </div>
 
+          {/* Persisted event selector */}
           <label className="block min-w-0">
             <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
               Persisted event
@@ -2323,15 +2328,17 @@ return (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
-              )}
+              ))}
             </select>
           </label>
         </div>
       </header>
 
+      {/* Notifications */}
       {error && <Notice>{error}</Notice>}
       {notice && <Notice type="success">{notice}</Notice>}
 
+      {/* Overview */}
       <Card
         defaultOpen
         title="Overview"
@@ -2352,15 +2359,18 @@ return (
           <Stat label="Derived networks" value={derivedNetworks.length} />
           <Stat label="Retained mass" value={retainedMass.toString()} />
           <Stat label="API base" value={API_BASE} wide />
+
           {historyDirectory && (
             <Stat label="Substrate directory" value={historyDirectory} wide />
           )}
+
           {focusedEvent && (
             <Stat label="Focused kind" value={money(focusedEvent.kind)} />
           )}
         </div>
       </Card>
 
+      {/* Bitcoin network cards */}
       {bitcoinSlots.map((slot, index) => {
         const id = slot.network?.id;
 
@@ -2395,6 +2405,7 @@ return (
         );
       })}
 
+      {/* Other chains */}
       <SectionHeading title="Other chains" meta="derived from event heritage">
         Derived non-Bitcoin networks for this activation alongside planned chain slots.
       </SectionHeading>
@@ -2413,7 +2424,9 @@ return (
                 subtitle={`coin type ${coin.type}`}
                 badge={
                   <Pill tone={derivedCount > 0 ? "ok" : "warn"}>
-                    {derivedCount > 0 ? `${derivedCount} derived` : "Planned"}
+                    {derivedCount > 0
+                      ? `${derivedCount} derived`
+                      : "Planned"}
                   </Pill>
                 }
                 style={{ animationDelay: `${index * 60}ms` }}
@@ -2424,6 +2437,7 @@ return (
                       {coin.path}
                     </span>
                   </Field>
+
                   <Field label="Derived networks">{derivedCount}</Field>
                 </Fields>
               </Card>
@@ -2432,8 +2446,10 @@ return (
         )}
       </div>
 
+      {/* Diagnostics */}
       <SectionHeading title="Diagnostics" />
 
+      {/* Persisted event records */}
       <Card
         defaultOpen
         scroll
@@ -2442,6 +2458,7 @@ return (
         badge={<Pill>{historyRows.length}</Pill>}
         className="w-full"
       >
+        {/* Desktop table */}
         <div className="hidden overflow-x-auto rounded-xl border border-zinc-200 lg:block dark:border-zinc-800">
           <table className="w-full min-w-[850px] border-collapse text-left text-sm">
             <thead className="bg-zinc-100 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
@@ -2483,10 +2500,13 @@ return (
                       {activationFromHeritage(row) ?? money(row?.activation)}
                     </td>
 
-                    <td className="px-4 py-3">{money(row?.kind)}</td>
+                    <td className="px-4 py-3">
+                      {money(row?.kind)}
+                    </td>
 
                     <td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">
                       {money(row?.record)}
+
                       {isFocused && (
                         <span className="ml-2 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
                           focused
@@ -2499,10 +2519,14 @@ return (
                     </td>
 
                     <td className="break-all px-4 py-3 font-mono">
-                      {money(row?.structural_value ?? state?.structural_value)}
+                      {money(
+                        row?.structural_value ?? state?.structural_value,
+                      )}
                     </td>
 
-                    <td className="px-4 py-3">{money(row?.depth_objects)}</td>
+                    <td className="px-4 py-3">
+                      {money(row?.depth_objects)}
+                    </td>
 
                     <td className="break-all px-4 py-3 font-mono">
                       {money(row?.retained_mass ?? state?.retained_mass)}
@@ -2525,6 +2549,7 @@ return (
           </table>
         </div>
 
+        {/* Mobile cards */}
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:hidden">
           {historyRows.map((row, index) => {
             const state = row?.heritage?.state;
@@ -2552,6 +2577,7 @@ return (
 
                 <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">
                   {money(row?.record)}
+
                   {isFocused && (
                     <span className="ml-2 text-[10px] font-semibold text-emerald-600">
                       focused
@@ -2566,7 +2592,9 @@ return (
                     </Field>
 
                     <Field label="Structural value (Σ)">
-                      {money(row?.structural_value ?? state?.structural_value)}
+                      {money(
+                        row?.structural_value ?? state?.structural_value,
+                      )}
                     </Field>
 
                     <Field label="Depth objects">
@@ -2590,11 +2618,13 @@ return (
         </div>
       </Card>
 
+      {/* Footer */}
       <footer className="border-t border-zinc-200 pt-4 text-xs text-zinc-500 dark:border-zinc-800">
         QTM Event Store · {API_BASE}
       </footer>
     </div>
 
+    {/* BitMiner log viewer */}
     {activeLogViewer && (
       <BitMinerLogPopup
         key={`${activeLogViewer.substrate}|${activeLogViewer.activation}|${activeLogViewer.network}`}
@@ -2618,7 +2648,9 @@ export default function EventStorePage() {
       fallback={
         <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
           <div className="mx-auto w-full max-w-7xl">
-            <p className="text-sm text-zinc-500">Loading QTM Event Store…</p>
+            <p className="text-sm text-zinc-500">
+              Loading QTM Event Store…
+            </p>
           </div>
         </main>
       }
