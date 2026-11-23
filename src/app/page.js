@@ -132,33 +132,39 @@ listEvents: "qtm_events",
 submissionValue: "qtm_submission_value",
 };
 const API_ROUTES = {
-listSubstrates: () => ["GET", "/wallets"],
-listNetworks: () => ["GET", "/networks"],
-createSubstrate: () => ["POST", "/wallets"],
-openSubstrate: ({ name, activation }) => [
-  "GET",
-  `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/open`,
-],
-receive: ({ name }) => [
-"POST",
-⁠/wallets/${encodeURIComponent(name)}/receive⁠,
-],
-transit: ({ name }) => [
-"POST",
-⁠/wallets/${encodeURIComponent(name)}/transit⁠,
-],
-exile: ({ name }) => [
-"POST",
-⁠/wallets/${encodeURIComponent(name)}/exile⁠,
-],
-listEvents: ({ name }) => [
-"GET",
-⁠/wallets/${encodeURIComponent(name)}/events⁠,
-],
-submissionValue: ({ name, activation, network, field }) => [
-"GET",
-⁠/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/${encodeURIComponent(field)}⁠,
-],
+  listSubstrates: () => ["GET", "/wallets"],
+  listNetworks: () => ["GET", "/networks"],
+  createSubstrate: () => ["POST", "/wallets"],
+
+  openSubstrate: ({ name, activation }) => [
+    "GET",
+    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/open`,
+  ],
+
+  receive: ({ name }) => [
+    "POST",
+    `/wallets/${encodeURIComponent(name)}/receive`,
+  ],
+
+  transit: ({ name }) => [
+    "POST",
+    `/wallets/${encodeURIComponent(name)}/transit`,
+  ],
+
+  exile: ({ name }) => [
+    "POST",
+    `/wallets/${encodeURIComponent(name)}/exile`,
+  ],
+
+  listEvents: ({ name }) => [
+    "GET",
+    `/wallets/${encodeURIComponent(name)}/events`,
+  ],
+
+  submissionValue: ({ name, activation, network, field }) => [
+    "GET",
+    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/${encodeURIComponent(field)}`,
+  ],
 };
 function directMessage(cause) {
 if (typeof cause === "string" && cause.trim()) return cause.trim();
