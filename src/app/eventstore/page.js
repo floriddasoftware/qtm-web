@@ -154,7 +154,6 @@ async function callRuntime(operation, args = {}) {
 
 /* ───────────── Heritage activation & persisted event normalization ───────────── */
 
-// Authoritative activation extraction from the selected event's heritage state.
 function activationFromHeritage(event) {
   if (!event || typeof event !== "object") return null;
 
@@ -201,7 +200,6 @@ function compareEventRows(a, b) {
   return ra < rb ? -1 : ra > rb ? 1 : 0;
 }
 
-// Retains all persisted transit and exile event rows intact without filtering.
 function normalizePersistedHistoryResponse(response) {
   const source = Array.isArray(response) ? response : response?.events;
   if (!Array.isArray(source)) {
@@ -258,7 +256,6 @@ function observationMatches(status, networkId, activationValue) {
   return true;
 }
 
-// Normalizes network identifiers or objects returned by the Hyper activation-networks route.
 function normalizeDerivedNetwork(entry) {
   if (typeof entry === "string" || typeof entry === "number") {
     const id = normalizeNetworkId(entry);
@@ -295,7 +292,6 @@ function normalizeDerivedNetwork(entry) {
   };
 }
 
-// Calls the Hyper `handle_activation_network` route backed by `derive_network_data(name, activation)`.
 async function fetchDerivedNetworksForActivation(substrate, activationValue, signal) {
   const body = await apiRequest(
     `/wallets/${enc(substrate)}/activations/${enc(activationValue)}/networks`,
@@ -1104,7 +1100,7 @@ function NetworkCard({
         <Card
           inner
           defaultOpen
-          title={`Network budget · activation ${activation || "—"}`}
+          title={`Network budget · event/${activation || "—"}/${network.id}/budget`}
           badge={
             loadingBudget ? (
               <Pill>Loading</Pill>
@@ -1158,12 +1154,12 @@ function EventStoreContent() {
   // Stage 1: Persisted event history (authoritative runtime response for `substrate`).
   const [persistedHistory, setPersistedHistory] = useState(EMPTY_HISTORY);
 
-  // Stage 2 & 3: Selected event record and activation extracted from `event.heritage.state`.
+  // Stage 2 & 3: Selected event record and heritage activation.
   const [selectedEvent, setSelectedEvent] = useState("");
   const [selectedActivation, setSelectedActivation] = useState("");
   const [derivedEventSnapshot, setDerivedEventSnapshot] = useState(null);
 
-  // Stage 4: Networks derived by Hyper `handle_activation_network` (`GET /wallets/:name/activations/:activation/networks`).
+  // Stage 4: Networks derived by `/wallets/:substrate/activations/:activation/networks`.
   const [derivedNetworks, setDerivedNetworks] = useState([]);
   const [loadingNetworks, setLoadingNetworks] = useState(false);
 
@@ -1180,7 +1176,7 @@ function EventStoreContent() {
   const [wirePackets, setWirePackets] = useState({});
   const [loadingWire, setLoadingWire] = useState({});
 
-  const [budgets, setBudgets] = useState([]);
+  const [budgetsByNetwork, setBudgetsByNetwork] = useState({});
   const [loadingBudgets, setLoadingBudgets] = useState({});
   const [savingBudgets, setSavingBudgets] = useState({});
   const [budgetErrors, setBudgetErrors] = useState({});
@@ -1193,7 +1189,7 @@ function EventStoreContent() {
   const [notice, setNotice] = useState("");
   const [logViewer, setLogViewer] = useState(null);
 
-  // Context & substrate locks + AbortControllers for strict cancellation.
+  // Substrate & event context locks + deduplication + cancellation controllers.
   const substrateEpochRef = useRef(0);
   const lockedSubstrateRef = useRef("");
   const contextGenRef = useRef(0);
@@ -1203,10 +1199,11 @@ function EventStoreContent() {
   const historyRequestRef = useRef(0);
   const activationAbortRef = useRef(null);
   const networkRequestRef = useRef(0);
+  const inflightNetworkKeyRef = useRef("");
   const payloadRequestRef = useRef(0);
   const boardRequestRef = useRef({});
   const wireRequestRef = useRef({});
-  const budgetRequestRef = useRef(0);
+  const budgetRequestRef = useRef({});
   const observationRequestRef = useRef({});
 
   const historyRows = useMemo(
@@ -1244,12 +1241,13 @@ function EventStoreContent() {
     activationAbortRef.current?.abort();
     activationAbortRef.current = null;
 
+    inflightNetworkKeyRef.current = "";
     networkRequestRef.current += 1;
     payloadRequestRef.current += 1;
     boardRequestRef.current = {};
     wireRequestRef.current = {};
     observationRequestRef.current = {};
-    budgetRequestRef.current += 1;
+    budgetRequestRef.current = {};
 
     setDerivedEventSnapshot(null);
     setDerivedNetworks([]);
@@ -1258,7 +1256,7 @@ function EventStoreContent() {
     setPayloads([]);
     setLoadingPayloads(false);
 
-    setBudgets([]);
+    setBudgetsByNetwork({});
     setLoadingBudgets({});
     setSavingBudgets({});
     setBudgetErrors({});
@@ -1296,7 +1294,8 @@ function EventStoreContent() {
     [cancelAndClearActivationState],
   );
 
-  // Stage 1: Always retrieve persisted event history first via runtime `listEvents`.
+  // Stage 1: Retrieve persisted event history via runtime `listEvents` using `substrate`
+  // strictly as the namespace segment (never refreshing or mutating substrate state).
   const fetchRuntimeHistory = useCallback(
     async (name, epoch) => {
       if (!name) {
@@ -1407,8 +1406,9 @@ function EventStoreContent() {
     [isContextLocked],
   );
 
-  // Stage 5b: Activation-scoped budgets for the derived networks.
-  const loadBudgetsForActivation = useCallback(
+  // Stage 5b: Activation- and network-scoped budget loader (`event/<activation>/<network>/budget`).
+  // Executes strictly after derived networks are established for the active context.
+  const loadBudgetsForDerivedNetworks = useCallback(
     async (name, record, activationValue, networkRows, epoch, generation, signal) => {
       const actStr = String(activationValue ?? "");
       const networkIds = (networkRows || [])
@@ -1416,17 +1416,12 @@ function EventStoreContent() {
         .filter(Boolean);
 
       if (!name || !/^\d+$/.test(actStr) || networkIds.length === 0) {
-        budgetRequestRef.current += 1;
-        setBudgets([]);
+        setBudgetsByNetwork({});
         setLoadingBudgets({});
-        return [];
+        return {};
       }
 
-      const requestId = ++budgetRequestRef.current;
-      const current = () =>
-        requestId === budgetRequestRef.current &&
-        isContextLocked(name, record, actStr, epoch, generation);
-
+      const idsSet = new Set(networkIds);
       setLoadingBudgets(() => {
         const next = {};
         for (const id of networkIds) next[id] = true;
@@ -1438,43 +1433,76 @@ function EventStoreContent() {
         return next;
       });
 
+      const perNetworkReqId = {};
+      for (const id of networkIds) {
+        perNetworkReqId[id] = (budgetRequestRef.current[id] =
+          (budgetRequestRef.current[id] || 0) + 1);
+      }
+
+      const isNetworkRequestCurrent = (id) =>
+        budgetRequestRef.current[id] === perNetworkReqId[id] &&
+        isContextLocked(name, record, actStr, epoch, generation);
+
       try {
         const body = await apiRequest(
           `/wallets/${enc(name)}/activations/${enc(actStr)}/budgets`,
           { signal },
         );
-        if (!current()) return null;
+        if (!isContextLocked(name, record, actStr, epoch, generation)) {
+          return null;
+        }
 
         const rows = Array.isArray(body?.budgets) ? body.budgets : [];
-        const filtered = rows.filter(
-          (row) => row?.activation == null || String(row.activation) === actStr,
-        );
-        setBudgets(filtered);
-        return filtered;
+        const nextMap = {};
+
+        for (const row of rows) {
+          if (row?.activation != null && String(row.activation) !== actStr) continue;
+          const net = normalizeDerivedNetwork(row?.network ?? row?.network_id);
+          if (!net || !idsSet.has(net.id)) continue;
+          nextMap[net.id] = row;
+        }
+
+        setBudgetsByNetwork((prev) => {
+          if (!isContextLocked(name, record, actStr, epoch, generation)) {
+            return prev;
+          }
+          const scoped = {};
+          for (const id of networkIds) {
+            scoped[id] = nextMap[id] ?? null;
+          }
+          return scoped;
+        });
+
+        return nextMap;
       } catch (err) {
-        if (err?.name !== "AbortError" && current()) {
-          setBudgets([]);
+        if (err?.name !== "AbortError" && isContextLocked(name, record, actStr, epoch, generation)) {
           const message = err instanceof Error ? err.message : "API error";
+          setBudgetsByNetwork(() => {
+            const scoped = {};
+            for (const id of networkIds) scoped[id] = null;
+            return scoped;
+          });
           setBudgetErrors(() => {
             const next = {};
             for (const id of networkIds) {
-              next[id] = `Unable to load network budget: ${message}`;
+              next[id] = `Unable to load budget for event/${actStr}/${id}/budget: ${message}`;
             }
             return next;
           });
         }
         return null;
       } finally {
-        if (requestId === budgetRequestRef.current) {
-          setLoadingBudgets((prev) => {
-            if (!isContextLocked(name, record, actStr, epoch, generation)) {
-              return {};
+        setLoadingBudgets((prev) => {
+          const next = { ...prev };
+          for (const id of networkIds) {
+            if (!isNetworkRequestCurrent(id) || !isContextLocked(name, record, actStr, epoch, generation)) {
+              delete next[id];
+            } else {
+              next[id] = false;
             }
-            const next = { ...prev };
-            for (const id of networkIds) next[id] = false;
-            return next;
-          });
-        }
+          }
+          return next;
+        });
       }
     },
     [isContextLocked],
@@ -1596,9 +1624,7 @@ function EventStoreContent() {
   );
 
   // Stages 3 -> 4 -> 5:
-  // Extract heritage activation from the selected event, derive networks via the
-  // Hyper activation-networks route (`handle_activation_network`), and then load
-  // budgets and activation-scoped resources for those derived networks.
+  // Extract heritage activation from selected event -> derive networks -> then load budgets & resources.
   const activateSelectedEvent = useCallback(
     async (name, eventRow, epoch, generation) => {
       const record = recordOf(eventRow);
@@ -1618,11 +1644,17 @@ function EventStoreContent() {
         return;
       }
 
+      const dedupeKey = `${epoch}:${generation}:${name}:${record}:${activationValue}`;
+      if (inflightNetworkKeyRef.current === dedupeKey) {
+        return;
+      }
+      inflightNetworkKeyRef.current = dedupeKey;
+
       const controller = new AbortController();
       activationAbortRef.current = controller;
       const { signal } = controller;
 
-      // Stage 4: Derive networks from the event's heritage activation.
+      // Stage 4: Derive networks for this heritage activation.
       const netReqId = ++networkRequestRef.current;
       setLoadingNetworks(true);
 
@@ -1648,6 +1680,9 @@ function EventStoreContent() {
         }
         return;
       } finally {
+        if (inflightNetworkKeyRef.current === dedupeKey) {
+          inflightNetworkKeyRef.current = "";
+        }
         if (netReqId === networkRequestRef.current) {
           setLoadingNetworks(false);
         }
@@ -1664,8 +1699,7 @@ function EventStoreContent() {
       setDerivedEventSnapshot(derivedResult.event);
       setDerivedNetworks(networkRows);
 
-      // Stage 5: Load event payloads, activation budgets, and per-network resources
-      // for the derived networks under this heritage activation.
+      // Stage 5: Execute strictly after derived networks are established.
       void loadPayloadsForRecord(
         name,
         record,
@@ -1675,7 +1709,7 @@ function EventStoreContent() {
         signal,
       );
 
-      void loadBudgetsForActivation(
+      void loadBudgetsForDerivedNetworks(
         name,
         record,
         activationValue,
@@ -1722,7 +1756,7 @@ function EventStoreContent() {
       cancelAndClearActivationState,
       isContextLocked,
       loadPayloadsForRecord,
-      loadBudgetsForActivation,
+      loadBudgetsForDerivedNetworks,
       loadPayloadBoardForNetwork,
       loadObservationForNetwork,
       loadWirePacketsForNetwork,
@@ -1874,14 +1908,14 @@ function EventStoreContent() {
 
   const networkBudgetById = useMemo(() => {
     const result = new Map();
-    for (const row of budgets) {
-      const network = normalizeDerivedNetwork(row.network);
-      if (network) result.set(network.id, row);
+    for (const [id, row] of Object.entries(budgetsByNetwork)) {
+      if (!row) continue;
+      const net = normalizeDerivedNetwork(row.network ?? row.network_id) || { id };
+      result.set(id, { ...row, network: net });
     }
     return result;
-  }, [budgets]);
+  }, [budgetsByNetwork]);
 
-  // Derived Bitcoin networks for the selected event's heritage activation.
   const bitcoinSlots = useMemo(() => {
     const buckets = { legacy: [], segwit: [], other: [] };
     for (const network of derivedNetworks) {
@@ -2122,7 +2156,7 @@ function EventStoreContent() {
     const epoch = substrateEpochRef.current;
     const generation = contextGenRef.current;
 
-    if (!/^\d+$/.test(activeActivation)) return;
+    if (!id || !/^\d+$/.test(activeActivation)) return;
 
     const stale = () =>
       !isContextLocked(
@@ -2165,7 +2199,7 @@ function EventStoreContent() {
         },
       );
       if (stale()) return;
-      await loadBudgetsForActivation(
+      await loadBudgetsForDerivedNetworks(
         activeSubstrate,
         activeEvent,
         activeActivation,
