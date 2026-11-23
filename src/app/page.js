@@ -2312,10 +2312,12 @@ const linkWithSubstrate = (href) => {
 };
 
 const eventStoreHref = activeClip
-  ? `/eventstore?clip=${encodeURIComponent(
-      JSON.stringify(activeClip)
+  ? `/eventstore?substrate=${encodeURIComponent(
+      activeClip.substrate
+    )}&activation=${encodeURIComponent(
+      String(activeClip.activation)
     )}`
-  : "/eventstore";
+  : "";
 
   
     
