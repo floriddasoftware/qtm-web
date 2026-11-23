@@ -2263,138 +2263,145 @@ function EventStoreContent() {
 
   const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
 
-  return (
-    <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
-      <style>{QTM_STYLES}</style>
 
-      <div
-        className="mx-auto flex w-full max-w-7xl flex-col gap-4"
-        inert={activeLogViewer ? true : undefined}
-        aria-hidden={activeLogViewer ? true : undefined}
-      >
-        <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <div className="min-w-0">
-            <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
-              QTM Event Store
-            </h1>
-            <p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 sm:text-sm dark:text-zinc-400">
-              Event-heritage driven payloads, derived networks, network budgets, payload boards, Bitcoin observation and API-owned wirepackets.
-              Choose any persisted event below to derive its activation context.
-            </p>
-          </div>
+return (
+  <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
+    <style>{QTM_STYLES}</style>
 
-          <div className="flex min-w-0 flex-col gap-2 sm:w-96">
-  <div className="grid grid-cols-2 gap-2">
-    <a href="/network" className={BUTTON}>
-      Network
-    </a>
-
-    <a
-      href={`/?substrate=${encodeURIComponent(substrate)}`}
-      className={BUTTON}
+    <div
+      className="mx-auto flex w-full max-w-7xl flex-col gap-4"
+      inert={activeLogViewer ? true : undefined}
+      aria-hidden={activeLogViewer ? true : undefined}
     >
-      QTM
-    </a>
-  </div>
-</div>
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="min-w-0">
+          <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
+            QTM Event Store
+          </h1>
+          <p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 sm:text-sm dark:text-zinc-400">
+            Event-heritage driven payloads, derived networks, network budgets,
+            payload boards, Bitcoin observation and API-owned wirepackets.
+            Choose any persisted event below to derive its activation context.
+          </p>
+        </div>
 
-            <label className="block min-w-0">
-              <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                Persisted event
-              </span>
-              <select
-                aria-label="Select persisted event"
-                className={INPUT}
-                value={selectedEvent}
-                disabled={!substrate || loadingHistory || eventOptions.length === 0}
-                onChange={(changeEvent) => handleSelectEvent(changeEvent.target.value)}
-              >
-                {!selectedEvent && (
-                  <option value="" disabled>
-                    {eventPlaceholder}
-                  </option>
-                )}
-                {eventOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+        <div className="flex min-w-0 flex-col gap-2 sm:w-96">
+          <div className="grid grid-cols-2 gap-2">
+            <a href="/network" className={BUTTON}>
+              Network
+            </a>
+
+            <a
+              href={`/?substrate=${encodeURIComponent(substrate)}`}
+              className={BUTTON}
+            >
+              QTM
+            </a>
           </div>
-        </header>
 
-        {error && <Notice>{error}</Notice>}
-        {notice && <Notice type="success">{notice}</Notice>}
+          <label className="block min-w-0">
+            <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+              Persisted event
+            </span>
 
-        <Card
-          defaultOpen
-          title="Overview"
-          subtitle={
-            substrate
-              ? `${substrate} · Event ${selectedEvent || "—"}`
-              : "No context from parent route"
-          }
-          badge={overviewBadge}
-          className="w-full"
-        >
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
-            <Stat label="Substrate" value={substrate || "—"} wide />
-            <Stat label="Event" value={selectedEvent || "—"} wide />
-            <Stat label="Heritage activation" value={selectedActivation || "—"} />
-            <Stat label="Events (activation)" value={selectedEvents.length} />
-            <Stat label="All events" value={historyRows.length} />
-            <Stat label="Derived networks" value={derivedNetworks.length} />
-            <Stat label="Retained mass" value={retainedMass.toString()} />
-            <Stat label="API base" value={API_BASE} wide />
-            {historyDirectory && (
-              <Stat label="Substrate directory" value={historyDirectory} wide />
-            )}
-            {focusedEvent && (
-              <Stat label="Focused kind" value={money(focusedEvent.kind)} />
-            )}
-          </div>
-        </Card>
+            <select
+              aria-label="Select persisted event"
+              className={INPUT}
+              value={selectedEvent}
+              disabled={!substrate || loadingHistory || eventOptions.length === 0}
+              onChange={(changeEvent) =>
+                handleSelectEvent(changeEvent.target.value)
+              }
+            >
+              {!selectedEvent && (
+                <option value="" disabled>
+                  {eventPlaceholder}
+                </option>
+              )}
 
-        {bitcoinSlots.map((slot, index) => {
-          const id = slot.network?.id;
-          return (
-            <NetworkCard
-              key={id || `placeholder-${slot.kind}`}
-              kind={slot.kind}
-              network={slot.network}
-              defaultOpen={index === 0}
-              index={index}
-              activation={selectedActivation}
-              budgetRow={id ? networkBudgetById.get(id) : undefined}
-              group={(id && payloadGroups.get(id)) || emptyGroup}
-              board={id ? boards[id] : undefined}
-              wire={id ? wirePackets[id] : undefined}
-              observation={id ? observations[id] : undefined}
-              observationError={id ? observationErrors[id] : ""}
-              busy={id ? busyObservation[id] === true : false}
-              results={(id && streamResults[id]) || []}
-              loadingBoard={id ? loadingBoards[id] === true : false}
-              loadingBudget={id ? loadingBudgets[id] === true : false}
-              savingBudget={id ? savingBudgets[id] === true : false}
-              loadingWire={id ? loadingWire[id] === true : false}
-              loadingObservation={id ? loadingObservations[id] === true : false}
-              budgetError={id ? budgetErrors[id] : ""}
-              budgetNotice={id ? budgetNotices[id] : ""}
-              onSaveBudget={saveBudget}
-              onStreamAction={streamAction}
-              onRefreshStream={refreshStream}
-              onViewLogs={openBitMinerLogs}
-            />
-          );
-        })}
+              {eventOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              )}
+            </select>
+          </label>
+        </div>
+      </header>
 
-        <SectionHeading title="Other chains" meta="derived from event heritage">
-          Derived non-Bitcoin networks for this activation alongside planned chain slots.
-        </SectionHeading>
+      {error && <Notice>{error}</Notice>}
+      {notice && <Notice type="success">{notice}</Notice>}
 
-        <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {COIN_TYPES.filter((coin) => coin.key !== "bitcoin").map((coin, index) => {
+      <Card
+        defaultOpen
+        title="Overview"
+        subtitle={
+          substrate
+            ? `${substrate} · Event ${selectedEvent || "—"}`
+            : "No context from parent route"
+        }
+        badge={overviewBadge}
+        className="w-full"
+      >
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+          <Stat label="Substrate" value={substrate || "—"} wide />
+          <Stat label="Event" value={selectedEvent || "—"} wide />
+          <Stat label="Heritage activation" value={selectedActivation || "—"} />
+          <Stat label="Events (activation)" value={selectedEvents.length} />
+          <Stat label="All events" value={historyRows.length} />
+          <Stat label="Derived networks" value={derivedNetworks.length} />
+          <Stat label="Retained mass" value={retainedMass.toString()} />
+          <Stat label="API base" value={API_BASE} wide />
+          {historyDirectory && (
+            <Stat label="Substrate directory" value={historyDirectory} wide />
+          )}
+          {focusedEvent && (
+            <Stat label="Focused kind" value={money(focusedEvent.kind)} />
+          )}
+        </div>
+      </Card>
+
+      {bitcoinSlots.map((slot, index) => {
+        const id = slot.network?.id;
+
+        return (
+          <NetworkCard
+            key={id || `placeholder-${slot.kind}`}
+            kind={slot.kind}
+            network={slot.network}
+            defaultOpen={index === 0}
+            index={index}
+            activation={selectedActivation}
+            budgetRow={id ? networkBudgetById.get(id) : undefined}
+            group={(id && payloadGroups.get(id)) || emptyGroup}
+            board={id ? boards[id] : undefined}
+            wire={id ? wirePackets[id] : undefined}
+            observation={id ? observations[id] : undefined}
+            observationError={id ? observationErrors[id] : ""}
+            busy={id ? busyObservation[id] === true : false}
+            results={(id && streamResults[id]) || []}
+            loadingBoard={id ? loadingBoards[id] === true : false}
+            loadingBudget={id ? loadingBudgets[id] === true : false}
+            savingBudget={id ? savingBudgets[id] === true : false}
+            loadingWire={id ? loadingWire[id] === true : false}
+            loadingObservation={id ? loadingObservations[id] === true : false}
+            budgetError={id ? budgetErrors[id] : ""}
+            budgetNotice={id ? budgetNotices[id] : ""}
+            onSaveBudget={saveBudget}
+            onStreamAction={streamAction}
+            onRefreshStream={refreshStream}
+            onViewLogs={openBitMinerLogs}
+          />
+        );
+      })}
+
+      <SectionHeading title="Other chains" meta="derived from event heritage">
+        Derived non-Bitcoin networks for this activation alongside planned chain slots.
+      </SectionHeading>
+
+      <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        {COIN_TYPES.filter((coin) => coin.key !== "bitcoin").map(
+          (coin, index) => {
             const derivedCount = derivedNetworks.filter(
               (network) => coinKey(network) === coin.key,
             ).length;
@@ -2421,164 +2428,188 @@ function EventStoreContent() {
                 </Fields>
               </Card>
             );
-          })}
-        </div>
-
-        <SectionHeading title="Diagnostics" />
-
-        <Card
-          defaultOpen
-          scroll
-          title="Persisted event records"
-          subtitle="Runtime listEvents / GET /wallets/:name/events"
-          badge={<Pill>{historyRows.length}</Pill>}
-          className="w-full"
-        >
-          <div className="hidden overflow-x-auto rounded-xl border border-zinc-200 lg:block dark:border-zinc-800">
-            <table className="w-full min-w-[850px] border-collapse text-left text-sm">
-              <thead className="bg-zinc-100 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                <tr>
-                  {[
-                    "Activation",
-                    "Event type",
-                    "Record reference",
-                    "Dimension",
-                    "Structural value (Σ)",
-                    "Depth objects",
-                    "Retained mass",
-                  ].map((heading) => (
-                    <th key={heading} className="px-4 py-3 font-semibold">
-                      {heading}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                {historyRows.map((row, index) => {
-                  const state = row?.heritage?.state;
-                  const isFocused =
-                    Boolean(selectedEvent) &&
-                    String(row?.record ?? "") === String(selectedEvent);
-                  return (
-                    <tr
-                      key={`${row?.record ?? "row"}-${index}`}
-                      className={`align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/50 ${
-                        isFocused ? "bg-emerald-50/60 dark:bg-emerald-950/30" : ""
-                      }`}
-                    >
-                      <td className="whitespace-nowrap px-4 py-3 font-mono">
-                        {activationFromHeritage(row) ?? money(row?.activation)}
-                      </td>
-                      <td className="px-4 py-3">{money(row?.kind)}</td>
-                      <td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">
-                        {money(row?.record)}
-                        {isFocused && (
-                          <span className="ml-2 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
-                            focused
-                          </span>
-                        )}
-                      </td>
-                      <td className="break-all px-4 py-3 font-mono">
-                        {money(row?.dimension ?? state?.dimension)}
-                      </td>
-                      <td className="break-all px-4 py-3 font-mono">
-                        {money(row?.structural_value ?? state?.structural_value)}
-                      </td>
-                      <td className="px-4 py-3">{money(row?.depth_objects)}</td>
-                      <td className="break-all px-4 py-3 font-mono">
-                        {money(row?.retained_mass ?? state?.retained_mass)}
-                      </td>
-                    </tr>
-                  );
-                })}
-                {historyRows.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={7}
-                      className="px-4 py-10 text-center text-sm text-zinc-500"
-                    >
-                      {eventsEmptyText}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:hidden">
-            {historyRows.map((row, index) => {
-              const state = row?.heritage?.state;
-              const isFocused =
-                Boolean(selectedEvent) &&
-                String(row?.record ?? "") === String(selectedEvent);
-              return (
-                <article
-                  key={`${row?.record ?? "row"}-card-${index}`}
-                  className={`${INNER} p-3 ${
-                    isFocused ? "ring-2 ring-emerald-400/60" : ""
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <h4 className="min-w-0 break-all text-sm font-semibold">
-                      {money(row?.kind)}
-                    </h4>
-                    <Pill>
-                      Act. {activationFromHeritage(row) ?? money(row?.activation)}
-                    </Pill>
-                  </div>
-                  <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">
-                    {money(row?.record)}
-                    {isFocused && (
-                      <span className="ml-2 text-[10px] font-semibold text-emerald-600">
-                        focused
-                      </span>
-                    )}
-                  </p>
-                  <div className="mt-3">
-                    <Fields min="7rem">
-                      <Field label="Dimension">
-                        {money(row?.dimension ?? state?.dimension)}
-                      </Field>
-                      <Field label="Structural value (Σ)">
-                        {money(row?.structural_value ?? state?.structural_value)}
-                      </Field>
-                      <Field label="Depth objects">
-                        {money(row?.depth_objects)}
-                      </Field>
-                      <Field label="Retained mass">
-                        {money(row?.retained_mass ?? state?.retained_mass)}
-                      </Field>
-                    </Fields>
-                  </div>
-                </article>
-              );
-            })}
-            {historyRows.length === 0 && (
-              <p className="col-span-full rounded-xl border border-zinc-200 p-4 text-sm text-zinc-500 dark:border-zinc-800">
-                {eventsEmptyText}
-              </p>
-            )}
-          </div>
-        </Card>
-
-        <footer className="border-t border-zinc-200 pt-4 text-xs text-zinc-500 dark:border-zinc-800">
-          QTM Event Store · {API_BASE}
-        </footer>
+          },
+        )}
       </div>
 
-      {activeLogViewer && (
-        <BitMinerLogPopup
-          key={`${activeLogViewer.substrate}|${activeLogViewer.activation}|${activeLogViewer.network}`}
-          substrate={activeLogViewer.substrate}
-          activation={activeLogViewer.activation}
-          network={activeLogViewer.network}
-          running={observations[activeLogViewer.network]?.running === true}
-          onClose={closeBitMinerLogs}
-          onRefreshStatus={() => refreshStream({ id: activeLogViewer.network })}
-        />
-      )}
-    </main>
-  );
+      <SectionHeading title="Diagnostics" />
+
+      <Card
+        defaultOpen
+        scroll
+        title="Persisted event records"
+        subtitle="Runtime listEvents / GET /wallets/:name/events"
+        badge={<Pill>{historyRows.length}</Pill>}
+        className="w-full"
+      >
+        <div className="hidden overflow-x-auto rounded-xl border border-zinc-200 lg:block dark:border-zinc-800">
+          <table className="w-full min-w-[850px] border-collapse text-left text-sm">
+            <thead className="bg-zinc-100 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+              <tr>
+                {[
+                  "Activation",
+                  "Event type",
+                  "Record reference",
+                  "Dimension",
+                  "Structural value (Σ)",
+                  "Depth objects",
+                  "Retained mass",
+                ].map((heading) => (
+                  <th key={heading} className="px-4 py-3 font-semibold">
+                    {heading}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+
+            <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+              {historyRows.map((row, index) => {
+                const state = row?.heritage?.state;
+
+                const isFocused =
+                  Boolean(selectedEvent) &&
+                  String(row?.record ?? "") === String(selectedEvent);
+
+                return (
+                  <tr
+                    key={`${row?.record ?? "row"}-${index}`}
+                    className={`align-top hover:bg-zinc-50 dark:hover:bg-zinc-800/50 ${
+                      isFocused
+                        ? "bg-emerald-50/60 dark:bg-emerald-950/30"
+                        : ""
+                    }`}
+                  >
+                    <td className="whitespace-nowrap px-4 py-3 font-mono">
+                      {activationFromHeritage(row) ?? money(row?.activation)}
+                    </td>
+
+                    <td className="px-4 py-3">{money(row?.kind)}</td>
+
+                    <td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-zinc-500">
+                      {money(row?.record)}
+                      {isFocused && (
+                        <span className="ml-2 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
+                          focused
+                        </span>
+                      )}
+                    </td>
+
+                    <td className="break-all px-4 py-3 font-mono">
+                      {money(row?.dimension ?? state?.dimension)}
+                    </td>
+
+                    <td className="break-all px-4 py-3 font-mono">
+                      {money(row?.structural_value ?? state?.structural_value)}
+                    </td>
+
+                    <td className="px-4 py-3">{money(row?.depth_objects)}</td>
+
+                    <td className="break-all px-4 py-3 font-mono">
+                      {money(row?.retained_mass ?? state?.retained_mass)}
+                    </td>
+                  </tr>
+                );
+              })}
+
+              {historyRows.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={7}
+                    className="px-4 py-10 text-center text-sm text-zinc-500"
+                  >
+                    {eventsEmptyText}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:hidden">
+          {historyRows.map((row, index) => {
+            const state = row?.heritage?.state;
+
+            const isFocused =
+              Boolean(selectedEvent) &&
+              String(row?.record ?? "") === String(selectedEvent);
+
+            return (
+              <article
+                key={`${row?.record ?? "row"}-card-${index}`}
+                className={`${INNER} p-3 ${
+                  isFocused ? "ring-2 ring-emerald-400/60" : ""
+                }`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <h4 className="min-w-0 break-all text-sm font-semibold">
+                    {money(row?.kind)}
+                  </h4>
+
+                  <Pill>
+                    Act. {activationFromHeritage(row) ?? money(row?.activation)}
+                  </Pill>
+                </div>
+
+                <p className="mt-1 break-all font-mono text-[11px] text-zinc-500">
+                  {money(row?.record)}
+                  {isFocused && (
+                    <span className="ml-2 text-[10px] font-semibold text-emerald-600">
+                      focused
+                    </span>
+                  )}
+                </p>
+
+                <div className="mt-3">
+                  <Fields min="7rem">
+                    <Field label="Dimension">
+                      {money(row?.dimension ?? state?.dimension)}
+                    </Field>
+
+                    <Field label="Structural value (Σ)">
+                      {money(row?.structural_value ?? state?.structural_value)}
+                    </Field>
+
+                    <Field label="Depth objects">
+                      {money(row?.depth_objects)}
+                    </Field>
+
+                    <Field label="Retained mass">
+                      {money(row?.retained_mass ?? state?.retained_mass)}
+                    </Field>
+                  </Fields>
+                </div>
+              </article>
+            );
+          })}
+
+          {historyRows.length === 0 && (
+            <p className="col-span-full rounded-xl border border-zinc-200 p-4 text-sm text-zinc-500 dark:border-zinc-800">
+              {eventsEmptyText}
+            </p>
+          )}
+        </div>
+      </Card>
+
+      <footer className="border-t border-zinc-200 pt-4 text-xs text-zinc-500 dark:border-zinc-800">
+        QTM Event Store · {API_BASE}
+      </footer>
+    </div>
+
+    {activeLogViewer && (
+      <BitMinerLogPopup
+        key={`${activeLogViewer.substrate}|${activeLogViewer.activation}|${activeLogViewer.network}`}
+        substrate={activeLogViewer.substrate}
+        activation={activeLogViewer.activation}
+        network={activeLogViewer.network}
+        running={observations[activeLogViewer.network]?.running === true}
+        onClose={closeBitMinerLogs}
+        onRefreshStatus={() =>
+          refreshStream({ id: activeLogViewer.network })
+        }
+      />
+    )}
+  </main>
+);
 }
 
 export default function EventStorePage() {
