@@ -17,17 +17,18 @@ const TABS = [
 { id: "exile", label: "Exile" },
 ];
 const API_BASE = (
-process.env.NEXT_PUBLIC_QTM_API_BASE ||
-"https://qtm-api.onrender.com"
-).replace(//+$/, "");
-// Module-level persistent caches across client navigation & remounts.
+  process.env.NEXT_PUBLIC_QTM_API_BASE ||
+  "https://qtm-api.onrender.com"
+).replace(/\/+$/, "");
+
+// Module-level persistent cache across client navigation and remounts.
 const qtmSessionCache = {
-substrates: null,
-networks: null,
-selectedSubstrate: "",
-selectedNetwork: "",
-initialized: false,
+  substrates: null,
+  networks: null,
+  selectedSubstrate: "",
+  selectedNetwork: "",
 };
+
 let inflightSubstratesPromise = null;
 let inflightNetworksPromise = null;
 const isRecord = (value) =>
