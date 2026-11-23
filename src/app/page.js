@@ -3,16 +3,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
-// Substrate state lives in the machine-local ~/.qp/substrates and is operated
-// on by the QP runtime. Inside a native shell (for example Tauri) the console
-// calls that runtime directly through IPC: no HTTP. A plain browser cannot
-// reach the local filesystem, so it uses the qtm-api HTTP server.
-// Prefer NEXT_PUBLIC_QTM_API_BASE when set; otherwise fall back to the public
-// qtm-api deployment so a Vercel (or similar) host never routes /wallets to
-// itself.
-// Substrate storage is owned by the server-side QP runtime.
-// substrate_root() is resolved by Rust, never by the browser.
-
 const TABS = [
   { id: "create", label: "Create" },
   { id: "receive", label: "Receive" },
@@ -24,6 +14,8 @@ const API_BASE = (
   process.env.NEXT_PUBLIC_QTM_API_BASE ||
   "https://qtm-api.onrender.com"
 ).replace(/\/+$/, "");
+
+const AUTHORITATIVE_EVENT_STORAGE_KEY = "qtm.authoritativeEventByClip";
 
 const isRecord = (value) =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -119,6 +111,105 @@ function hasContent(value) {
   );
 }
 
+function parsePositiveActivation(value) {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 1 ? value : null;
+  }
+  if (typeof value === "bigint") {
+    return value >= 1n && value <= BigInt(Number.MAX_SAFE_INTEGER)
+      ? Number(value)
+      : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!/^\d+$/.test(trimmed)) return null;
+    const parsed = Number(trimmed);
+    return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : null;
+  }
+  return null;
+}
+
+function unwrapAuthoritativeEventResponse(payload, clip) {
+  if (!isRecord(payload)) return null;
+
+  const candidate = isRecord(payload.event)
+    ? payload.event
+    : isRecord(payload.data?.event)
+      ? payload.data.event
+      : isRecord(payload.heritage) ||
+          isRecord(payload.kind) ||
+          isRecord(payload.record)
+        ? payload
+        : null;
+
+  if (!isRecord(candidate)) return null;
+
+  const responseSubstrate =
+    typeof payload.substrate === "string" && payload.substrate.trim()
+      ? payload.substrate.trim()
+      : typeof candidate.substrate === "string" && candidate.substrate.trim()
+        ? candidate.substrate.trim()
+        : typeof candidate.heritage?.state?.substrate === "string" &&
+            candidate.heritage.state.substrate.trim()
+          ? candidate.heritage.state.substrate.trim()
+          : "";
+
+  if (responseSubstrate && responseSubstrate !== clip.substrate) {
+    throw new Error(
+      `Returned event substrate (${responseSubstrate}) does not match ActiveClip (${clip.substrate}).`
+    );
+  }
+
+  const rawActivation =
+    payload.activation ??
+    candidate.activation ??
+    candidate.heritage?.state?.activations ??
+    candidate.heritage?.state?.activation_count ??
+    candidate.heritage?.state?.activation;
+
+  const parsedActivation =
+    rawActivation !== undefined && rawActivation !== null
+      ? parsePositiveActivation(rawActivation)
+      : null;
+
+  if (parsedActivation !== null && parsedActivation !== clip.activation) {
+    throw new Error(
+      `Returned event activation (${parsedActivation}) does not match ActiveClip (${clip.activation}).`
+    );
+  }
+
+  return candidate;
+}
+
+function persistAuthoritativeEventBinding(binding) {
+  if (typeof window === "undefined" || !binding?.substrate || !binding?.activation) {
+    return;
+  }
+  try {
+    const key = `${binding.substrate}:${binding.activation}`;
+    const raw = window.sessionStorage.getItem(AUTHORITATIVE_EVENT_STORAGE_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    const nextMap = isRecord(map) ? { ...map } : {};
+    if (binding.event && isRecord(binding.event)) {
+      nextMap[key] = {
+        substrate: binding.substrate,
+        activation: binding.activation,
+        event: binding.event,
+        status: binding.status || "ready",
+        error: "",
+      };
+    } else {
+      delete nextMap[key];
+    }
+    window.sessionStorage.setItem(
+      AUTHORITATIVE_EVENT_STORAGE_KEY,
+      JSON.stringify(nextMap)
+    );
+  } catch {
+    // Ignore storage quota or private mode restrictions.
+  }
+}
+
 class RuntimeError extends Error {
   constructor(message, details = {}) {
     super(message);
@@ -130,7 +221,6 @@ class RuntimeError extends Error {
   }
 }
 
-// Native IPC entry point, present only inside a native shell.
 function nativeInvoke() {
   if (typeof window === "undefined" || !isTauri()) return null;
   return invoke;
@@ -144,6 +234,7 @@ const NATIVE_COMMANDS = {
   transit: "qtm_transit",
   exile: "qtm_exile",
   listEvents: "qtm_events",
+  getActivationEvent: "qtm_clip_event",
   submissionValue: "qtm_submission_value",
 };
 
@@ -155,6 +246,11 @@ const API_ROUTES = {
   openSubstrate: ({ name, activation }) => [
     "GET",
     `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/open`,
+  ],
+
+  getActivationEvent: ({ substrate, activation }) => [
+    "GET",
+    `/wallets/${encodeURIComponent(substrate)}/activations/${encodeURIComponent(activation)}/event`,
   ],
 
   receive: ({ name }) => [
@@ -178,9 +274,9 @@ const API_ROUTES = {
   ],
 
   submissionValue: ({ name, activation, network, field }) => [
-  "GET",
-  `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/${encodeURIComponent(field)}`,
-],
+    "GET",
+    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/${encodeURIComponent(field)}`,
+  ],
 };
 
 function directMessage(cause) {
@@ -230,14 +326,12 @@ async function apiRequest(path, options = {}) {
     });
     console.info(
       `[QTM API] HEADERS ${method} ${path} ` +
-      `status=${response.status} ` +
-      `elapsed=${Math.round(performance.now() - startedAt)}ms`
+        `status=${response.status} ` +
+        `elapsed=${Math.round(performance.now() - startedAt)}ms`
     );
   } catch (cause) {
-    console.error(
-      `[QTM API] FETCH FAILED ${method} ${path}`,
-      cause
-    );
+    if (cause?.name === "AbortError") throw cause;
+    console.error(`[QTM API] FETCH FAILED ${method} ${path}`, cause);
     throw new RuntimeError(
       `Could not reach the QTM API at ${API_BASE} while calling ${method} ${path}: ${directMessage(cause)}`,
       { status: 0, url }
@@ -248,14 +342,12 @@ async function apiRequest(path, options = {}) {
     raw = await response.text();
     console.info(
       `[QTM API] BODY COMPLETE ${method} ${path} ` +
-      `bytes=${raw.length} ` +
-      `elapsed=${Math.round(performance.now() - startedAt)}ms`
+        `bytes=${raw.length} ` +
+        `elapsed=${Math.round(performance.now() - startedAt)}ms`
     );
   } catch (cause) {
-    console.error(
-      `[QTM API] BODY FAILED ${method} ${path}`,
-      cause
-    );
+    if (cause?.name === "AbortError") throw cause;
+    console.error(`[QTM API] BODY FAILED ${method} ${path}`, cause);
     throw new RuntimeError(
       `The QTM API connection closed before the response was read (${method} ${path}): ${directMessage(cause)}`,
       {
@@ -282,12 +374,12 @@ async function apiRequest(path, options = {}) {
   }
   console.info(
     `[QTM API] SUCCESS ${method} ${path} ` +
-    `elapsed=${Math.round(performance.now() - startedAt)}ms`
+      `elapsed=${Math.round(performance.now() - startedAt)}ms`
   );
   return data;
 }
 
-async function callRuntime(operation, args = {}) {
+async function callRuntime(operation, args = {}, options = {}) {
   const native = nativeInvoke();
 
   if (native) {
@@ -323,21 +415,16 @@ async function callRuntime(operation, args = {}) {
   return apiRequest(path, {
     method,
     ...(body !== undefined ? { body } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
   });
 }
-
-
 
 function eventMapOf(source) {
   const direct = objectAt(source, ["event", "event_map", "eventMap"]);
   if (direct) return direct;
 
   const frame = objectAt(source, ["frame"]);
-  const frameEvent = objectAt(frame, [
-    "event",
-    "event_map",
-    "eventMap",
-  ]);
+  const frameEvent = objectAt(frame, ["event", "event_map", "eventMap"]);
 
   if (frameEvent) return frameEvent;
 
@@ -363,17 +450,12 @@ function ResultHeading({ eyebrow, title }) {
   );
 }
 
-function KeyValueList({
-  value,
-  emptyText = "No details were returned.",
-}) {
+function KeyValueList({ value, emptyText = "No details were returned." }) {
   const rows = flatten(value);
 
   if (!rows.length) {
     return (
-      <p className="text-xs text-zinc-500 dark:text-zinc-400">
-        {emptyText}
-      </p>
+      <p className="text-xs text-zinc-500 dark:text-zinc-400">{emptyText}</p>
     );
   }
 
@@ -394,12 +476,7 @@ function KeyValueList({
   );
 }
 
-function ResultSection({
-  title,
-  description,
-  value,
-  defaultOpen = false,
-}) {
+function ResultSection({ title, description, value, defaultOpen = false }) {
   const [open, setOpen] = useState(defaultOpen);
 
   return (
@@ -491,13 +568,6 @@ function NumberField({ label, value, onChange, min = 0 }) {
     </label>
   );
 }
-
-// Controlled ordinal selector. Amount (N) defines the coordinate range 1…N;
-// every unit is its own button and button n means ordinal coordinate n.
-// The grid is windowed (only visible rows are mounted) inside a scroll
-// container, so there is no display cutoff and every ordinal stays reachable.
-// When amount changes to N the frame loads persisted events for that range
-// (0..N) and marks every ordinal backed by a persisted transit event with a
 
 const ORDINAL_COLUMNS = 8;
 const ORDINAL_ROW_HEIGHT = 38;
@@ -687,8 +757,6 @@ function recordNameOf(record) {
   return "";
 }
 
-// Same 6:3 (2:1) ratio for every frame; stacks and relaxes the ratio on
-// narrow screens, scrolling inside the frame when content is taller.
 function Frame({ eyebrow, title, tone = "default", actions, children }) {
   const toneClass =
     tone === "sensitive"
@@ -735,8 +803,6 @@ function FrameButton({ onClick, disabled, children }) {
   );
 }
 
-// Copies the exact underlying value (never a formatted label or a shortened
-// display string) to the clipboard.
 async function copyValue(value) {
   if (value === null || value === undefined) return;
 
@@ -747,8 +813,6 @@ async function copyValue(value) {
   }
 }
 
-// Small overlapping-squares copy control. `label` is the accessible name,
-// for example "Copy address".
 function CopyButton({ value, label }) {
   const [copied, setCopied] = useState(false);
   const empty = value === null || value === undefined || value === "";
@@ -811,28 +875,6 @@ function CopyButton({ value, label }) {
   );
 }
 
-// One labelled network value with its own copy control.
-function NetworkValueRow({ label, value, copyLabel }) {
-  return (
-    <div className="min-w-0">
-      <dt className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-        {label}
-      </dt>
-
-      <dd className="mt-0.5 flex items-start gap-2">
-        <span className="min-w-0 flex-1 break-all font-mono text-xs text-zinc-800 dark:text-zinc-200">
-          {value === null || value === undefined || value === ""
-            ? "Not provided"
-            : String(value)}
-        </span>
-
-        <CopyButton value={value} label={copyLabel} />
-      </dd>
-    </div>
-  );
-}
-
-// Display safeguard only; it is not access control.
 function Blurred({ revealed, children }) {
   return (
     <div
@@ -848,509 +890,6 @@ function Blurred({ revealed, children }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Operation 2: Independent Submission Derivation Results
-// ---------------------------------------------------------------------------
-function DeriveResults({ result }) {
-  const [revealSensitive, setRevealSensitive] = useState(false);
-  const [privateKey, setPrivateKey] = useState("");
-  const [privateKeyLoading, setPrivateKeyLoading] = useState(false);
-  const [privateKeyError, setPrivateKeyError] = useState("");
-
-  async function revealPrivateKey() {
-    if (privateKey) {
-      setPrivateKey("");
-      return;
-    }
-
-    setPrivateKeyLoading(true);
-    setPrivateKeyError("");
-
-    try {
-      const value = await callRuntime("submissionValue", {
-        name: result.substrate,
-        activation: result.activation,
-        submission: result.submission,
-        network: result.network,
-        field: "xpriv",
-      });
-
-      setPrivateKey(
-        typeof value === "string"
-          ? value
-          : value?.response_text ?? JSON.stringify(value)
-      );
-    } catch (error) {
-      setPrivateKeyError(
-        error instanceof Error
-          ? error.message
-          : "Unable to retrieve the private extended key."
-      );
-    } finally {
-      setPrivateKeyLoading(false);
-    }
-  }
-
-  return (
-    <div className="space-y-3">
-      <section className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-        <h3 className="text-xs font-semibold">Submission derivation identity</h3>
-        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-          Persisted independently under activation {result?.activation}, submission {result?.submission}, network {result?.network}.
-        </p>
-        <div className="mt-3">
-          <KeyValueList
-            value={{
-              substrate: result?.substrate,
-              activation: result?.activation,
-              submission: result?.submission,
-              network: result?.network,
-              derivation_path: result?.derivation?.derivation_path,
-              directory: result?.derivation?.directory,
-              authorization_state: result?.derivation?.authorization_state,
-              settlement_state: result?.derivation?.settlement_state,
-            }}
-          />
-        </div>
-      </section>
-
-      <Frame
-        eyebrow="Derived Values · Sensitive"
-        title="Network Key Material & Address"
-        tone="sensitive"
-        actions={
-          <FrameButton
-            onClick={() => setRevealSensitive((current) => !current)}
-          >
-            {revealSensitive ? "Hide values" : "Reveal values"}
-          </FrameButton>
-        }
-      >
-        <div className="space-y-3">
-          <KeyValueList
-            value={{
-              master_fingerprint: result?.derivations?.fingerprint,
-              address: result?.derivations?.address,
-            }}
-          />
-
-          {revealSensitive ? (
-            <div className="space-y-3 border-t border-amber-200 pt-3 dark:border-amber-900">
-              <ResultSection
-                title="Address"
-                value={result?.derivations?.address}
-                defaultOpen
-              />
-
-              <ResultSection
-                title="ScriptPubKey"
-                value={result?.derivations?.scriptpubkey}
-                defaultOpen
-              />
-
-              <ResultSection
-                title="Master fingerprint"
-                value={result?.derivations?.fingerprint}
-              />
-
-              <ResultSection
-                title="Xpub"
-                value={result?.derivations?.xpub}
-              />
-
-              <ResultSection
-                title="Zpub"
-                value={result?.derivations?.zpub}
-              />
-
-              <div className="space-y-2 rounded-lg border border-amber-300 p-3 dark:border-amber-800">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-xs font-semibold">
-                    Private extended key · Xpriv
-                  </p>
-
-                  <FrameButton
-                    onClick={revealPrivateKey}
-                    disabled={privateKeyLoading}
-                  >
-                    {privateKeyLoading
-                      ? "Loading…"
-                      : privateKey
-                        ? "Clear"
-                        : "Reveal Xpriv"}
-                  </FrameButton>
-                </div>
-
-                {privateKeyError && (
-                  <p role="alert" className="text-xs text-red-600">
-                    {privateKeyError}
-                  </p>
-                )}
-
-                {privateKey && (
-                  <p className="break-all rounded-lg bg-amber-100 p-2 font-mono text-xs text-amber-950 dark:bg-amber-950 dark:text-amber-100">
-                    {privateKey}
-                  </p>
-                )}
-
-                {!privateKey && !privateKeyError && (
-                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                    Xpriv is fetched on demand only when explicitly revealed.
-                  </p>
-                )}
-              </div>
-            </div>
-          ) : (
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              Full scriptPubKey and extended keys are hidden. Reveal to inspect all derived values for this submission.
-            </p>
-          )}
-        </div>
-      </Frame>
-
-      <ResultSection
-        title="Complete derivation response"
-        value={result?.derivation}
-      />
-    </div>
-  );
-}
-
-// Frame 4 · Network inputs. Fed by result.receive.derivation (metadata sent
-// by the Receive response). Every supported network discovered for the
-// activation gets its own section; values are loaded from the persisted
-// activation.
-function ReceiveNetworkDerivations({ derivation }) {
-  const [networkValues, setNetworkValues] = useState({});
-  const [privateKeys, setPrivateKeys] = useState({});
-  const [loading, setLoading] = useState(false);
-  const [privateKeyLoading, setPrivateKeyLoading] = useState({});
-  const [error, setError] = useState({});
-  const [privateKeyError, setPrivateKeyError] = useState({});
-
-  useEffect(() => {
-    let active = true;
-
-    async function loadNetworkValues() {
-      const networks = Array.isArray(derivation?.networks)
-        ? derivation.networks
-        : [];
-
-      if (
-        !derivation?.substrate ||
-        !Number.isSafeInteger(Number(derivation.activation)) ||
-        !networks.length
-      ) {
-        setNetworkValues({});
-        return;
-      }
-
-      setLoading(true);
-      setError({});
-
-      try {
-        const fields = [
-          "fingerprint",
-          "scriptpubkey",
-          "xpub",
-          "zpub",
-          "address",
-        ];
-
-        const failures = {};
-
-        const entries = await Promise.all(
-          networks
-            .filter(
-              (network) =>
-                network.supported === true &&
-                network.available !== false &&
-                typeof network.network === "string"
-            )
-            .map(async (network) => {
-              try {
-                const values = await Promise.all(
-                  fields.map(async (field) => {
-                    const response = await callRuntime("submissionValue", {
-                      name: derivation.substrate,
-                      activation: Number(derivation.activation),
-                      network: network.network,
-                      field,
-                    });
-
-                    return [
-                      field,
-                      typeof response === "string"
-                        ? response
-                        : response?.response_text ??
-                          JSON.stringify(response),
-                    ];
-                  })
-                );
-
-                return [
-                  network.network,
-                  Object.fromEntries(values),
-                ];
-              } catch (err) {
-                failures[network.network] =
-                  err instanceof Error
-                    ? err.message
-                    : "Unable to retrieve activation network values.";
-
-                return null;
-              }
-            })
-        );
-
-        if (active) {
-          setNetworkValues(
-            Object.fromEntries(entries.filter(Boolean))
-          );
-          setError(failures);
-        }
-      } catch (err) {
-        if (active) {
-          setError({
-            general:
-              err instanceof Error
-                ? err.message
-                : "Unable to retrieve activation network values.",
-          });
-        }
-      } finally {
-        if (active) setLoading(false);
-      }
-    }
-
-    loadNetworkValues();
-
-    return () => {
-      active = false;
-    };
-  }, [derivation]);
-
-  async function revealPrivateKey(networkId) {
-    if (privateKeys[networkId]) {
-      setPrivateKeys((current) => {
-        const next = { ...current };
-        delete next[networkId];
-        return next;
-      });
-      return;
-    }
-
-    setPrivateKeyLoading((current) => ({
-      ...current,
-      [networkId]: true,
-    }));
-
-    setPrivateKeyError((current) => ({
-      ...current,
-      [networkId]: "",
-    }));
-
-    try {
-      const response = await callRuntime("submissionValue", {
-        name: derivation.substrate,
-        activation: Number(derivation.activation),
-        network: networkId,
-        field: "xpriv",
-      });
-
-      const value =
-        typeof response === "string"
-          ? response
-          : response?.response_text ?? JSON.stringify(response);
-
-      setPrivateKeys((current) => ({
-        ...current,
-        [networkId]: value,
-      }));
-    } catch (err) {
-      setPrivateKeyError((current) => ({
-        ...current,
-        [networkId]:
-          err instanceof Error
-            ? err.message
-            : "Unable to retrieve the private extended key.",
-      }));
-    } finally {
-      setPrivateKeyLoading((current) => ({
-        ...current,
-        [networkId]: false,
-      }));
-    }
-  }
-
-  if (!derivation) return null;
-
-  const networks = Array.isArray(derivation.networks)
-    ? derivation.networks
-    : [];
-
-  return (
-    <section className="min-w-0 overflow-hidden rounded-xl border border-emerald-300 bg-white dark:border-emerald-800 dark:bg-zinc-900">
-      <div className="border-b border-emerald-200 px-3 py-2 dark:border-emerald-900">
-        <p className="text-[10px] font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-400">
-          Frame 4 · Network inputs
-        </p>
-
-        <h3 className="text-xs font-semibold">
-          Activation {derivation.activation}
-        </h3>
-
-        <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-          Network values are retrieved from the persisted activation.
-        </p>
-      </div>
-
-      <div className="space-y-3 p-3">
-        {loading && (
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            Loading persisted network values…
-          </p>
-        )}
-
-        {error.general && (
-          <p
-            role="alert"
-            className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
-          >
-            {error.general}
-          </p>
-        )}
-
-        {networks.length === 0 ? (
-          <p className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-3 text-xs text-zinc-500 dark:border-emerald-900 dark:bg-emerald-950/20 dark:text-zinc-400">
-            No network derivations were returned for this activation.
-          </p>
-        ) : (
-          networks.map((network) => {
-            const networkId = network.network;
-            const networkName = network.name || networkId;
-            const values = networkValues[networkId];
-
-            return (
-              <section
-                key={networkId}
-                className="space-y-3 rounded-lg border border-emerald-200 p-3 dark:border-emerald-900"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h4 className="text-xs font-semibold">{networkName}</h4>
-
-                  <span className="rounded-md border border-emerald-200 px-2 py-1 text-[10px] font-medium dark:border-emerald-900">
-                    {network.supported ? "Supported" : "Unsupported"}
-                  </span>
-                </div>
-
-                {network.supported === false ? (
-                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                    {network.message ||
-                      "Network derivation is not supported."}
-                  </p>
-                ) : values ? (
-                  <>
-                    <dl className="grid grid-cols-1 gap-3">
-                      <NetworkValueRow
-                        label="Master fingerprint"
-                        value={values.fingerprint}
-                        copyLabel={`Copy ${networkName} master fingerprint`}
-                      />
-
-                      <NetworkValueRow
-                        label="ScriptPubKey"
-                        value={values.scriptpubkey}
-                        copyLabel={`Copy ${networkName} scriptPubKey`}
-                      />
-
-                      <NetworkValueRow
-                        label="Xpub"
-                        value={values.xpub}
-                        copyLabel={`Copy ${networkName} xpub`}
-                      />
-
-                      <NetworkValueRow
-                        label="Zpub"
-                        value={values.zpub}
-                        copyLabel={`Copy ${networkName} zpub`}
-                      />
-
-                      <NetworkValueRow
-                        label="Address"
-                        value={values.address}
-                        copyLabel={`Copy ${networkName} address`}
-                      />
-                    </dl>
-
-                    <div className="space-y-2 border-t border-emerald-200 pt-3 dark:border-emerald-900">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <p className="text-xs font-semibold">
-                          Private extended key · Xpriv
-                        </p>
-
-                        <FrameButton
-                          onClick={() => revealPrivateKey(networkId)}
-                          disabled={Boolean(privateKeyLoading[networkId])}
-                        >
-                          {privateKeyLoading[networkId]
-                            ? "Loading…"
-                            : privateKeys[networkId]
-                              ? "Hide Xpriv"
-                              : "Reveal Xpriv"}
-                        </FrameButton>
-                      </div>
-
-                      {privateKeyError[networkId] && (
-                        <p role="alert" className="text-xs text-red-600">
-                          {privateKeyError[networkId]}
-                        </p>
-                      )}
-
-                      {privateKeys[networkId] ? (
-                        <div className="flex items-start gap-2">
-                          <p className="min-w-0 flex-1 break-all rounded-lg bg-amber-100 p-2 font-mono text-xs text-amber-950 dark:bg-amber-950 dark:text-amber-100">
-                            {privateKeys[networkId]}
-                          </p>
-
-                          <CopyButton
-                            value={privateKeys[networkId]}
-                            label={`Copy ${networkName} xpriv`}
-                          />
-                        </div>
-                      ) : (
-                        !privateKeyError[networkId] && (
-                          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                            Retrieved only when explicitly revealed.
-                          </p>
-                        )
-                      )}
-                    </div>
-                  </>
-                ) : error[networkId] ? (
-                  <p role="alert" className="text-xs text-red-600">
-                    {error[networkId]}
-                  </p>
-                ) : (
-                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                    {loading
-                      ? "Loading network values…"
-                      : "No persisted values were returned."}
-                  </p>
-                )}
-              </section>
-            );
-          })
-        )}
-      </div>
-    </section>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Operation 3: Activation-Scoped Receive Results
-// ---------------------------------------------------------------------------
-
 function ReceiveResults({ result }) {
   const [revealReceive, setRevealReceive] = useState(false);
 
@@ -1364,9 +903,7 @@ function ReceiveResults({ result }) {
   const depth = objectAt(event, ["depth"]);
   const runtime = objectAt(event, ["runtime"]);
 
-  const networks = Array.isArray(receive?.networks)
-    ? receive.networks
-    : [];
+  const networks = Array.isArray(receive?.networks) ? receive.networks : [];
 
   const identity = {
     substrate: receive?.substrate ?? result?.substrate,
@@ -1389,13 +926,11 @@ function ReceiveResults({ result }) {
   return (
     <div className="space-y-3">
       <section className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-        <h3 className="text-xs font-semibold">
-          Receive event identity
-        </h3>
+        <h3 className="text-xs font-semibold">Receive event identity</h3>
 
         <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-          Networks are taken from the observation pipelines associated
-          with the received post-state activation.
+          Networks are taken from the observation pipelines associated with the
+          received post-state activation.
         </p>
 
         <div className="mt-3">
@@ -1477,10 +1012,7 @@ function ReceiveResults({ result }) {
         )}
       </Frame>
 
-      <ResultSection
-        title="Complete Receive API response"
-        value={receive}
-      />
+      <ResultSection title="Complete Receive API response" value={receive} />
     </div>
   );
 }
@@ -1570,11 +1102,7 @@ function ExileResults({ result, substrate }) {
 
   return (
     <div className="space-y-3">
-      <ResultSection
-        title="Substrate"
-        value={{ substrate }}
-        defaultOpen
-      />
+      <ResultSection title="Substrate" value={{ substrate }} defaultOpen />
 
       <ResultSection
         title="Stored QTM"
@@ -1590,7 +1118,7 @@ function ExileResults({ result, substrate }) {
             {depth.path || "Depth path not returned"}
           </p>
 
-          <p class="mt-2 text-xs text-zinc-600 dark:text-zinc-300">
+          <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-300">
             {objects.length} retained{" "}
             {objects.length === 1 ? "object" : "objects"} returned by the API.
           </p>
@@ -1619,7 +1147,6 @@ function ResultCard({ result, tab, network, path, substrate }) {
 
   return (
     <div className="mt-4 space-y-3">
-
       {tab === "receive" && <ReceiveResults result={result} />}
 
       {tab === "transit" && (
@@ -1637,16 +1164,9 @@ function ResultCard({ result, tab, network, path, substrate }) {
 
       {tab === "create" && (
         <section className="space-y-3">
-          <ResultHeading
-            eyebrow="Create result"
-            title="Substrate created"
-          />
+          <ResultHeading eyebrow="Create result" title="Substrate created" />
 
-          <ResultSection
-            title="Created substrate"
-            value={result}
-            defaultOpen
-          />
+          <ResultSection title="Created substrate" value={result} defaultOpen />
         </section>
       )}
     </div>
@@ -1682,13 +1202,10 @@ export default function Home() {
   const [external, setExternal] = useState("0");
   const [activation, setActivation] = useState("1");
 
-  
-  // Activation-scoped Receive state
   const [receiveAmount, setReceiveAmount] = useState("1");
   const [receiveOrdinal, setReceiveOrdinal] = useState("1");
   const [receiveFlow, setReceiveFlow] = useState("receive");
 
-  // Receive persistence state (amount-range transit events)
   const [receiveEvents, setReceiveEvents] = useState([]);
   const [receiveEventsLoading, setReceiveEventsLoading] = useState(false);
   const [receiveEventsError, setReceiveEventsError] = useState("");
@@ -1697,6 +1214,14 @@ export default function Home() {
   const [exileRecords, setExileRecords] = useState([]);
   const [exileRecordsLoading, setExileRecordsLoading] = useState(false);
   const [exileRecordsError, setExileRecordsError] = useState("");
+
+  const [authoritativeEventState, setAuthoritativeEventState] = useState({
+    substrate: "",
+    activation: null,
+    event: null,
+    status: "idle",
+    error: "",
+  });
 
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
@@ -1716,6 +1241,7 @@ export default function Home() {
   const requestedSubstrateRef = useRef(null);
   const listRequestRef = useRef(0);
   const exileRequestRef = useRef(0);
+  const authoritativeEventRequestRef = useRef(0);
   const selectedRef = useRef("");
   const [selectionReady, setSelectionReady] = useState(false);
 
@@ -1740,6 +1266,125 @@ export default function Home() {
       `${url.pathname}${url.search}${url.hash}`
     );
   }, [selectedSubstrate, selectionReady]);
+
+  const activeClip = useMemo(() => {
+    const sub =
+      typeof selectedSubstrate === "string" ? selectedSubstrate.trim() : "";
+    const act = parsePositiveActivation(activation);
+    if (!sub || act === null) return null;
+    return Object.freeze({
+      substrate: sub,
+      activation: act,
+    });
+  }, [selectedSubstrate, activation]);
+
+  useEffect(() => {
+    const requestId = ++authoritativeEventRequestRef.current;
+    const controller = new AbortController();
+
+    if (!activeClip) {
+      setAuthoritativeEventState({
+        substrate: "",
+        activation: null,
+        event: null,
+        status: "idle",
+        error: "",
+      });
+      return () => controller.abort();
+    }
+
+    const targetClip = activeClip;
+
+    setAuthoritativeEventState({
+      substrate: targetClip.substrate,
+      activation: targetClip.activation,
+      event: null,
+      status: "loading",
+      error: "",
+    });
+    persistAuthoritativeEventBinding({
+      substrate: targetClip.substrate,
+      activation: targetClip.activation,
+      event: null,
+      status: "loading",
+      error: "",
+    });
+
+    void (async () => {
+      try {
+        const payload = await callRuntime(
+          "getActivationEvent",
+          {
+            substrate: targetClip.substrate,
+            activation: targetClip.activation,
+            clip: targetClip,
+          },
+          { signal: controller.signal }
+        );
+
+        if (requestId !== authoritativeEventRequestRef.current) return;
+
+        const resolvedEvent = unwrapAuthoritativeEventResponse(
+          payload,
+          targetClip
+        );
+
+        if (!resolvedEvent) {
+          throw new Error(
+            `No authoritative persisted event returned for ${targetClip.substrate} activation ${targetClip.activation}.`
+          );
+        }
+
+        const nextBinding = {
+          substrate: targetClip.substrate,
+          activation: targetClip.activation,
+          event: resolvedEvent,
+          status: "ready",
+          error: "",
+        };
+
+        setAuthoritativeEventState(nextBinding);
+        persistAuthoritativeEventBinding(nextBinding);
+      } catch (err) {
+        if (
+          err?.name === "AbortError" ||
+          requestId !== authoritativeEventRequestRef.current
+        ) {
+          return;
+        }
+        const message =
+          err instanceof Error && err.message
+            ? err.message
+            : "Unable to load authoritative persisted event.";
+        const nextBinding = {
+          substrate: targetClip.substrate,
+          activation: targetClip.activation,
+          event: null,
+          status: "error",
+          error: message,
+        };
+        setAuthoritativeEventState(nextBinding);
+        persistAuthoritativeEventBinding(nextBinding);
+      }
+    })();
+
+    return () => {
+      controller.abort();
+    };
+  }, [activeClip]);
+
+  const acceptedAuthoritativeEvent =
+    activeClip &&
+    authoritativeEventState.substrate === activeClip.substrate &&
+    authoritativeEventState.activation === activeClip.activation
+      ? authoritativeEventState
+      : {
+          substrate: activeClip?.substrate ?? "",
+          activation: activeClip?.activation ?? null,
+          event: null,
+          status: activeClip ? "loading" : "idle",
+          error: "",
+        };
 
   const loadSubstrates = useCallback(async (preferred = "") => {
     const requestId = ++listRequestRef.current;
@@ -1786,9 +1431,7 @@ export default function Home() {
       if (requestId !== listRequestRef.current) return;
 
       setListError(
-        err instanceof Error
-          ? err.message
-          : "Unable to load substrates."
+        err instanceof Error ? err.message : "Unable to load substrates."
       );
     } finally {
       if (requestId === listRequestRef.current) {
@@ -1846,9 +1489,7 @@ export default function Home() {
       }
     } catch (err) {
       setNetworkError(
-        err instanceof Error
-          ? err.message
-          : "Unable to load networks."
+        err instanceof Error ? err.message : "Unable to load networks."
       );
     } finally {
       setNetworkLoading(false);
@@ -1917,8 +1558,6 @@ export default function Home() {
     }
   }, [selectedSubstrate]);
 
-  // Receive persistence loader — uses existing listEvents / GET /wallets/:name/events.
-  // Only kind === "transit" events whose activation falls inside 1..amount are kept.
   const loadReceiveEvents = useCallback(async () => {
     const substrate = selectedSubstrate;
     const amount = Number(receiveAmount);
@@ -1928,11 +1567,7 @@ export default function Home() {
       requestId === receiveEventsRequestRef.current &&
       selectedRef.current === substrate;
 
-    if (
-      !substrate ||
-      !Number.isSafeInteger(amount) ||
-      amount <= 0
-    ) {
+    if (!substrate || !Number.isSafeInteger(amount) || amount <= 0) {
       setReceiveEvents([]);
       setReceiveEventsLoading(false);
       setReceiveEventsError("");
@@ -1968,13 +1603,13 @@ export default function Home() {
 
       setReceiveEvents(
         records.filter((record) => {
-          const activation = Number(record.activation);
+          const recActivation = Number(record.activation);
 
           return (
             record.kind === "transit" &&
-            Number.isSafeInteger(activation) &&
-            activation >= 1 &&
-            activation <= amount
+            Number.isSafeInteger(recActivation) &&
+            recActivation >= 1 &&
+            recActivation <= amount
           );
         })
       );
@@ -2008,7 +1643,6 @@ export default function Home() {
     }
   }, [tab, selectedSubstrate, loadExileRecords]);
 
-  // Load (or clear) the amount-range transit events for the Receive tab.
   useEffect(() => {
     if (tab === "receive" && selectedSubstrate) {
       loadReceiveEvents();
@@ -2019,8 +1653,7 @@ export default function Home() {
   }, [tab, selectedSubstrate, receiveAmount, loadReceiveEvents]);
 
   const currentNetwork = useMemo(
-    () =>
-      networks.find((network) => network.id === selectedNetwork) ?? null,
+    () => networks.find((network) => network.id === selectedNetwork) ?? null,
     [networks, selectedNetwork]
   );
 
@@ -2075,9 +1708,6 @@ export default function Home() {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // 3. Activation-Scoped Receive Handler (POST /wallets/:name/receive)
-  // -------------------------------------------------------------------------
   async function handleReceiveExecution() {
     const amount = Number(receiveAmount);
 
@@ -2099,7 +1729,7 @@ export default function Home() {
       throw new Error("Select a valid ordinal within the receive amount.");
     }
 
-      const receive = await callRuntime("receive", {
+    const receive = await callRuntime("receive", {
       name: selectedSubstrate,
       request: {
         amount,
@@ -2119,7 +1749,7 @@ export default function Home() {
       );
     }
 
-      setResult({
+    setResult({
       receive,
       requested_amount: amount,
       ordinal,
@@ -2128,904 +1758,871 @@ export default function Home() {
     });
   }
 
-  
-async function handleSubmit(event) {
-  event.preventDefault();
-  setError("");
-  setResult(null);
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setError("");
+    setResult(null);
 
-  if (tab !== "create" && !selectedSubstrate) {
-    setError("Select a substrate before performing this operation.");
-    return;
-  }
+    if (tab !== "create" && !selectedSubstrate) {
+      setError("Select a substrate before performing this operation.");
+      return;
+    }
 
-  setLoading(true);
+    setLoading(true);
 
-  try {
-    if (tab === "create") {
-      const substrateName = name.trim();
+    try {
+      if (tab === "create") {
+        const substrateName = name.trim();
 
-      if (!substrateName) {
-        throw new Error("Enter a substrate name.");
-      }
-
-      if (!/^[A-Za-z0-9_-]{1,64}$/.test(substrateName)) {
-        throw new Error(
-          "Substrate name must be 1-64 ASCII letters, digits, hyphens, or underscores."
-        );
-      }
-
-      let payload;
-
-      if (seedSource === "bip39") {
-        const mnemonic = phrase.trim();
-
-        if (!mnemonic) {
-          throw new Error("Enter a BIP39 mnemonic phrase.");
+        if (!substrateName) {
+          throw new Error("Enter a substrate name.");
         }
 
-        if (!language) {
-          throw new Error("Select a BIP39 language.");
-        }
-
-        payload = {
-          name: substrateName,
-          seed_source: "bip39",
-          phrase: mnemonic,
-          language,
-          passphrase,
-        };
-      } else if (seedSource === "persistent") {
-        const parsed = indices.split(",").map((item) => item.trim());
-
-        if (
-          parsed.length !== 12 ||
-          parsed.some(
-            (item) =>
-              item === "" ||
-              !/^\d+$/.test(item) ||
-              !Number.isSafeInteger(Number(item)) ||
-              Number(item) < 0 ||
-              Number(item) > 2047
-          )
-        ) {
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(substrateName)) {
           throw new Error(
-            "Enter exactly 12 indices, each an integer from 0 to 2047."
+            "Substrate name must be 1-64 ASCII letters, digits, hyphens, or underscores."
           );
         }
 
-        payload = {
-          name: substrateName,
-          seed_source: "persistent",
-          indices: parsed.map(Number).join(","),
-          entropy: entropy.trim() || substrateName,
-        };
-      } else {
-        throw new Error("Select a valid substrate seed source.");
-      }
+        let payload;
 
-      if (!nativeInvoke()) {
-        const confirmed = window.confirm(
-          `You are creating "${substrateName}" in browser mode.\n\n` +
-            "The seed material will be sent to the configured QTM API:\n" +
-            `${API_BASE}\n\n` +
-            "Continue only if you trust this server."
-        );
+        if (seedSource === "bip39") {
+          const mnemonic = phrase.trim();
 
-        if (!confirmed) {
-          return;
-        }
-      }
-
-      const data = await callRuntime("createSubstrate", {
-        request: payload,
-      });
-
-      setResult(data);
-      setName("");
-      setEntropy("");
-      setPhrase("");
-      setPassphrase("");
-
-      void loadSubstrates(substrateName);
-      return;
-    }
-
-    if (tab === "receive") {
-      await handleReceiveExecution();
-      return;
-    }
-
-    if (tab === "transit") {
-      if (!selectedNetwork) {
-        throw new Error("Select a network before transit.");
-      }
-
-      const numeric = {
-        purpose: Number(purpose),
-        coin: Number(coin),
-        account: Number(account),
-        change: Number(change),
-        external: Number(external),
-        activation: Number(activation),
-      };
-
-      for (const [key, value] of Object.entries(numeric)) {
-        if (!Number.isSafeInteger(value) || value < 0) {
-          throw new Error(
-            `${key} must be a non-negative safe integer.`
-          );
-        }
-      }
-
-      const data = await callRuntime("transit", {
-        name: selectedSubstrate,
-        request: {
-          network: selectedNetwork,
-          path: path.trim() || undefined,
-          ...numeric,
-        },
-      });
-
-      setResult(data);
-      return;
-    }
-
-    if (tab === "exile") {
-      const data = await callRuntime("exile", {
-        name: selectedSubstrate,
-      });
-
-      setResult(data);
-
-      await loadExileRecords();
-    }
-  } catch (err) {
-    setError(
-      err instanceof Error ? err.message : "Something went wrong."
-    );
-  } finally {
-    setLoading(false);
-  }
-}
-
-const substrateRequired = tab !== "create";
-
-const activeClip =
-  selectedSubstrate &&
-  Number.isSafeInteger(Number(activation)) &&
-  Number(activation) >= 1
-    ? {
-        substrate: selectedSubstrate,
-        activation: Number(activation),
-      }
-    : null;
-
-const linkWithSubstrate = (href) => {
-  if (!selectedSubstrate) return href;
-
-  const separator = href.includes("?") ? "&" : "?";
-
-  return `${href}${separator}substrate=${encodeURIComponent(
-    selectedSubstrate
-  )}`;
-};
-
-const eventStoreHref = activeClip
-  ? `/eventstore?substrate=${encodeURIComponent(
-      activeClip.substrate
-    )}&activation=${encodeURIComponent(
-      String(activeClip.activation)
-    )}`
-  : "";
-
-  
-    
-return (
-  <div
-    style={{
-      fontFamily:
-        '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif',
-    }}
-    className="min-h-screen w-full bg-zinc-50 px-1.5 py-2 text-[13px] text-zinc-900 sm:px-2 sm:py-3 dark:bg-zinc-950 dark:text-zinc-100"
-  >
-    <style jsx global>{`
-      html {
-        font-size: 14px;
-      }
-
-      * {
-        min-width: 0;
-      }
-
-      body {
-        margin: 0;
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
-          "Helvetica Neue", Arial, sans-serif;
-      }
-
-      a,
-      button,
-      input,
-      select,
-      textarea {
-        font: inherit;
-      }
-    `}</style>
-
-    <main className="mx-auto w-full max-w-none">
-      <header className="mb-3">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
-          QuantPerm · QTM
-        </p>
-
-        <h1 className="mt-1.5 text-lg font-semibold tracking-tight text-zinc-950 sm:text-xl dark:text-zinc-50">
-          QTM substrate console
-        </h1>
-
-        <p className="mt-1 text-xs leading-5 text-zinc-600 dark:text-zinc-400">
-          Create and inspect persistent substrates, recover persisted
-          ordinals, derive submission keys, and execute receive, transit, or
-          exile operations.
-        </p>
-      </header>
-
-      <section className="mb-3 rounded-xl border border-zinc-200 bg-white p-2.5 shadow-sm sm:p-3 dark:border-zinc-800 dark:bg-zinc-900">
-        <div className="mb-2 flex items-center justify-between gap-3">
-          <label htmlFor="substrate" className="text-xs font-semibold">
-            Active substrate
-          </label>
-
-          <button
-            type="button"
-            onClick={() => loadSubstrates()}
-            disabled={listLoading}
-            className="rounded-lg px-2.5 py-1.5 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-800"
-          >
-            {listLoading ? "Refreshing…" : "Refresh"}
-          </button>
-        </div>
-
-        <select
-          id="substrate"
-          value={selectedSubstrate}
-          onChange={(event) =>
-            handleSubstrateChange(event.target.value)
+          if (!mnemonic) {
+            throw new Error("Enter a BIP39 mnemonic phrase.");
           }
-          disabled={listLoading || loading || !substrates.length}
-          className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-950 dark:focus:ring-zinc-800"
-        >
-          {!substrates.length && (
-            <option value="">
-              {listLoading
-                ? "Loading substrates…"
-                : "No substrates available"}
-            </option>
-          )}
 
-          {substrates.map((substrate) => (
-            <option key={substrate.name} value={substrate.name}>
-              {substrate.name} — dimension{" "}
-              {substrate.dimension ?? "not returned"} · activations{" "}
-              {substrate.activations ?? "not returned"}
-            </option>
-          ))}
-        </select>
+          if (!language) {
+            throw new Error("Select a BIP39 language.");
+          }
 
-        {selectedSubstrate && (
-          <div className="mt-3 space-y-2">
-            <div className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5 dark:border-zinc-800 dark:bg-zinc-950">
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                State context
-              </p>
+          payload = {
+            name: substrateName,
+            seed_source: "bip39",
+            phrase: mnemonic,
+            language,
+            passphrase,
+          };
+        } else if (seedSource === "persistent") {
+          const parsed = indices.split(",").map((item) => item.trim());
 
-              <p className="mt-1 break-all font-mono text-xs font-semibold">
-                {selectedSubstrate}
-              </p>
+          if (
+            parsed.length !== 12 ||
+            parsed.some(
+              (item) =>
+                item === "" ||
+                !/^\d+$/.test(item) ||
+                !Number.isSafeInteger(Number(item)) ||
+                Number(item) < 0 ||
+                Number(item) > 2047
+            )
+          ) {
+            throw new Error(
+              "Enter exactly 12 indices, each an integer from 0 to 2047."
+            );
+          }
 
-              <p className="mt-1 text-xs leading-4 text-zinc-500 dark:text-zinc-400">
-                Open, Receive, Transit, and Exile operate against this
-                substrate independently. Derivation is available inside
-                Receive and runs as a separate operation.
-              </p>
-            </div>
+          payload = {
+            name: substrateName,
+            seed_source: "persistent",
+            indices: parsed.map(Number).join(","),
+            entropy: entropy.trim() || substrateName,
+          };
+        } else {
+          throw new Error("Select a valid substrate seed source.");
+        }
 
-            <ResultSection
-              title="Selected substrate details"
-              description="Fields returned by the API for this substrate."
-              value={
-                substrates.find(
-                  (item) => item.name === selectedSubstrate
-                ) ?? {}
-              }
-            />
+        if (!nativeInvoke()) {
+          const confirmed = window.confirm(
+            `You are creating "${substrateName}" in browser mode.\n\n` +
+              "The seed material will be sent to the configured QTM API:\n" +
+              `${API_BASE}\n\n` +
+              "Continue only if you trust this server."
+          );
+
+          if (!confirmed) {
+            return;
+          }
+        }
+
+        const data = await callRuntime("createSubstrate", {
+          request: payload,
+        });
+
+        setResult(data);
+        setName("");
+        setEntropy("");
+        setPhrase("");
+        setPassphrase("");
+
+        void loadSubstrates(substrateName);
+        return;
+      }
+
+      if (tab === "receive") {
+        await handleReceiveExecution();
+        return;
+      }
+
+      if (tab === "transit") {
+        if (!selectedNetwork) {
+          throw new Error("Select a network before transit.");
+        }
+
+        const numeric = {
+          purpose: Number(purpose),
+          coin: Number(coin),
+          account: Number(account),
+          change: Number(change),
+          external: Number(external),
+          activation: Number(activation),
+        };
+
+        for (const [key, value] of Object.entries(numeric)) {
+          if (!Number.isSafeInteger(value) || value < 0) {
+            throw new Error(`${key} must be a non-negative safe integer.`);
+          }
+        }
+
+        const data = await callRuntime("transit", {
+          name: selectedSubstrate,
+          request: {
+            network: selectedNetwork,
+            path: path.trim() || undefined,
+            ...numeric,
+          },
+        });
+
+        setResult(data);
+        return;
+      }
+
+      if (tab === "exile") {
+        const data = await callRuntime("exile", {
+          name: selectedSubstrate,
+        });
+
+        setResult(data);
+
+        await loadExileRecords();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const substrateRequired = tab !== "create";
+
+  const linkWithSubstrate = (href) => {
+    if (!selectedSubstrate) return href;
+
+    const separator = href.includes("?") ? "&" : "?";
+
+    return `${href}${separator}substrate=${encodeURIComponent(
+      selectedSubstrate
+    )}`;
+  };
+
+  const eventStoreHref = activeClip
+    ? `/eventstore?substrate=${encodeURIComponent(
+        activeClip.substrate
+      )}&activation=${encodeURIComponent(String(activeClip.activation))}`
+    : "";
+
+  return (
+    <div
+      style={{
+        fontFamily:
+          '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif',
+      }}
+      className="min-h-screen w-full bg-zinc-50 px-1.5 py-2 text-[13px] text-zinc-900 sm:px-2 sm:py-3 dark:bg-zinc-950 dark:text-zinc-100"
+    >
+      <style jsx global>{`
+        html {
+          font-size: 14px;
+        }
+
+        * {
+          min-width: 0;
+        }
+
+        body {
+          margin: 0;
+          font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+            "Helvetica Neue", Arial, sans-serif;
+        }
+
+        a,
+        button,
+        input,
+        select,
+        textarea {
+          font: inherit;
+        }
+      `}</style>
+
+      <main className="mx-auto w-full max-w-none">
+        <header className="mb-3">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+            QuantPerm · QTM
+          </p>
+
+          <h1 className="mt-1.5 text-lg font-semibold tracking-tight text-zinc-950 sm:text-xl dark:text-zinc-50">
+            QTM substrate console
+          </h1>
+
+          <p className="mt-1 text-xs leading-5 text-zinc-600 dark:text-zinc-400">
+            Create and inspect persistent substrates, recover persisted
+            ordinals, derive submission keys, and execute receive, transit, or
+            exile operations.
+          </p>
+        </header>
+
+        <section className="mb-3 rounded-xl border border-zinc-200 bg-white p-2.5 shadow-sm sm:p-3 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <label htmlFor="substrate" className="text-xs font-semibold">
+              Active substrate
+            </label>
+
+            <button
+              type="button"
+              onClick={() => loadSubstrates()}
+              disabled={listLoading}
+              className="rounded-lg px-2.5 py-1.5 text-xs font-medium hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-800"
+            >
+              {listLoading ? "Refreshing…" : "Refresh"}
+            </button>
           </div>
-        )}
 
-        {listError && (
-          <p
-            role="status"
-            className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
+          <select
+            id="substrate"
+            value={selectedSubstrate}
+            onChange={(event) => handleSubstrateChange(event.target.value)}
+            disabled={listLoading || loading || !substrates.length}
+            className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-950 dark:focus:ring-zinc-800"
           >
-            Substrate list unavailable: {listError} You can still create a
-            substrate in the Create tab.
-          </p>
-        )}
+            {!substrates.length && (
+              <option value="">
+                {listLoading ? "Loading substrates…" : "No substrates available"}
+              </option>
+            )}
 
-        {!listLoading && !listError && !substrates.length && (
-          <p className="mt-3 text-xs text-zinc-600 dark:text-zinc-400">
-            No substrates were found. Create one below.
-          </p>
-        )}
-      </section>
+            {substrates.map((substrate) => (
+              <option key={substrate.name} value={substrate.name}>
+                {substrate.name} — dimension{" "}
+                {substrate.dimension ?? "not returned"} · activations{" "}
+                {substrate.activations ?? "not returned"}
+              </option>
+            ))}
+          </select>
 
-      <section
-        aria-label="Substrate tools"
-        className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-2"
-      >
-       <button
-  type="button"
-  disabled={!activeClip}
-  onClick={() => {
-    if (!activeClip) return;
+          {selectedSubstrate && (
+            <div className="mt-3 space-y-2">
+              <div className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5 dark:border-zinc-800 dark:bg-zinc-950">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                  State context
+                </p>
 
-    window.location.href = eventStoreHref;
-  }}
-  className="block w-full rounded-lg border border-zinc-200 bg-white px-3 py-2.5 text-left shadow-sm transition-colors hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-600 dark:hover:bg-zinc-800/60"
->
-  <div className="flex items-center justify-between gap-3">
-    <div className="min-w-0">
-      <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-        Persisted state
-      </p>
+                <p className="mt-1 break-all font-mono text-xs font-semibold">
+                  {selectedSubstrate}
+                </p>
 
-      <h2 className="mt-0.5 text-xs font-semibold">
-        Event Store
-      </h2>
-
-      <p className="mt-0.5 text-xs text-zinc-600 dark:text-zinc-400">
-        Inspect persisted records for the active clip
-      </p>
-
-      {activeClip && (
-        <p className="mt-1 break-all font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
-          {activeClip.substrate} · Activation {activeClip.activation}
-        </p>
-      )}
-    </div>
-
-    <span className="shrink-0 rounded-lg border border-zinc-300 px-2 py-1 text-[11px] font-medium dark:border-zinc-700">
-      Open
-    </span>
-  </div>
-</button>
-
-        <a
-          href={linkWithSubstrate("/network")}
-          className="block rounded-lg border border-zinc-200 bg-white px-3 py-2.5 shadow-sm transition-colors hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-600 dark:hover:bg-zinc-800/60"
-        >
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                Derivation context
-              </p>
-
-              <h2 className="mt-0.5 text-xs font-semibold">
-                Network
-              </h2>
-
-              <p className="mt-0.5 text-xs text-zinc-600 dark:text-zinc-400">
-                Inspect network paths in this substrate context
-              </p>
-            </div>
-
-            <span className="rounded-lg border border-zinc-300 px-2 py-1 text-[11px] font-medium dark:border-zinc-700">
-              Open
-            </span>
-          </div>
-        </a>
-      </section>
-
-      <nav
-        aria-label="Substrate operations"
-        className="mb-3 grid grid-cols-2 gap-1 rounded-lg border border-zinc-200 bg-zinc-100/80 p-1 sm:grid-cols-4 dark:border-zinc-800 dark:bg-zinc-900"
-      >
-        {TABS.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            aria-pressed={tab === item.id}
-            onClick={() => {
-              setTab(item.id);
-              setResult(null);
-              setError("");
-            }}
-            className={`rounded-lg px-1.5 py-2 text-xs font-medium transition-colors sm:px-2 ${
-              tab === item.id
-                ? "bg-white text-zinc-950 shadow-sm dark:bg-zinc-800 dark:text-zinc-50"
-                : "text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-100"
-            }`}
-          >
-            {item.label}
-          </button>
-        ))}
-      </nav>
-
-      <section className="rounded-2xl border border-zinc-200 bg-white p-3 shadow-sm sm:p-3.5 dark:border-zinc-800 dark:bg-zinc-900">
-        <div className="mb-4">
-          <h2 className="text-sm font-semibold">
-            {TABS.find((item) => item.id === tab)?.label}
-          </h2>
-
-          <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-            {tab === "create" &&
-              "Initialize a persistent substrate using PERM indices or a BIP39 mnemonic."}
-
-            {tab === "receive" &&
-              "Derive all available network keys for a persisted submission, then execute Receive or Change at a chosen ordinal. Derivation and Receive are separate operations."}
-
-            {tab === "transit" &&
-              "Apply a network derivation request in the selected substrate's state context."}
-
-            {tab === "exile" &&
-              "Request exile for the selected substrate. The API decides eligibility from its persisted event history."}
-          </p>
-        </div>
-
-        <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-          {tab === "create" && (
-            <>
-              <Field
-                label="Substrate name"
-                value={name}
-                onChange={setName}
-                required
-                placeholder="mars-lab"
-              />
-
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {["persistent", "bip39"].map((source) => (
-                  <button
-                    key={source}
-                    type="button"
-                    aria-pressed={seedSource === source}
-                    onClick={() => {
-                      setSeedSource(source);
-                      setError("");
-                    }}
-                    className={`rounded-lg border px-3 py-3 text-left transition-colors ${
-                      seedSource === source
-                        ? "border-zinc-500 bg-zinc-50 dark:bg-zinc-800/70"
-                        : "border-zinc-200 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/50"
-                    }`}
-                  >
-                    <span className="block text-xs font-semibold">
-                      {source === "bip39"
-                        ? "BIP39 mnemonic"
-                        : "Persistent indices"}
-                    </span>
-
-                    <span className="mt-1 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                      {source === "bip39"
-                        ? "Derive indices and entropy from a mnemonic."
-                        : "Enter 12 PERM indices and conditioning entropy."}
-                    </span>
-                  </button>
-                ))}
+                <p className="mt-1 text-xs leading-4 text-zinc-500 dark:text-zinc-400">
+                  Open, Receive, Transit, and Exile operate against this
+                  substrate independently. Derivation is available inside Receive
+                  and runs as a separate operation.
+                </p>
               </div>
 
-              {seedSource === "persistent" ? (
-                <>
-                  <Field
-                    label="12 indices (comma-separated, 0–2047 each)"
-                    value={indices}
-                    onChange={setIndices}
-                    required
-                    mono
-                  />
-
-                  <Field
-                    label="Conditioning entropy"
-                    value={entropy}
-                    onChange={setEntropy}
-                    placeholder="Defaults to the substrate name"
-                  />
-                </>
-              ) : (
-                <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
-                  <label className="flex flex-col gap-1">
-                    <span className="text-xs font-medium">
-                      BIP39 language
-                    </span>
-
-                    <select
-                      value={language}
-                      onChange={(event) =>
-                        setLanguage(event.target.value)
-                      }
-                      required
-                      className="h-9 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
-                    >
-                      <option value="">Select language</option>
-                      <option value="english">English</option>
-                      <option value="chinese_simplified">
-                        Chinese (Simplified)
-                      </option>
-                      <option value="chinese_traditional">
-                        Chinese (Traditional)
-                      </option>
-                      <option value="french">French</option>
-                      <option value="italian">Italian</option>
-                      <option value="japanese">Japanese</option>
-                      <option value="korean">Korean</option>
-                      <option value="spanish">Spanish</option>
-                      <option value="czech">Czech</option>
-                      <option value="portuguese">Portuguese</option>
-                    </select>
-                  </label>
-
-                  <label className="flex flex-col gap-1">
-                    <span className="text-xs font-medium">
-                      Mnemonic phrase
-                    </span>
-
-                    <textarea
-                      value={phrase}
-                      onChange={(event) =>
-                        setPhrase(event.target.value)
-                      }
-                      required
-                      rows={3}
-                      autoCapitalize="none"
-                      autoCorrect="off"
-                      spellCheck={false}
-                      placeholder="Enter words in the selected language"
-                      className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900"
-                    />
-                  </label>
-
-                  <Field
-                    label="BIP39 passphrase (optional)"
-                    value={passphrase}
-                    onChange={setPassphrase}
-                    type="password"
-                    autoComplete="off"
-                  />
-
-                  <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                    The phrase and passphrase are sent to the API for
-                    validation and derivation.
-                  </p>
-                </div>
-              )}
-            </>
+              <ResultSection
+                title="Selected substrate details"
+                description="Fields returned by the API for this substrate."
+                value={
+                  substrates.find((item) => item.name === selectedSubstrate) ??
+                  {}
+                }
+              />
+            </div>
           )}
 
-                   {tab === "receive" && (
-            <div className="space-y-3">
-              <section className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
-                <div>
-                  <h3 className="text-xs font-semibold">
-                    Receive submission
-                  </h3>
+          {listError && (
+            <p
+              role="status"
+              className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
+            >
+              Substrate list unavailable: {listError} You can still create a
+              substrate in the Create tab.
+            </p>
+          )}
 
-                  <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                    Execute the selected persisted submission. Receive
-                    derives the available networks from the received
-                    event and retrieves their persisted input and key
-                    values automatically.
+          {!listLoading && !listError && !substrates.length && (
+            <p className="mt-3 text-xs text-zinc-600 dark:text-zinc-400">
+              No substrates were found. Create one below.
+            </p>
+          )}
+        </section>
+
+        <section
+          aria-label="Substrate tools"
+          className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-2"
+        >
+          <button
+            type="button"
+            disabled={!activeClip}
+            onClick={() => {
+              if (!activeClip) return;
+              persistAuthoritativeEventBinding(acceptedAuthoritativeEvent);
+              window.location.href = eventStoreHref;
+            }}
+            className="block w-full rounded-lg border border-zinc-200 bg-white px-3 py-2.5 text-left shadow-sm transition-colors hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-600 dark:hover:bg-zinc-800/60"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                  Persisted state
+                </p>
+
+                <h2 className="mt-0.5 text-xs font-semibold">Event Store</h2>
+
+                <p className="mt-0.5 text-xs text-zinc-600 dark:text-zinc-400">
+                  Inspect persisted records for the active clip
+                </p>
+
+                {activeClip && (
+                  <p className="mt-1 break-all font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
+                    {activeClip.substrate} · Activation {activeClip.activation}
+                    {acceptedAuthoritativeEvent.status === "loading"
+                      ? " · Loading event…"
+                      : acceptedAuthoritativeEvent.status === "ready"
+                        ? " · Event ready"
+                        : acceptedAuthoritativeEvent.status === "error"
+                          ? " · Event unavailable"
+                          : ""}
                   </p>
+                )}
+              </div>
+
+              <span className="shrink-0 rounded-lg border border-zinc-300 px-2 py-1 text-[11px] font-medium dark:border-zinc-700">
+                Open
+              </span>
+            </div>
+          </button>
+
+          <a
+            href={linkWithSubstrate("/network")}
+            className="block rounded-lg border border-zinc-200 bg-white px-3 py-2.5 shadow-sm transition-colors hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-600 dark:hover:bg-zinc-800/60"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                  Derivation context
+                </p>
+
+                <h2 className="mt-0.5 text-xs font-semibold">Network</h2>
+
+                <p className="mt-0.5 text-xs text-zinc-600 dark:text-zinc-400">
+                  Inspect network paths in this substrate context
+                </p>
+              </div>
+
+              <span className="rounded-lg border border-zinc-300 px-2 py-1 text-[11px] font-medium dark:border-zinc-700">
+                Open
+              </span>
+            </div>
+          </a>
+        </section>
+
+        <nav
+          aria-label="Substrate operations"
+          className="mb-3 grid grid-cols-2 gap-1 rounded-lg border border-zinc-200 bg-zinc-100/80 p-1 sm:grid-cols-4 dark:border-zinc-800 dark:bg-zinc-900"
+        >
+          {TABS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              aria-pressed={tab === item.id}
+              onClick={() => {
+                setTab(item.id);
+                setResult(null);
+                setError("");
+              }}
+              className={`rounded-lg px-1.5 py-2 text-xs font-medium transition-colors sm:px-2 ${
+                tab === item.id
+                  ? "bg-white text-zinc-950 shadow-sm dark:bg-zinc-800 dark:text-zinc-50"
+                  : "text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-100"
+              }`}
+            >
+              {item.label}
+            </button>
+          ))}
+        </nav>
+
+        <section className="rounded-2xl border border-zinc-200 bg-white p-3 shadow-sm sm:p-3.5 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="mb-4">
+            <h2 className="text-sm font-semibold">
+              {TABS.find((item) => item.id === tab)?.label}
+            </h2>
+
+            <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+              {tab === "create" &&
+                "Initialize a persistent substrate using PERM indices or a BIP39 mnemonic."}
+
+              {tab === "receive" &&
+                "Derive all available network keys for a persisted submission, then execute Receive or Change at a chosen ordinal. Derivation and Receive are separate operations."}
+
+              {tab === "transit" &&
+                "Apply a network derivation request in the selected substrate's state context."}
+
+              {tab === "exile" &&
+                "Request exile for the selected substrate. The API decides eligibility from its persisted event history."}
+            </p>
+          </div>
+
+          <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+            {tab === "create" && (
+              <>
+                <Field
+                  label="Substrate name"
+                  value={name}
+                  onChange={setName}
+                  required
+                  placeholder="mars-lab"
+                />
+
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {["persistent", "bip39"].map((source) => (
+                    <button
+                      key={source}
+                      type="button"
+                      aria-pressed={seedSource === source}
+                      onClick={() => {
+                        setSeedSource(source);
+                        setError("");
+                      }}
+                      className={`rounded-lg border px-3 py-3 text-left transition-colors ${
+                        seedSource === source
+                          ? "border-zinc-500 bg-zinc-50 dark:bg-zinc-800/70"
+                          : "border-zinc-200 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/50"
+                      }`}
+                    >
+                      <span className="block text-xs font-semibold">
+                        {source === "bip39"
+                          ? "BIP39 mnemonic"
+                          : "Persistent indices"}
+                      </span>
+
+                      <span className="mt-1 block text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                        {source === "bip39"
+                          ? "Derive indices and entropy from a mnemonic."
+                          : "Enter 12 PERM indices and conditioning entropy."}
+                      </span>
+                    </button>
+                  ))}
                 </div>
 
-                <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-                  <p className="text-xs font-medium">Selected substrate</p>
-                  <p className="mt-1 break-all font-mono text-xs">
-                    {selectedSubstrate || "No substrate selected"}
+                {seedSource === "persistent" ? (
+                  <>
+                    <Field
+                      label="12 indices (comma-separated, 0–2047 each)"
+                      value={indices}
+                      onChange={setIndices}
+                      required
+                      mono
+                    />
+
+                    <Field
+                      label="Conditioning entropy"
+                      value={entropy}
+                      onChange={setEntropy}
+                      placeholder="Defaults to the substrate name"
+                    />
+                  </>
+                ) : (
+                  <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+                    <label className="flex flex-col gap-1">
+                      <span className="text-xs font-medium">
+                        BIP39 language
+                      </span>
+
+                      <select
+                        value={language}
+                        onChange={(event) => setLanguage(event.target.value)}
+                        required
+                        className="h-9 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                      >
+                        <option value="">Select language</option>
+                        <option value="english">English</option>
+                        <option value="chinese_simplified">
+                          Chinese (Simplified)
+                        </option>
+                        <option value="chinese_traditional">
+                          Chinese (Traditional)
+                        </option>
+                        <option value="french">French</option>
+                        <option value="italian">Italian</option>
+                        <option value="japanese">Japanese</option>
+                        <option value="korean">Korean</option>
+                        <option value="spanish">Spanish</option>
+                        <option value="czech">Czech</option>
+                        <option value="portuguese">Portuguese</option>
+                      </select>
+                    </label>
+
+                    <label className="flex flex-col gap-1">
+                      <span className="text-xs font-medium">
+                        Mnemonic phrase
+                      </span>
+
+                      <textarea
+                        value={phrase}
+                        onChange={(event) => setPhrase(event.target.value)}
+                        required
+                        rows={3}
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        placeholder="Enter words in the selected language"
+                        className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                      />
+                    </label>
+
+                    <Field
+                      label="BIP39 passphrase (optional)"
+                      value={passphrase}
+                      onChange={setPassphrase}
+                      type="password"
+                      autoComplete="off"
+                    />
+
+                    <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                      The phrase and passphrase are sent to the API for
+                      validation and derivation.
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
+
+            {tab === "receive" && (
+              <div className="space-y-3">
+                <section className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+                  <div>
+                    <h3 className="text-xs font-semibold">
+                      Receive submission
+                    </h3>
+
+                    <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                      Execute the selected persisted submission. Receive derives
+                      the available networks from the received event and
+                      retrieves their persisted input and key values
+                      automatically.
+                    </p>
+                  </div>
+
+                  <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                    <p className="text-xs font-medium">Selected substrate</p>
+                    <p className="mt-1 break-all font-mono text-xs">
+                      {selectedSubstrate || "No substrate selected"}
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <NumberField
+                      label="Transaction amount (N)"
+                      value={receiveAmount}
+                      onChange={handleReceiveAmountChange}
+                      min={1}
+                    />
+
+                    <label className="flex flex-col gap-1">
+                      <span className="text-xs font-medium">
+                        Receive flow
+                      </span>
+
+                      <select
+                        value={receiveFlow}
+                        onChange={(event) =>
+                          setReceiveFlow(event.target.value)
+                        }
+                        className="h-9 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                      >
+                        <option value="receive">Receive</option>
+                        <option value="change">Change</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  {Number.isSafeInteger(Number(receiveAmount)) &&
+                    Number(receiveAmount) > 0 && (
+                      <ReceiveOrdinalSelector
+                        amount={receiveAmount}
+                        ordinal={receiveOrdinal}
+                        persistedOrdinals={receiveEvents.map((record) =>
+                          Number(record.activation)
+                        )}
+                        persistedLoading={receiveEventsLoading}
+                        persistedError={receiveEventsError}
+                        onChange={(n) => {
+                          setReceiveOrdinal(String(n));
+                          setResult(null);
+                          setError("");
+                        }}
+                      />
+                    )}
+                </section>
+              </div>
+            )}
+
+            {tab === "transit" && (
+              <>
+                <div className="rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                    Transition state context
+                  </p>
+
+                  <p className="mt-1 break-all font-mono text-xs font-semibold">
+                    {selectedSubstrate || "Select a substrate"}
+                  </p>
+
+                  <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                    Transit is sent to this substrate's API route. Network and
+                    path specify derivation; they are not a separate state host.
                   </p>
                 </div>
 
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <NumberField
-                    label="Transaction amount (N)"
-                    value={receiveAmount}
-                    onChange={handleReceiveAmountChange}
-                    min={1}
-                  />
-
-                  <label className="flex flex-col gap-1">
-                    <span className="text-xs font-medium">
-                      Receive flow
-                    </span>
+                  <label className="flex min-w-0 flex-col gap-1">
+                    <span className="text-xs font-medium">Network</span>
 
                     <select
-                      value={receiveFlow}
+                      value={selectedNetwork}
                       onChange={(event) =>
-                        setReceiveFlow(event.target.value)
+                        handleNetworkChange(event.target.value)
                       }
-                      className="h-9 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                      disabled={networkLoading || !networks.length}
+                      className="h-9 min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
                     >
-                      <option value="receive">Receive</option>
-                      <option value="change">Change</option>
+                      {!networks.length && (
+                        <option value="">
+                          {networkLoading ? "Loading…" : "No networks"}
+                        </option>
+                      )}
+
+                      {networks.map((network) => (
+                        <option key={network.id} value={network.id}>
+                          {network.name} — {network.id}
+                        </option>
+                      ))}
                     </select>
                   </label>
+
+                  <Field
+                    label="Derivation path"
+                    value={path}
+                    onChange={setPath}
+                    placeholder="m/44'/0'/0'/0/0"
+                    mono
+                  />
+
+                  <NumberField
+                    label="Purpose"
+                    value={purpose}
+                    onChange={setPurpose}
+                  />
+
+                  <NumberField
+                    label="Coin"
+                    value={coin}
+                    onChange={setCoin}
+                  />
+
+                  <NumberField
+                    label="Account"
+                    value={account}
+                    onChange={setAccount}
+                  />
+
+                  <NumberField
+                    label="Change"
+                    value={change}
+                    onChange={setChange}
+                  />
+
+                  <NumberField
+                    label="External"
+                    value={external}
+                    onChange={setExternal}
+                  />
+
+                  <NumberField
+                    label="Activation"
+                    value={activation}
+                    onChange={setActivation}
+                  />
                 </div>
 
-                {Number.isSafeInteger(Number(receiveAmount)) &&
-                  Number(receiveAmount) > 0 && (
-                    <ReceiveOrdinalSelector
-                      amount={receiveAmount}
-                      ordinal={receiveOrdinal}
-                      persistedOrdinals={receiveEvents.map((record) =>
-                        Number(record.activation)
-                      )}
-                      persistedLoading={receiveEventsLoading}
-                      persistedError={receiveEventsError}
-                      onChange={(n) => {
-                        setReceiveOrdinal(String(n));
-                        setResult(null);
-                        setError("");
-                      }}
-                    />
-                  )}
-              </section>
-            </div>
-          )}
-
-          {tab === "transit" && (
-            <>
-              <div className="rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                  Transition state context
-                </p>
-
-                <p className="mt-1 break-all font-mono text-xs font-semibold">
-                  {selectedSubstrate || "Select a substrate"}
-                </p>
-
-                <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                  Transit is sent to this substrate's API route. Network
-                  and path specify derivation; they are not a separate
-                  state host.
-                </p>
-              </div>
-
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <label className="flex min-w-0 flex-col gap-1">
-                  <span className="text-xs font-medium">Network</span>
-
-                  <select
-                    value={selectedNetwork}
-                    onChange={(event) =>
-                      handleNetworkChange(event.target.value)
-                    }
-                    disabled={networkLoading || !networks.length}
-                    className="h-9 min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                {networkError && (
+                  <p
+                    role="alert"
+                    className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
                   >
-                    {!networks.length && (
-                      <option value="">
-                        {networkLoading ? "Loading…" : "No networks"}
-                      </option>
-                    )}
+                    Networks could not be loaded: {networkError}{" "}
+                    <button
+                      type="button"
+                      onClick={loadNetworks}
+                      className="font-semibold underline"
+                    >
+                      Retry
+                    </button>
+                  </p>
+                )}
 
-                    {networks.map((network) => (
-                      <option key={network.id} value={network.id}>
-                        {network.name} — {network.id}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                {currentNetwork && (
+                  <ResultSection
+                    title="Selected network definition"
+                    description="Derivation metadata; substrate state remains selected above."
+                    value={currentNetwork}
+                  />
+                )}
+              </>
+            )}
 
-                <Field
-                  label="Derivation path"
-                  value={path}
-                  onChange={setPath}
-                  placeholder="m/44'/0'/0'/0/0"
-                  mono
-                />
+            {tab === "exile" && (
+              <section className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+                <div>
+                  <h3 className="text-xs font-semibold">
+                    Persisted event history
+                  </h3>
 
-                <NumberField
-                  label="Purpose"
-                  value={purpose}
-                  onChange={setPurpose}
-                />
+                  <p className="mt-1 break-all font-mono text-xs text-zinc-600 dark:text-zinc-300">
+                    {selectedSubstrate || "No substrate selected"}
+                  </p>
 
-                <NumberField
-                  label="Coin"
-                  value={coin}
-                  onChange={setCoin}
-                />
+                  <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                    Exile reads the selected substrate's persisted event history.
+                    The Rust API decides eligibility and derives the exile depth;
+                    the browser neither gates the request nor submits an
+                    in-memory depth snapshot.
+                  </p>
+                </div>
 
-                <NumberField
-                  label="Account"
-                  value={account}
-                  onChange={setAccount}
-                />
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs text-zinc-600 dark:text-zinc-300">
+                    {exileRecordsLoading
+                      ? "Loading persisted events…"
+                      : `${exileRecords.length} persisted record(s)`}
+                  </span>
 
-                <NumberField
-                  label="Change"
-                  value={change}
-                  onChange={setChange}
-                />
-
-                <NumberField
-                  label="External"
-                  value={external}
-                  onChange={setExternal}
-                />
-
-                <NumberField
-                  label="Activation"
-                  value={activation}
-                  onChange={setActivation}
-                />
-              </div>
-
-              {networkError && (
-                <p
-                  role="alert"
-                  className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
-                >
-                  Networks could not be loaded: {networkError}{" "}
                   <button
                     type="button"
-                    onClick={loadNetworks}
-                    className="font-semibold underline"
+                    onClick={loadExileRecords}
+                    disabled={
+                      exileRecordsLoading || !selectedSubstrate || loading
+                    }
+                    className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-medium hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
                   >
-                    Retry
+                    {exileRecordsLoading ? "Refreshing…" : "Refresh events"}
                   </button>
-                </p>
-              )}
+                </div>
 
-              {currentNetwork && (
-                <ResultSection
-                  title="Selected network definition"
-                  description="Derivation metadata; substrate state remains selected above."
-                  value={currentNetwork}
-                />
-              )}
-            </>
-          )}
-
-          {tab === "exile" && (
-            <section className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
-              <div>
-                <h3 className="text-xs font-semibold">
-                  Persisted event history
-                </h3>
-
-                <p className="mt-1 break-all font-mono text-xs text-zinc-600 dark:text-zinc-300">
-                  {selectedSubstrate || "No substrate selected"}
-                </p>
-
-                <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                  Exile reads the selected substrate's persisted event
-                  history. The Rust API decides eligibility and derives
-                  the exile depth; the browser neither gates the request
-                  nor submits an in-memory depth snapshot.
-                </p>
-              </div>
-
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs text-zinc-600 dark:text-zinc-300">
-                  {exileRecordsLoading
-                    ? "Loading persisted events…"
-                    : `${exileRecords.length} persisted record(s)`}
-                </span>
-
-                <button
-                  type="button"
-                  onClick={loadExileRecords}
-                  disabled={
-                    exileRecordsLoading ||
-                    !selectedSubstrate ||
-                    loading
-                  }
-                  className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-medium hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
-                >
-                  {exileRecordsLoading
-                    ? "Refreshing…"
-                    : "Refresh events"}
-                </button>
-              </div>
-
-              {exileRecordsError && (
-                <p
-                  role="status"
-                  className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
-                >
-                  {exileRecordsError}
-                </p>
-              )}
-
-              <div className="space-y-2">
-                <p className="text-xs font-medium">
-                  Persisted event records
-                </p>
-
-                {!exileRecords.length ? (
-                  <p className="rounded-lg border border-zinc-200 bg-white p-3 text-xs text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
-                    No event records were returned. Record a transit
-                    event, then refresh this list.
+                {exileRecordsError && (
+                  <p
+                    role="status"
+                    className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
+                  >
+                    {exileRecordsError}
                   </p>
-                ) : (
-                  exileRecords.map((record, index) => {
-                    return (
-                      <div
-                        key={`${recordNameOf(record) || "record"}-${index}`}
-                        className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900"
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <p className="break-all font-mono text-xs font-medium">
-                            {recordNameOf(record) ||
-                              `Persisted record ${index + 1}`}
-                          </p>
-
-                          <span className="rounded-lg border border-zinc-200 px-2 py-1 text-[10px] font-medium dark:border-zinc-700">
-                            {formatKey(
-                              valueAt(record, ["kind", "type"]) ?? "record"
-                            )}
-                          </span>
-                        </div>
-
-                        <div className="mt-3">
-                          <KeyValueList value={record} />
-                        </div>
-                      </div>
-                    );
-                  })
                 )}
-              </div>
-            </section>
-          )}
 
-          <button
-            type="submit"
-            aria-busy={loading}
-            disabled={
-              loading ||
-              (substrateRequired && (listLoading || !selectedSubstrate)) ||
-              (tab === "transit" &&
-                (networkLoading || !selectedNetwork))
-            }
-            className="mt-1 inline-flex min-h-10 items-center justify-center rounded-lg bg-zinc-950 px-5 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
+                <div className="space-y-2">
+                  <p className="text-xs font-medium">Persisted event records</p>
+
+                  {!exileRecords.length ? (
+                    <p className="rounded-lg border border-zinc-200 bg-white p-3 text-xs text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
+                      No event records were returned. Record a transit event,
+                      then refresh this list.
+                    </p>
+                  ) : (
+                    exileRecords.map((record, index) => {
+                      return (
+                        <div
+                          key={`${recordNameOf(record) || "record"}-${index}`}
+                          className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="break-all font-mono text-xs font-medium">
+                              {recordNameOf(record) ||
+                                `Persisted record ${index + 1}`}
+                            </p>
+
+                            <span className="rounded-lg border border-zinc-200 px-2 py-1 text-[10px] font-medium dark:border-zinc-700">
+                              {formatKey(
+                                valueAt(record, ["kind", "type"]) ?? "record"
+                              )}
+                            </span>
+                          </div>
+
+                          <div className="mt-3">
+                            <KeyValueList value={record} />
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </section>
+            )}
+
+            <button
+              type="submit"
+              aria-busy={loading}
+              disabled={
+                loading ||
+                (substrateRequired && (listLoading || !selectedSubstrate)) ||
+                (tab === "transit" && (networkLoading || !selectedNetwork))
+              }
+              className="mt-1 inline-flex min-h-10 items-center justify-center rounded-lg bg-zinc-950 px-5 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
+            >
+              {loading
+                ? "Processing…"
+                : tab === "open"
+                  ? "Recover Persisted Ordinal"
+                  : tab === "receive"
+                    ? "Execute Receive"
+                    : tab === "transit"
+                      ? "Transit Selected Substrate"
+                      : tab === "exile"
+                        ? "Exile Selected Substrate"
+                        : "Create Substrate"}
+            </button>
+          </form>
+        </section>
+
+        {error && (
+          <p
+            role="alert"
+            className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-3 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
           >
-            {loading
-              ? "Processing…"
-              : tab === "open"
-                ? "Recover Persisted Ordinal"
-                : tab === "receive"
-                  ? "Execute Receive"
-                  : tab === "transit"
-                    ? "Transit Selected Substrate"
-                    : tab === "exile"
-                      ? "Exile Selected Substrate"
-                      : "Create Substrate"}
-          </button>
-        </form>
-      </section>
+            {error}
+          </p>
+        )}
 
-      {error && (
-        <p
-          role="alert"
-          className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-3 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
-        >
-          {error}
-        </p>
-      )}
+        <ResultCard
+          result={result}
+          tab={tab}
+          network={currentNetwork}
+          path={path}
+          substrate={selectedSubstrate}
+        />
 
-      <ResultCard
-        result={result}
-        tab={tab}
-        network={currentNetwork}
-        path={path}
-        substrate={selectedSubstrate}
-      />
-
-      <footer className="mt-5 border-t border-zinc-200 pt-4 text-xs leading-5 text-zinc-500 dark:border-zinc-800">
-        QTM substrate console · Active substrate:{" "}
-        {selectedSubstrate || "none"} · Runtime: {runtimeMode}
-      </footer>
-    </main>
-  </div>
-);
+        <footer className="mt-5 border-t border-zinc-200 pt-4 text-xs leading-5 text-zinc-500 dark:border-zinc-800">
+          QTM substrate console · Active substrate:{" "}
+          {selectedSubstrate || "none"} · Runtime: {runtimeMode}
+        </footer>
+      </main>
+    </div>
+  );
 }
