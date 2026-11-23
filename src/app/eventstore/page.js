@@ -183,8 +183,8 @@ resolveClipEvent: "qtm_clip_event",
 };
 const API_ROUTES = {
 resolveClipEvent: ({ clip }) => [
-"GET",
-⁠/wallets/${enc(clip.substrate)}/activations/${enc(clip.activation)}/event⁠,
+  "GET",
+  `/wallets/${enc(clip.substrate)}/activations/${enc(clip.activation)}/event`,
 ],
 };
 async function callRuntime(operation, args = {}) {
