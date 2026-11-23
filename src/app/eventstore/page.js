@@ -2500,31 +2500,87 @@ export function EventStoreView({ clip }) {
 
 function EventStoreRouteBoundary() {
   const searchParams = useSearchParams();
-  const rawClip = searchParams.get("clip");
-  const clip = useMemo(() => {
-    if (!rawClip) return null;
-    try {
-      return createActiveClip(JSON.parse(rawClip));
-    } catch {
-      return null;
-    }
-  }, [rawClip]);
 
+  const clip = useMemo(() => {
+    // Preferred route format:
+    // /eventstore?substrate=mars-lab&activation=2
+    const substrate = searchParams.get("substrate");
+    const activation = searchParams.get("activation");
+
+    if (substrate && activation !== null) {
+      return createActiveClip({
+        substrate,
+        activation,
+      });
+    }
+
+    // Backward compatibility with the JSON ActiveClip route:
+    // /eventstore?clip={"substrate":"mars-lab","activation":2}
+    const rawClip = searchParams.get("clip");
+
+    if (rawClip) {
+      try {
+        return createActiveClip(JSON.parse(rawClip));
+      } catch {
+        return null;
+      }
+    }
+
+    return null;
+  }, [searchParams]);
+
+  // ActiveClip is mandatory.
+  // Do not mount EventStoreView without it.
+  if (!clip) {
+    return (
+      <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
+        <div className="mx-auto w-full max-w-7xl">
+          <section className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-amber-600 dark:text-amber-400">
+              ActiveClip required
+            </p>
+
+            <h1 className="mt-1 text-lg font-semibold">
+              Event Store
+            </h1>
+
+            <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
+              The Event Store requires an ActiveClip containing a valid
+              substrate and activation. Open it from the main QTM page
+              after selecting the clip.
+            </p>
+
+            <div className="mt-3 rounded-lg border border-zinc-200 bg-zinc-50 p-3 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-950">
+              <p>ActiveClip</p>
+              <p className="mt-1 text-zinc-500">
+                {`{ substrate: string, activation: number }`}
+              </p>
+            </div>
+
+            <a
+              href="/"
+              className="mt-4 inline-flex items-center rounded-lg border border-zinc-300 px-3 py-2 text-sm font-medium transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+            >
+              Return to QTM
+            </a>
+          </section>
+        </div>
+      </main>
+    );
+  }
+
+  // Only instantiate the Event Store with a validated ActiveClip.
   return <EventStoreView clip={clip} />;
 }
 
-export default function EventStorePage({ clip }) {
-  if (clip !== undefined) {
-    return <EventStoreView clip={clip} />;
-  }
-
+export default function EventStorePage() {
   return (
     <Suspense
       fallback={
         <main className="min-h-screen bg-zinc-50 px-3 py-4 text-zinc-950 sm:px-6 sm:py-8 dark:bg-zinc-950 dark:text-zinc-50">
           <div className="mx-auto w-full max-w-7xl">
             <p className="text-sm text-zinc-500">
-              Loading QTM Event Store…
+              Resolving ActiveClip…
             </p>
           </div>
         </main>
