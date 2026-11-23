@@ -154,7 +154,6 @@ function nativeInvoke() {
 
 const NATIVE_COMMANDS = {
   resolveClipEvent: "qtm_clip_event",
-  listEvents: "qtm_events",
 };
 
 const API_ROUTES = {
@@ -162,7 +161,6 @@ const API_ROUTES = {
     "GET",
     `/wallets/${enc(clip.substrate)}/activations/${enc(clip.activation)}/event`,
   ],
-  listEvents: ({ name }) => ["GET", `/wallets/${enc(name)}/events`],
 };
 
 async function callRuntime(operation, args = {}, options = {}) {
@@ -195,7 +193,7 @@ async function callRuntime(operation, args = {}, options = {}) {
   return apiRequest(path, { method, signal: options.signal });
 }
 
-/* ───────────── Event Heritage & Persisted Event Resolution ───────────── */
+/* ───────────── Event Heritage & Selected Event Resolution ───────────── */
 
 function heritageStateOf(event) {
   if (!event || typeof event !== "object" || Array.isArray(event)) return null;
@@ -258,13 +256,14 @@ function extractRawEventsArray(response) {
 }
 
 /**
- * Normalizes persisted events returned by GET /wallets/{substrate}/events
+ * Normalizes the event rows returned by the clip event getter
+ * (GET /wallets/{substrate}/activations/{activation}/event)
  * without inventing records or assuming array index == activation.
  */
 function normalizePersistedEventIndex(response, substrate) {
   const source = extractRawEventsArray(response);
   if (!Array.isArray(source)) {
-    throw new Error("The persisted events response did not include an events array.");
+    throw new Error("The event response did not include an events array.");
   }
 
   const directory =
@@ -319,59 +318,6 @@ function normalizePersistedEventIndex(response, substrate) {
   };
 }
 
-/**
- * Builds Available Clips strictly from persisted events for the substrate:
- * deduplicated by activation, deterministically sorted, never fabricated.
- */
-function buildAvailableClipsFromEvents(events, substrate) {
-  if (!substrate || !Array.isArray(events) || events.length === 0) return [];
-
-  const byActivation = new Map();
-
-  for (const ev of events) {
-    const activation = activationFromHeritage(ev);
-    if (activation === null) continue;
-
-    const clip = createActiveClip({ substrate, activation });
-    if (!clip) continue;
-
-    const existing = byActivation.get(activation);
-    const candidateRecord = recordOf(ev);
-    const candidateVerified = Boolean(ev?.__heritageVerified);
-
-    if (!existing) {
-      byActivation.set(activation, {
-        clip,
-        key: activeClipKey(clip),
-        activation,
-        record: candidateRecord,
-        heritageVerified: candidateVerified,
-        eventCount: 1,
-        event: ev,
-      });
-    } else {
-      const nextEventCount = existing.eventCount + 1;
-      const preferCandidate =
-        (!existing.heritageVerified && candidateVerified) ||
-        (existing.heritageVerified === candidateVerified &&
-          Boolean(candidateRecord) &&
-          !existing.record);
-
-      byActivation.set(activation, {
-        clip: existing.clip,
-        key: existing.key,
-        activation,
-        record: preferCandidate && candidateRecord ? candidateRecord : existing.record,
-        heritageVerified: existing.heritageVerified || candidateVerified,
-        eventCount: nextEventCount,
-        event: preferCandidate ? ev : existing.event,
-      });
-    }
-  }
-
-  return [...byActivation.values()].sort((a, b) => a.activation - b.activation);
-}
-
 function normalizePersistedEventsForClip(response, clip) {
   const { events, directory } = normalizePersistedEventIndex(
     response,
@@ -401,76 +347,38 @@ function resolveAuthoritativeEvent(rows, clip) {
   return ordered[ordered.length - 1] || null;
 }
 
-function isMissingRouteError(err) {
-  if (!(err instanceof Error)) return false;
-  return /HTTP (404|405)\b/i.test(err.message);
-}
-
-async function fetchPersistedEventsIndex(substrate, signal) {
-  const trimmed = typeof substrate === "string" ? substrate.trim() : "";
-  if (!trimmed) {
-    return { events: [], directory: "" };
-  }
-  const body = await callRuntime(
-    "listEvents",
-    { name: trimmed },
+// Resolves the authoritative event for the ActiveClip using only the
+// clip-specific event getter. No event-history listing is involved.
+async function resolveEventForClip(clip, signal) {
+  const response = await callRuntime(
+    "resolveClipEvent",
+    { clip },
     { signal },
   );
-  return normalizePersistedEventIndex(body, trimmed);
-}
+  if (signal?.aborted) return null;
 
-async function resolveEventForClip(clip, signal, preloadedHistory = null) {
-  if (preloadedHistory && Array.isArray(preloadedHistory.events)) {
-    const matching = preloadedHistory.events.filter(
-      (row) => activationFromHeritage(row) === clip.activation,
-    );
-    if (matching.length > 0) {
-      return {
-        rows: matching.sort(compareEventRows),
-        directory: preloadedHistory.directory || "",
-      };
-    }
+  if (Array.isArray(response) || extractRawEventsArray(response)) {
+    return normalizePersistedEventsForClip(response, clip);
   }
 
-  try {
-    const response = await callRuntime(
-      "resolveClipEvent",
-      { clip },
-      { signal },
+  const singleEvent =
+    response?.event && typeof response.event === "object" && !Array.isArray(response.event)
+      ? response.event
+      : response && typeof response === "object" && !Array.isArray(response) && heritageStateOf(response)
+        ? response
+        : null;
+
+  if (singleEvent) {
+    return normalizePersistedEventsForClip(
+      {
+        events: [singleEvent],
+        directory: typeof response?.directory === "string" ? response.directory : "",
+      },
+      clip,
     );
-    if (signal?.aborted) return null;
-
-    if (Array.isArray(response) || extractRawEventsArray(response)) {
-      return normalizePersistedEventsForClip(response, clip);
-    }
-
-    const singleEvent =
-      response?.event && typeof response.event === "object" && !Array.isArray(response.event)
-        ? response.event
-        : response && typeof response === "object" && !Array.isArray(response) && heritageStateOf(response)
-          ? response
-          : null;
-
-    if (singleEvent) {
-      return normalizePersistedEventsForClip(
-        {
-          events: [singleEvent],
-          directory: typeof response?.directory === "string" ? response.directory : "",
-        },
-        clip,
-      );
-    }
-  } catch (err) {
-    if (err?.name === "AbortError" || signal?.aborted) throw err;
-    if (!isMissingRouteError(err)) throw err;
   }
 
-  const fallbackResponse = await callRuntime(
-    "listEvents",
-    { name: clip.substrate },
-    { signal },
-  );
-  return normalizePersistedEventsForClip(fallbackResponse, clip);
+  return { rows: [], directory: "" };
 }
 
 function normalizeNetworkId(value) {
@@ -521,6 +429,8 @@ function normalizeDerivedNetwork(entry) {
   };
 }
 
+// Activation-scoped network derivation:
+// GET /wallets/{substrate}/activations/{activation}/networks
 async function fetchDerivedNetworksFromHeritage(clip, heritageState, signal) {
   const authoritativeActivation = activationFromHeritageState(heritageState);
   if (authoritativeActivation === null || authoritativeActivation !== clip.activation) {
@@ -1437,16 +1347,15 @@ const EMPTY_CLIP_STORE = Object.freeze({
 });
 
 export function EventStoreView({ clip }) {
-  const initialClip = useMemo(() => createActiveClip(clip), [clip]);
+  // The ActiveClip is supplied by the parent/route and is the only event context.
+  // It is keyed by value so an identical { substrate, activation } never re-triggers loading.
+  const clipSubstrate = clip?.substrate;
+  const clipActivation = clip?.activation;
+  const activeClip = useMemo(
+    () => createActiveClip({ substrate: clipSubstrate, activation: clipActivation }),
+    [clipSubstrate, clipActivation],
+  );
 
-  const [activeClip, setActiveClip] = useState(initialClip);
-  const [historyState, setHistoryState] = useState({
-    substrate: "",
-    loading: false,
-    events: [],
-    directory: "",
-    error: "",
-  });
   const [store, setStore] = useState(EMPTY_CLIP_STORE);
   const [logViewer, setLogViewer] = useState(null);
 
@@ -1454,8 +1363,6 @@ export function EventStoreView({ clip }) {
   const lifecycleGenRef = useRef(0);
   const activeClipKeyRef = useRef("");
   const abortControllerRef = useRef(null);
-  const historyGenRef = useRef(0);
-  const historyAbortRef = useRef(null);
 
   const clipKey = useMemo(() => activeClipKey(activeClip), [activeClip]);
 
@@ -1480,148 +1387,7 @@ export function EventStoreView({ clip }) {
     [isClipCurrent],
   );
 
-  // Fetch authoritative persisted event history via GET /wallets/{substrate}/events.
-  const loadPersistedHistory = useCallback(async (substrate, options = {}) => {
-    const trimmed = typeof substrate === "string" ? substrate.trim() : "";
-    historyAbortRef.current?.abort();
-
-    if (!trimmed) {
-      historyGenRef.current += 1;
-      setHistoryState({
-        substrate: "",
-        loading: false,
-        events: [],
-        directory: "",
-        error: "",
-      });
-      return { events: [], directory: "" };
-    }
-
-    const gen = ++historyGenRef.current;
-    const controller = new AbortController();
-    historyAbortRef.current = controller;
-
-    setHistoryState((prev) => ({
-      substrate: trimmed,
-      loading: true,
-      events: prev.substrate === trimmed ? prev.events : [],
-      directory: prev.substrate === trimmed ? prev.directory : "",
-      error: "",
-    }));
-
-    try {
-      const normalized = await fetchPersistedEventsIndex(
-        trimmed,
-        options.signal ?? controller.signal,
-      );
-      if (gen !== historyGenRef.current) return null;
-      setHistoryState({
-        substrate: trimmed,
-        loading: false,
-        events: normalized.events,
-        directory: normalized.directory,
-        error: "",
-      });
-      return normalized;
-    } catch (err) {
-      if (err?.name === "AbortError" || gen !== historyGenRef.current) return null;
-      const message =
-        err instanceof Error && err.message
-          ? err.message
-          : "Unable to load persisted event history.";
-      setHistoryState((prev) => ({
-        substrate: trimmed,
-        loading: false,
-        events: prev.substrate === trimmed ? prev.events : [],
-        directory: prev.substrate === trimmed ? prev.directory : "",
-        error: message,
-      }));
-      return null;
-    }
-  }, []);
-
-  // Reconcile incoming route clip when substrate or activation changes from parent/URL.
-  useEffect(() => {
-    const nextClip = createActiveClip(clip);
-    if (!nextClip) {
-      setActiveClip(null);
-      return;
-    }
-
-    setActiveClip((prev) => {
-      if (!prev || prev.substrate !== nextClip.substrate) {
-        return nextClip;
-      }
-      if (prev.activation !== nextClip.activation) {
-        return nextClip;
-      }
-      return prev;
-    });
-  }, [clip]);
-
-  // Load persisted event history whenever substrate changes.
-  useEffect(() => {
-    const substrate = activeClip?.substrate ?? "";
-    void loadPersistedHistory(substrate);
-    return () => {
-      historyAbortRef.current?.abort();
-    };
-  }, [activeClip?.substrate, loadPersistedHistory]);
-
-  const availableClips = useMemo(() => {
-    if (!activeClip?.substrate || historyState.substrate !== activeClip.substrate) {
-      return [];
-    }
-    return buildAvailableClipsFromEvents(historyState.events, activeClip.substrate);
-  }, [activeClip?.substrate, historyState.substrate, historyState.events]);
-
-  // Reconcile ActiveClip with persisted Available Clips once history finishes loading.
-  useEffect(() => {
-    if (!activeClip) return;
-    if (historyState.substrate !== activeClip.substrate || historyState.loading) {
-      return;
-    }
-
-    if (availableClips.length === 0) {
-      return;
-    }
-
-    const matched = availableClips.find(
-      (item) => item.activation === activeClip.activation,
-    );
-    if (!matched) {
-      // Reconcile to the first available persisted clip rather than keeping a non-existent activation.
-      setActiveClip(availableClips[0].clip);
-    }
-  }, [
-    activeClip,
-    availableClips,
-    historyState.substrate,
-    historyState.loading,
-  ]);
-
-  const selectAvailableClip = useCallback(
-    (nextActivation) => {
-      if (!activeClip?.substrate) return;
-      const parsed = parseActivationNumber(nextActivation);
-      if (parsed === null) return;
-      const matchingEntry = availableClips.find(
-        (item) => item.activation === parsed,
-      );
-      if (!matchingEntry) return;
-      if (sameActiveClip(activeClip, matchingEntry.clip)) return;
-
-      // Immediately invalidate previous clip view before committing new ActiveClip.
-      abortControllerRef.current?.abort();
-      lifecycleGenRef.current += 1;
-      setStore(EMPTY_CLIP_STORE);
-      setLogViewer(null);
-      setActiveClip(matchingEntry.clip);
-    },
-    [activeClip, availableClips],
-  );
-
-  // Stage 5b helper: load budgets for the derived networks of the active clip's heritage state.
+  // Load budgets for the derived networks of the active clip's heritage state.
   const loadBudgetsForClip = useCallback(
     async (targetClip, targetKey, generation, networkRows, signal) => {
       const networkIds = (networkRows || [])
@@ -1692,7 +1458,7 @@ export function EventStoreView({ clip }) {
     [isClipCurrent, updateScopedStore],
   );
 
-  // Stage 5a helper: load complete persistent payload storage belonging to the resolved clip events.
+  // Load complete persistent payload storage belonging to the resolved clip events.
   const loadPersistentPayloadsForClip = useCallback(
     async (targetClip, targetKey, generation, eventRows, signal) => {
       const records = [
@@ -1759,9 +1525,9 @@ export function EventStoreView({ clip }) {
 
   // Canonical ActiveClip Initialization Sequence:
   // 1. Receive the ActiveClip.
-  // 2. Resolve the persisted event corresponding to that clip.
+  // 2. Resolve the event for that clip through the clip event getter.
   // 3. Obtain the authoritative event heritage state from `event.heritage.state`.
-  // 4. Resolve the applicable network derivations from the event's authoritative state.
+  // 4. Resolve the applicable network derivations for that activation.
   // 5. Load the persistent storage belonging to that clip.
   // 6. Render the complete Event Store.
   useEffect(() => {
@@ -1792,20 +1558,11 @@ export function EventStoreView({ clip }) {
     });
 
     void (async () => {
-      const preloaded =
-        historyState.substrate === activeClip.substrate && !historyState.loading
-          ? historyState
-          : null;
-
-      // Step 2: Resolve the persisted event corresponding to this ActiveClip.
-      let normalizedHistory;
+      // Step 2: Resolve the event corresponding to this ActiveClip.
+      let resolved;
       try {
-        normalizedHistory = await resolveEventForClip(
-          activeClip,
-          signal,
-          preloaded,
-        );
-        if (!normalizedHistory || !isClipCurrent(clipKey, generation)) return;
+        resolved = await resolveEventForClip(activeClip, signal);
+        if (!resolved || !isClipCurrent(clipKey, generation)) return;
       } catch (err) {
         if (err?.name === "AbortError" || !isClipCurrent(clipKey, generation)) {
           return;
@@ -1815,12 +1572,12 @@ export function EventStoreView({ clip }) {
           error:
             err instanceof Error && err.message
               ? err.message
-              : "Unable to resolve persisted event for ActiveClip.",
+              : "Unable to resolve the event for the ActiveClip.",
         });
         return;
       }
 
-      const clipEventRows = normalizedHistory.rows;
+      const clipEventRows = resolved.rows;
       const authoritativeEvent = resolveAuthoritativeEvent(
         clipEventRows,
         activeClip,
@@ -1830,11 +1587,8 @@ export function EventStoreView({ clip }) {
         updateScopedStore(clipKey, generation, {
           loadingEvent: false,
           eventRows: [],
-          directory: normalizedHistory.directory,
-          notice:
-            preloaded && preloaded.events.length === 0
-              ? `No persisted events exist for substrate "${activeClip.substrate}".`
-              : `No persisted event found for ActiveClip (${activeClip.substrate} · activation ${activeClip.activation}).`,
+          directory: resolved.directory,
+          notice: `No persisted event found for ActiveClip (${activeClip.substrate} · activation ${activeClip.activation}).`,
         });
         return;
       }
@@ -1845,7 +1599,7 @@ export function EventStoreView({ clip }) {
         updateScopedStore(clipKey, generation, {
           loadingEvent: false,
           eventRows: clipEventRows,
-          directory: normalizedHistory.directory,
+          directory: resolved.directory,
           authoritativeEvent,
           error:
             "Resolved event is missing authoritative event.heritage.state.",
@@ -1858,7 +1612,7 @@ export function EventStoreView({ clip }) {
         updateScopedStore(clipKey, generation, {
           loadingEvent: false,
           eventRows: clipEventRows,
-          directory: normalizedHistory.directory,
+          directory: resolved.directory,
           authoritativeEvent,
           heritageState,
           error: `Event heritage activation (${String(heritageActivation)}) does not match ActiveClip (${activeClip.activation}).`,
@@ -1869,13 +1623,13 @@ export function EventStoreView({ clip }) {
       updateScopedStore(clipKey, generation, {
         loadingEvent: false,
         eventRows: clipEventRows,
-        directory: normalizedHistory.directory,
+        directory: resolved.directory,
         authoritativeEvent,
         heritageState,
         loadingNetworks: true,
       });
 
-      // Step 4: Resolve applicable network derivations from the event's authoritative heritage state.
+      // Step 4: Resolve applicable network derivations for { substrate, activation }.
       let derivedResult;
       try {
         derivedResult = await fetchDerivedNetworksFromHeritage(
@@ -1889,7 +1643,7 @@ export function EventStoreView({ clip }) {
         }
         updateScopedStore(clipKey, generation, {
           loadingNetworks: false,
-          error: `Unable to derive networks from event heritage state: ${
+          error: `Unable to derive networks for the ActiveClip: ${
             err instanceof Error ? err.message : "unknown API error"
           }`,
         });
@@ -2034,10 +1788,6 @@ export function EventStoreView({ clip }) {
   }, [
     activeClip,
     clipKey,
-    historyState.substrate,
-    historyState.loading,
-    historyState.events,
-    historyState.directory,
     isClipCurrent,
     updateScopedStore,
     loadPersistentPayloadsForClip,
@@ -2116,14 +1866,13 @@ export function EventStoreView({ clip }) {
 
   const overviewBadge = (() => {
     if (!activeClip) return <Pill tone="warn">Missing ActiveClip</Pill>;
-    if (historyState.loading || scopedStore.loadingEvent) return <Pill>Resolving event</Pill>;
-    if (availableClips.length === 0 && !historyState.error) return <Pill tone="neutral">No persisted clips</Pill>;
+    if (scopedStore.loadingEvent) return <Pill>Resolving event</Pill>;
     if (!heritageState) return <Pill tone="warn">No heritage state</Pill>;
     if (scopedStore.loadingNetworks) return <Pill>Deriving networks</Pill>;
     if (observationRunning) return <Pill tone="ok">Syncing</Pill>;
     if (anyNetworkLoading || scopedStore.loadingPayloads) return <Pill>Loading storage</Pill>;
     if (Object.values(scopedStore.budgetErrors).some(Boolean)) return <Pill tone="warn">Budget error</Pill>;
-    if (historyState.error || scopedStore.error) return <Pill tone="warn">Partial</Pill>;
+    if (scopedStore.error) return <Pill tone="warn">Partial</Pill>;
     return <Pill tone="ok">Ready</Pill>;
   })();
 
@@ -2435,14 +2184,14 @@ export function EventStoreView({ clip }) {
   const closeBitMinerLogs = useCallback(() => setLogViewer(null), []);
 
   const eventsEmptyText = activeClip
-    ? scopedStore.loadingEvent || historyState.loading
-      ? "Resolving persisted event for ActiveClip…"
-      : "No persisted event records matched this ActiveClip."
+    ? scopedStore.loadingEvent
+      ? "Resolving event for ActiveClip…"
+      : "No event records matched this ActiveClip."
     : "An ActiveClip ({ substrate, activation }) must be supplied.";
 
   const emptyGroup = { transit_inputs: [], exile_outputs: [], unclassified: [] };
 
-  // Overview board fields sourced directly from the matching persisted event (and its heritage state).
+  // Overview board fields sourced directly from the event of the selected ActiveClip (and its heritage state).
   const overviewKind = pickEventField(focusedEvent, heritageState, ["kind"]);
   const overviewRecord =
     authoritativeRecord ||
@@ -2493,9 +2242,8 @@ export function EventStoreView({ clip }) {
             </h1>
 
             <p className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 sm:text-sm dark:text-zinc-400">
-              Persisted event history index, Available Clips derived from
-              persisted events, ActiveClip-scoped overview, derived networks,
-              budgets, payload boards, Bitcoin observation, and wirepackets.
+              ActiveClip-scoped overview, derived networks, budgets, payload
+              boards, Bitcoin observation, and wirepackets.
             </p>
           </div>
 
@@ -2525,7 +2273,7 @@ export function EventStoreView({ clip }) {
               </a>
             </div>
 
-            {/* ActiveClip substrate & persisted Available Clips selector */}
+            {/* ActiveClip identity (read-only; selection is owned by the main page) */}
             <div className="rounded-xl border border-zinc-200 bg-white px-3 py-2 dark:border-zinc-700 dark:bg-zinc-950">
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 <div className="min-w-0">
@@ -2538,115 +2286,25 @@ export function EventStoreView({ clip }) {
                   </span>
                 </div>
 
-                <label className="block min-w-0">
-                  <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                    Available clip
+                <div className="min-w-0">
+                  <span className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                    ActiveClip activation
                   </span>
 
-                  <select
-                    aria-label="Select persisted activation clip"
-                    value={activeClip ? String(activeClip.activation) : ""}
-                    onChange={(event) => selectAvailableClip(event.target.value)}
-                    disabled={!activeClip || availableClips.length === 0}
-                    className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-emerald-600 dark:border-zinc-700 dark:bg-zinc-900"
-                  >
-                    {availableClips.length === 0 ? (
-                      <option value="">
-                        {historyState.loading
-                          ? "Loading clips…"
-                          : "No persisted clips"}
-                      </option>
-                    ) : (
-                      availableClips.map((entry) => (
-                        <option key={entry.key} value={String(entry.activation)}>
-                          Activation {entry.activation}
-                          {entry.record ? ` · ${entry.record}` : ""}
-                        </option>
-                      ))
-                    )}
-                  </select>
-                </label>
+                  <span className="mt-0.5 block truncate font-mono text-xs">
+                    {activeClip ? activeClip.activation : "—"}
+                  </span>
+                </div>
               </div>
             </div>
           </div>
         </header>
 
         {/* Notifications */}
-        {historyState.error && <Notice>{historyState.error}</Notice>}
         {scopedStore.error && <Notice>{scopedStore.error}</Notice>}
         {scopedStore.notice && <Notice type="success">{scopedStore.notice}</Notice>}
 
-        {/* Available Clips strip (populated strictly from persisted events) */}
-        <section
-          aria-label="Available clips"
-          className="qtm-pop rounded-2xl border border-zinc-200 bg-white p-3.5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-600 dark:text-zinc-300">
-                Available clips
-              </h2>
-              <Pill>{availableClips.length}</Pill>
-              {activeClip && (
-                <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
-                  {clipKey}
-                </span>
-              )}
-            </div>
-
-            <button
-              type="button"
-              className={LOG_BUTTON}
-              disabled={!activeClip?.substrate || historyState.loading}
-              onClick={() => loadPersistedHistory(activeClip?.substrate)}
-            >
-              {historyState.loading ? "Refreshing…" : "Refresh events"}
-            </button>
-          </div>
-
-          {historyState.loading && availableClips.length === 0 ? (
-            <p className="mt-2.5 text-xs text-zinc-500">
-              Loading persisted events for {activeClip?.substrate}…
-            </p>
-          ) : availableClips.length === 0 ? (
-            <p className="mt-2.5 text-xs text-zinc-500">
-              No persisted events found for this substrate. No clips are
-              synthesized when persisted history is empty.
-            </p>
-          ) : (
-            <div className="mt-2.5 flex flex-wrap gap-2">
-              {availableClips.map((entry) => {
-                const selected =
-                  activeClip && entry.activation === activeClip.activation;
-                return (
-                  <button
-                    key={entry.key}
-                    type="button"
-                    aria-pressed={selected}
-                    onClick={() => selectAvailableClip(entry.activation)}
-                    className={`rounded-xl border px-3 py-2 text-left transition ${
-                      selected
-                        ? "border-emerald-600 bg-emerald-50/80 text-emerald-950 dark:border-emerald-500 dark:bg-emerald-950/50 dark:text-emerald-100"
-                        : "border-zinc-200 bg-zinc-50/70 text-zinc-800 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-950/60 dark:text-zinc-200 dark:hover:bg-zinc-800/70"
-                    }`}
-                  >
-                    <div className="flex items-center gap-2 text-xs font-semibold">
-                      <span>Activation {entry.activation}</span>
-                      <Pill tone={entry.heritageVerified ? "ok" : "neutral"}>
-                        {entry.heritageVerified ? "Heritage" : "Persisted"}
-                      </Pill>
-                    </div>
-                    <p className="mt-0.5 max-w-[16rem] truncate font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
-                      {entry.record || "Record unavailable"}
-                    </p>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </section>
-
-        {/* Overview Board (populated directly from the matching persisted event) */}
+        {/* Overview Board (populated directly from the event of the selected ActiveClip) */}
         <Card
           key={clipKey || "no-clip"}
           defaultOpen
@@ -2661,9 +2319,9 @@ export function EventStoreView({ clip }) {
         >
           {!focusedEvent ? (
             <p className="text-xs text-zinc-500">
-              {scopedStore.loadingEvent || historyState.loading
-                ? "Loading persisted event summary for the selected clip…"
-                : "No persisted event summary available for this ActiveClip."}
+              {scopedStore.loadingEvent
+                ? "Loading event summary for the ActiveClip…"
+                : "No event summary available for this ActiveClip."}
             </p>
           ) : (
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
@@ -2774,7 +2432,7 @@ export function EventStoreView({ clip }) {
         {/* Diagnostics */}
         <SectionHeading title="Diagnostics" />
 
-        {/* Persisted event records */}
+        {/* Clip event records */}
         <Card
           defaultOpen
           scroll
