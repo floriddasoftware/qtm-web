@@ -3,9 +3,9 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useSearchParams } from "next/navigation";
 // Same API origin configuration as the main page (src/app/page.js).
 const API_BASE = (
-process.env.NEXT_PUBLIC_QTM_API_BASE ||
-"https://qtm-api.onrender.com"
-).replace(//+$/, "");
+  process.env.NEXT_PUBLIC_QTM_API_BASE ||
+  "https://qtm-api.onrender.com"
+).replace(/\/+$/, "");
 const COIN_TYPES = [
 { key: "bitcoin", name: "Bitcoin", symbol: "BTC", type: 0, path: "m/44'/0'/0'/0/0" },
 { key: "ethereum", name: "Ethereum", symbol: "ETH", type: 60, path: "m/44'/60'/0'/0/0" },
