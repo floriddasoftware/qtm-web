@@ -313,8 +313,8 @@ response = await callRuntime("resolveClipEvent", { clip });
 } catch (err) {
 if (err?.name === "AbortError") throw err;
 const fallback = await apiRequest(
-⁠/wallets/${enc(clip.substrate)}/events?activation=${enc(clip.activation)}⁠,
-{ signal },
+  `/wallets/${enc(clip.substrate)}/events?activation=${enc(clip.activation)}`,
+  { signal },
 );
 response = fallback;
 }
