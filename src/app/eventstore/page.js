@@ -141,6 +141,58 @@ function sameActiveClip(a, b) {
   return a.substrate === b.substrate && a.activation === b.activation;
 }
 
+/* ───────────── Runtime call (mirrors callRuntime in src/app/page.js) ───────────── */
+
+function nativeInvoke() {
+  if (typeof window === "undefined") return null;
+  return (
+    window.__TAURI__?.core?.invoke ??
+    window.__TAURI_INTERNALS__?.invoke ??
+    null
+  );
+}
+
+const NATIVE_COMMANDS = {
+  resolveClipEvent: "qtm_clip_event",
+};
+
+const API_ROUTES = {
+  resolveClipEvent: ({ clip }) => [
+    "GET",
+    `/wallets/${enc(clip.substrate)}/activations/${enc(clip.activation)}/open`,
+  ],
+};
+
+async function callRuntime(operation, args = {}, options = {}) {
+  const command = NATIVE_COMMANDS[operation];
+  if (!command) {
+    throw new Error(`Unsupported QP runtime operation: ${String(operation)}.`);
+  }
+
+  const invoke = nativeInvoke();
+
+  if (invoke) {
+    try {
+      return await invoke(command, args);
+    } catch (cause) {
+      throw new Error(
+        typeof cause === "string" && cause.trim()
+          ? cause.trim()
+          : cause instanceof Error && cause.message
+            ? cause.message
+            : "The QP runtime reported an error.",
+      );
+    }
+  }
+
+  const route = API_ROUTES[operation];
+  if (typeof route !== "function") {
+    throw new Error(`Unsupported QP runtime operation: ${String(operation)}.`);
+  }
+  const [method, path] = route(args || {});
+  return apiRequest(path, { method, signal: options.signal });
+}
+
 /* ───────────── Event Heritage & Selected Event Resolution ───────────── */
 
 function heritageStateOf(event) {
@@ -204,8 +256,8 @@ function extractRawEventsArray(response) {
 }
 
 /**
- * Normalizes the event rows returned by the clip event getter
- * (GET /wallets/{substrate}/activations/{activation}/event)
+ * Normalizes the event rows returned by the Open Activation route
+ * (GET /wallets/{substrate}/activations/{activation}/open)
  * without inventing records or assuming array index == activation.
  */
 function normalizePersistedEventIndex(response, substrate) {
@@ -295,22 +347,38 @@ function resolveAuthoritativeEvent(rows, clip) {
   return ordered[ordered.length - 1] || null;
 }
 
-// Resolves the event for the ActiveClip through the Open Activation route:
-// GET /wallets/{substrate}/activations/{activation}/open -> { substrate, event }
-// The returned `event` (PayloadEventView) carries `record`, `activation` and
-// `heritage.state`. The requested activation is the one sent to the backend.
+// Resolves the authoritative event for the ActiveClip using the Open Activation
+// route. No event-history listing is involved.
 async function resolveEventForClip(clip, signal) {
-  const response = await apiRequest(
-    `/wallets/${enc(clip.substrate)}/activations/${enc(clip.activation)}/open`,
+  const response = await callRuntime(
+    "resolveClipEvent",
+    { clip },
     { signal },
   );
   if (signal?.aborted) return null;
 
-  const event = response?.event;
-  if (!event || typeof event !== "object" || Array.isArray(event)) {
-    return { rows: [], directory: "" };
+  if (Array.isArray(response) || extractRawEventsArray(response)) {
+    return normalizePersistedEventsForClip(response, clip);
   }
-  return normalizePersistedEventsForClip({ events: [event] }, clip);
+
+  const singleEvent =
+    response?.event && typeof response.event === "object" && !Array.isArray(response.event)
+      ? response.event
+      : response && typeof response === "object" && !Array.isArray(response) && heritageStateOf(response)
+        ? response
+        : null;
+
+  if (singleEvent) {
+    return normalizePersistedEventsForClip(
+      {
+        events: [singleEvent],
+        directory: typeof response?.directory === "string" ? response.directory : "",
+      },
+      clip,
+    );
+  }
+
+  return { rows: [], directory: "" };
 }
 
 function normalizeNetworkId(value) {
@@ -1281,6 +1349,7 @@ const EMPTY_CLIP_STORE = Object.freeze({
 export function EventStoreView({ clip }) {
   // The ActiveClip is supplied by the parent/route and is the only event context.
   // It is keyed by value so an identical { substrate, activation } never re-triggers loading.
+  const router = useRouter();
   const clipSubstrate = clip?.substrate;
   const clipActivation = clip?.activation;
   const activeClip = useMemo(
@@ -1288,50 +1357,12 @@ export function EventStoreView({ clip }) {
     [clipSubstrate, clipActivation],
   );
 
-  const router = useRouter();
   const [store, setStore] = useState(EMPTY_CLIP_STORE);
   const [logViewer, setLogViewer] = useState(null);
-  // Activation count for the substrate, read from the existing GET /wallets list.
-  const [activationInfo, setActivationInfo] = useState({ substrate: "", count: null });
-
-  // Activation ordinals available for the substrate (1..count) come from the
-  // substrate's reported activation count; no event listing is used.
-  useEffect(() => {
-    if (!clipSubstrate) return;
-    const controller = new AbortController();
-    apiRequest("/wallets", { signal: controller.signal })
-      .then((body) => {
-        const entries = Array.isArray(body?.substrates) ? body.substrates : [];
-        const entry = entries.find((item) => item?.name === clipSubstrate);
-        setActivationInfo({
-          substrate: clipSubstrate,
-          count: parseActivationNumber(entry?.activations),
-        });
-      })
-      .catch(() => {});
-    return () => controller.abort();
-  }, [clipSubstrate]);
-
-  const activationOptions = useMemo(() => {
-    const count =
-      activationInfo.substrate === clipSubstrate ? activationInfo.count ?? 0 : 0;
-    const highest = Math.max(count, clipActivation ?? 0);
-    const options = [];
-    if (clipActivation === 0) options.push(0);
-    for (let n = 1; n <= highest; n += 1) options.push(n);
-    return options;
-  }, [activationInfo, clipSubstrate, clipActivation]);
-
-  // Selecting an activation updates the ActiveClip route; the existing
-  // ActiveClip effect then aborts the previous request and opens the new one.
-  const selectActivation = (event) => {
-    const next = parseActivationNumber(event.target.value);
-    if (!activeClip || next === null || next === activeClip.activation) return;
-    router.replace(
-      `/eventstore?substrate=${enc(activeClip.substrate)}&activation=${enc(next)}`,
-      { scroll: false },
-    );
-  };
+  // Max activation ordinal available for the substrate (from heritage activations count).
+  const [maxActivation, setMaxActivation] = useState(() =>
+    typeof clipActivation === "number" && clipActivation >= 1 ? clipActivation : null,
+  );
 
   // Monotonic lifecycle generation & cancellation controller scoped exclusively to activeClip.
   const lifecycleGenRef = useRef(0);
@@ -1530,6 +1561,12 @@ export function EventStoreView({ clip }) {
       clipKey,
       loadingEvent: true,
     });
+    // Floor historical options to the incoming activation until heritage reports the true max.
+    if (activeClip.activation >= 1) {
+      setMaxActivation((prev) =>
+        prev == null || prev < activeClip.activation ? activeClip.activation : prev,
+      );
+    }
 
     void (async () => {
       // Step 2: Resolve the event corresponding to this ActiveClip.
@@ -1602,6 +1639,12 @@ export function EventStoreView({ clip }) {
         heritageState,
         loadingNetworks: true,
       });
+
+      // Historical activation upper bound for this substrate comes from the
+      // authoritative heritage activations count (not from a fabricated list).
+      if (heritageActivation !== null && heritageActivation >= 1) {
+        setMaxActivation(heritageActivation);
+      }
 
       // Step 4: Resolve applicable network derivations for { substrate, activation }.
       let derivedResult;
@@ -1773,6 +1816,42 @@ export function EventStoreView({ clip }) {
   const heritageState = scopedStore.heritageState;
   const focusedEvent = authoritativeEvent || scopedStore.derivedEventSnapshot || null;
   const authoritativeRecord = recordOf(authoritativeEvent);
+
+  // Live ActiveClips from Bitminer observation status.clips (filesystem substrates
+  // currently at the same activation ordinal). Each is a full { substrate, activation }.
+  // Observation status is the authoritative source; we do not invent clips.
+  const liveClips = useMemo(() => {
+    if (!activeClip) return [];
+    const seen = new Map();
+    // Prefer clips from any loaded observation status for this activation.
+    for (const status of Object.values(scopedStore.observations || {})) {
+      if (!status || typeof status !== "object") continue;
+      const statusActivation = parseActivationNumber(status.activation);
+      if (statusActivation === null || statusActivation !== activeClip.activation) continue;
+      const rows = Array.isArray(status.clips) ? status.clips : [];
+      for (const row of rows) {
+        const substrate =
+          typeof row?.substrate === "string" ? row.substrate.trim() : "";
+        if (!substrate) continue;
+        const key = `${substrate}:${statusActivation}`;
+        if (!seen.has(key)) {
+          seen.set(
+            key,
+            createActiveClip({ substrate, activation: statusActivation }),
+          );
+        }
+      }
+    }
+    // Always include the currently selected clip so the selector never loses it.
+    const selfKey = activeClipKey(activeClip);
+    if (selfKey && !seen.has(selfKey)) {
+      seen.set(selfKey, activeClip);
+    }
+    return [...seen.values()].filter(Boolean).sort((a, b) => {
+      if (a.substrate !== b.substrate) return a.substrate < b.substrate ? -1 : 1;
+      return a.activation - b.activation;
+    });
+  }, [activeClip, scopedStore.observations]);
 
   const retainedMass = useMemo(() => {
     const rawMass = pickEventField(authoritativeEvent, heritageState, [
@@ -2247,38 +2326,80 @@ export function EventStoreView({ clip }) {
               </a>
             </div>
 
-            {/* ActiveClip identity (read-only; selection is owned by the main page) */}
+            {/* ActiveClip selector: live Bitminer observation clips + historical activations */}
             <div className="rounded-xl border border-zinc-200 bg-white px-3 py-2 dark:border-zinc-700 dark:bg-zinc-950">
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                <div className="min-w-0">
-                  <span className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                    ActiveClip substrate
-                  </span>
-
-                  <span className="mt-0.5 block truncate font-mono text-xs">
-                    {activeClip?.substrate ?? "No ActiveClip"}
-                  </span>
-                </div>
-
-                <label className="block min-w-0">
-                  <span className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                    ActiveClip activation
-                  </span>
-
+              <div className="min-w-0">
+                <span className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                  ActiveClip
+                </span>
+                {activeClip ? (
                   <select
-                    aria-label="Select activation"
-                    className="mt-0.5 h-7 w-full min-w-0 rounded-lg border border-zinc-200 bg-white px-2 font-mono text-xs outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950"
-                    value={activeClip ? String(activeClip.activation) : ""}
-                    disabled={!activeClip}
-                    onChange={selectActivation}
+                    aria-label="Select live ActiveClip or historical activation"
+                    className="mt-1 h-9 w-full min-w-0 rounded-lg border border-zinc-200 bg-white px-2 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-950"
+                    value={activeClipKey(activeClip)}
+                    disabled={scopedStore.loadingEvent}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      if (!value || value === activeClipKey(activeClip)) return;
+                      const [nextSubstrate, nextActStr] = value.split(":");
+                      const nextActivation = parseActivationNumber(nextActStr);
+                      if (
+                        !nextSubstrate ||
+                        nextActivation === null ||
+                        nextActivation < 1
+                      ) {
+                        return;
+                      }
+                      // Bound selection to a valid ActiveClip; the existing lifecycle
+                      // aborts prior work and loads via GET .../open for the new clip.
+                      const params = new URLSearchParams();
+                      params.set("substrate", nextSubstrate);
+                      params.set("activation", String(nextActivation));
+                      router.replace(`/eventstore?${params.toString()}`);
+                    }}
                   >
-                    {activationOptions.map((n) => (
-                      <option key={n} value={String(n)}>
-                        {n}
-                      </option>
-                    ))}
+                    {liveClips.length > 0 && (
+                      <optgroup label="Live observation clips">
+                        {liveClips.map((c) => (
+                          <option
+                            key={activeClipKey(c)}
+                            value={activeClipKey(c)}
+                          >
+                            {c.substrate} · activation {c.activation}
+                            {sameActiveClip(c, activeClip) ? " (current)" : ""}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {maxActivation != null && maxActivation >= 1 && (
+                      <optgroup label={`Historical activations · ${activeClip.substrate}`}>
+                        {Array.from({ length: maxActivation }, (_, i) => i + 1)
+                          .filter((ordinal) => {
+                            const key = `${activeClip.substrate}:${ordinal}`;
+                            // Prefer the live entry when the ordinal is already live for this substrate.
+                            return !liveClips.some((c) => activeClipKey(c) === key);
+                          })
+                          .map((ordinal) => {
+                            const key = `${activeClip.substrate}:${ordinal}`;
+                            return (
+                              <option key={key} value={key}>
+                                {activeClip.substrate} · activation {ordinal}
+                              </option>
+                            );
+                          })}
+                      </optgroup>
+                    )}
                   </select>
-                </label>
+                ) : (
+                  <span className="mt-0.5 block truncate font-mono text-xs">
+                    No ActiveClip
+                  </span>
+                )}
+                <p className="mt-1 text-[10px] leading-4 text-zinc-500 dark:text-zinc-400">
+                  Live clips come from Bitminer observation status.clips for the
+                  current activation. Historical entries open a persisted
+                  activation on the same substrate via /open.
+                </p>
               </div>
             </div>
           </div>
