@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 // Same API origin configuration as the main page (src/app/page.js).
 const API_BASE = (
@@ -139,58 +139,6 @@ function activeClipKey(clip) {
 function sameActiveClip(a, b) {
   if (!a || !b) return false;
   return a.substrate === b.substrate && a.activation === b.activation;
-}
-
-/* ───────────── Runtime call (mirrors callRuntime in src/app/page.js) ───────────── */
-
-function nativeInvoke() {
-  if (typeof window === "undefined") return null;
-  return (
-    window.__TAURI__?.core?.invoke ??
-    window.__TAURI_INTERNALS__?.invoke ??
-    null
-  );
-}
-
-const NATIVE_COMMANDS = {
-  resolveClipEvent: "qtm_clip_event",
-};
-
-const API_ROUTES = {
-  resolveClipEvent: ({ clip }) => [
-    "GET",
-    `/wallets/${enc(clip.substrate)}/activations/${enc(clip.activation)}/event`,
-  ],
-};
-
-async function callRuntime(operation, args = {}, options = {}) {
-  const command = NATIVE_COMMANDS[operation];
-  if (!command) {
-    throw new Error(`Unsupported QP runtime operation: ${String(operation)}.`);
-  }
-
-  const invoke = nativeInvoke();
-
-  if (invoke) {
-    try {
-      return await invoke(command, args);
-    } catch (cause) {
-      throw new Error(
-        typeof cause === "string" && cause.trim()
-          ? cause.trim()
-          : cause instanceof Error && cause.message
-            ? cause.message
-            : "The QP runtime reported an error.",
-      );
-    }
-  }
-
-  const route = API_ROUTES[operation];
-  if (typeof route !== "function") {
-    throw new Error(`Unsupported QP runtime operation: ${String(operation)}.`);
-  }
-  const [method, path] = route(args || {});
-  return apiRequest(path, { method, signal: options.signal });
 }
 
 /* ───────────── Event Heritage & Selected Event Resolution ───────────── */
@@ -347,38 +295,22 @@ function resolveAuthoritativeEvent(rows, clip) {
   return ordered[ordered.length - 1] || null;
 }
 
-// Resolves the authoritative event for the ActiveClip using only the
-// clip-specific event getter. No event-history listing is involved.
+// Resolves the event for the ActiveClip through the Open Activation route:
+// GET /wallets/{substrate}/activations/{activation}/open -> { substrate, event }
+// The returned `event` (PayloadEventView) carries `record`, `activation` and
+// `heritage.state`. The requested activation is the one sent to the backend.
 async function resolveEventForClip(clip, signal) {
-  const response = await callRuntime(
-    "resolveClipEvent",
-    { clip },
+  const response = await apiRequest(
+    `/wallets/${enc(clip.substrate)}/activations/${enc(clip.activation)}/open`,
     { signal },
   );
   if (signal?.aborted) return null;
 
-  if (Array.isArray(response) || extractRawEventsArray(response)) {
-    return normalizePersistedEventsForClip(response, clip);
+  const event = response?.event;
+  if (!event || typeof event !== "object" || Array.isArray(event)) {
+    return { rows: [], directory: "" };
   }
-
-  const singleEvent =
-    response?.event && typeof response.event === "object" && !Array.isArray(response.event)
-      ? response.event
-      : response && typeof response === "object" && !Array.isArray(response) && heritageStateOf(response)
-        ? response
-        : null;
-
-  if (singleEvent) {
-    return normalizePersistedEventsForClip(
-      {
-        events: [singleEvent],
-        directory: typeof response?.directory === "string" ? response.directory : "",
-      },
-      clip,
-    );
-  }
-
-  return { rows: [], directory: "" };
+  return normalizePersistedEventsForClip({ events: [event] }, clip);
 }
 
 function normalizeNetworkId(value) {
@@ -1356,8 +1288,50 @@ export function EventStoreView({ clip }) {
     [clipSubstrate, clipActivation],
   );
 
+  const router = useRouter();
   const [store, setStore] = useState(EMPTY_CLIP_STORE);
   const [logViewer, setLogViewer] = useState(null);
+  // Activation count for the substrate, read from the existing GET /wallets list.
+  const [activationInfo, setActivationInfo] = useState({ substrate: "", count: null });
+
+  // Activation ordinals available for the substrate (1..count) come from the
+  // substrate's reported activation count; no event listing is used.
+  useEffect(() => {
+    if (!clipSubstrate) return;
+    const controller = new AbortController();
+    apiRequest("/wallets", { signal: controller.signal })
+      .then((body) => {
+        const entries = Array.isArray(body?.substrates) ? body.substrates : [];
+        const entry = entries.find((item) => item?.name === clipSubstrate);
+        setActivationInfo({
+          substrate: clipSubstrate,
+          count: parseActivationNumber(entry?.activations),
+        });
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [clipSubstrate]);
+
+  const activationOptions = useMemo(() => {
+    const count =
+      activationInfo.substrate === clipSubstrate ? activationInfo.count ?? 0 : 0;
+    const highest = Math.max(count, clipActivation ?? 0);
+    const options = [];
+    if (clipActivation === 0) options.push(0);
+    for (let n = 1; n <= highest; n += 1) options.push(n);
+    return options;
+  }, [activationInfo, clipSubstrate, clipActivation]);
+
+  // Selecting an activation updates the ActiveClip route; the existing
+  // ActiveClip effect then aborts the previous request and opens the new one.
+  const selectActivation = (event) => {
+    const next = parseActivationNumber(event.target.value);
+    if (!activeClip || next === null || next === activeClip.activation) return;
+    router.replace(
+      `/eventstore?substrate=${enc(activeClip.substrate)}&activation=${enc(next)}`,
+      { scroll: false },
+    );
+  };
 
   // Monotonic lifecycle generation & cancellation controller scoped exclusively to activeClip.
   const lifecycleGenRef = useRef(0);
@@ -2286,15 +2260,25 @@ export function EventStoreView({ clip }) {
                   </span>
                 </div>
 
-                <div className="min-w-0">
+                <label className="block min-w-0">
                   <span className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                     ActiveClip activation
                   </span>
 
-                  <span className="mt-0.5 block truncate font-mono text-xs">
-                    {activeClip ? activeClip.activation : "—"}
-                  </span>
-                </div>
+                  <select
+                    aria-label="Select activation"
+                    className="mt-0.5 h-7 w-full min-w-0 rounded-lg border border-zinc-200 bg-white px-2 font-mono text-xs outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950"
+                    value={activeClip ? String(activeClip.activation) : ""}
+                    disabled={!activeClip}
+                    onChange={selectActivation}
+                  >
+                    {activationOptions.map((n) => (
+                      <option key={n} value={String(n)}>
+                        {n}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
             </div>
           </div>
