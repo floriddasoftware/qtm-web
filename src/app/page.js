@@ -1,10 +1,21 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+
+// Substrate state lives in the machine-local ~/.qp/substrates and is operated
+// on by the QP runtime. Inside a native shell (for example Tauri) the console
+// calls that runtime directly through IPC: no HTTP. A plain browser cannot
+// reach the local filesystem, so it uses the qtm-api HTTP server.
+// Prefer NEXT_PUBLIC_QTM_API_BASE when set; otherwise fall back to the public
+// qtm-api deployment so a Vercel (or similar) host never routes /wallets to
+// itself.
+// Substrate storage is owned by the server-side QP runtime.
+// substrate_root() is resolved by Rust, never by the browser.
 
 const TABS = [
   { id: "create", label: "Create" },
+  { id: "open", label: "Open" },
+  { id: "derive", label: "Derive" },
   { id: "receive", label: "Receive" },
   { id: "transit", label: "Transit" },
   { id: "exile", label: "Exile" },
@@ -14,8 +25,6 @@ const API_BASE = (
   process.env.NEXT_PUBLIC_QTM_API_BASE ||
   "https://qtm-api.onrender.com"
 ).replace(/\/+$/, "");
-
-const AUTHORITATIVE_EVENT_STORAGE_KEY = "qtm.authoritativeEventByClip";
 
 const isRecord = (value) =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -111,105 +120,6 @@ function hasContent(value) {
   );
 }
 
-function parsePositiveActivation(value) {
-  if (typeof value === "number") {
-    return Number.isSafeInteger(value) && value >= 1 ? value : null;
-  }
-  if (typeof value === "bigint") {
-    return value >= 1n && value <= BigInt(Number.MAX_SAFE_INTEGER)
-      ? Number(value)
-      : null;
-  }
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!/^\d+$/.test(trimmed)) return null;
-    const parsed = Number(trimmed);
-    return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : null;
-  }
-  return null;
-}
-
-function unwrapAuthoritativeEventResponse(payload, clip) {
-  if (!isRecord(payload)) return null;
-
-  const candidate = isRecord(payload.event)
-    ? payload.event
-    : isRecord(payload.data?.event)
-      ? payload.data.event
-      : isRecord(payload.heritage) ||
-          isRecord(payload.kind) ||
-          isRecord(payload.record)
-        ? payload
-        : null;
-
-  if (!isRecord(candidate)) return null;
-
-  const responseSubstrate =
-    typeof payload.substrate === "string" && payload.substrate.trim()
-      ? payload.substrate.trim()
-      : typeof candidate.substrate === "string" && candidate.substrate.trim()
-        ? candidate.substrate.trim()
-        : typeof candidate.heritage?.state?.substrate === "string" &&
-            candidate.heritage.state.substrate.trim()
-          ? candidate.heritage.state.substrate.trim()
-          : "";
-
-  if (responseSubstrate && responseSubstrate !== clip.substrate) {
-    throw new Error(
-      `Returned event substrate (${responseSubstrate}) does not match ActiveClip (${clip.substrate}).`
-    );
-  }
-
-  const rawActivation =
-    payload.activation ??
-    candidate.activation ??
-    candidate.heritage?.state?.activations ??
-    candidate.heritage?.state?.activation_count ??
-    candidate.heritage?.state?.activation;
-
-  const parsedActivation =
-    rawActivation !== undefined && rawActivation !== null
-      ? parsePositiveActivation(rawActivation)
-      : null;
-
-  if (parsedActivation !== null && parsedActivation !== clip.activation) {
-    throw new Error(
-      `Returned event activation (${parsedActivation}) does not match ActiveClip (${clip.activation}).`
-    );
-  }
-
-  return candidate;
-}
-
-function persistAuthoritativeEventBinding(binding) {
-  if (typeof window === "undefined" || !binding?.substrate || !binding?.activation) {
-    return;
-  }
-  try {
-    const key = `${binding.substrate}:${binding.activation}`;
-    const raw = window.sessionStorage.getItem(AUTHORITATIVE_EVENT_STORAGE_KEY);
-    const map = raw ? JSON.parse(raw) : {};
-    const nextMap = isRecord(map) ? { ...map } : {};
-    if (binding.event && isRecord(binding.event)) {
-      nextMap[key] = {
-        substrate: binding.substrate,
-        activation: binding.activation,
-        event: binding.event,
-        status: binding.status || "ready",
-        error: "",
-      };
-    } else {
-      delete nextMap[key];
-    }
-    window.sessionStorage.setItem(
-      AUTHORITATIVE_EVENT_STORAGE_KEY,
-      JSON.stringify(nextMap)
-    );
-  } catch {
-    // Ignore storage quota or private mode restrictions.
-  }
-}
-
 class RuntimeError extends Error {
   constructor(message, details = {}) {
     super(message);
@@ -221,21 +131,26 @@ class RuntimeError extends Error {
   }
 }
 
+// Native IPC entry point, present only inside a native shell.
 function nativeInvoke() {
-  if (typeof window === "undefined" || !isTauri()) return null;
-  return invoke;
+  if (typeof window === "undefined") return null;
+
+  return (
+    window.__TAURI__?.core?.invoke ??
+    window.__TAURI_INTERNALS__?.invoke ??
+    null
+  );
 }
 
 const NATIVE_COMMANDS = {
   listSubstrates: "qtm_list_substrates",
   listNetworks: "qtm_list_networks",
   createSubstrate: "qtm_create",
+  openSubstrate: "qtm_open",
   receive: "qtm_receive",
   transit: "qtm_transit",
   exile: "qtm_exile",
   listEvents: "qtm_events",
-  getActivationEvent: "qtm_clip_event",
-  submissionValue: "qtm_submission_value",
 };
 
 const API_ROUTES = {
@@ -246,11 +161,6 @@ const API_ROUTES = {
   openSubstrate: ({ name, activation }) => [
     "GET",
     `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/open`,
-  ],
-
-  getActivationEvent: ({ substrate, activation }) => [
-    "GET",
-    `/wallets/${encodeURIComponent(substrate)}/activations/${encodeURIComponent(activation)}/event`,
   ],
 
   receive: ({ name }) => [
@@ -273,9 +183,14 @@ const API_ROUTES = {
     `/wallets/${encodeURIComponent(name)}/events`,
   ],
 
-  submissionValue: ({ name, activation, network, field }) => [
+  deriveSubmission: ({ name, activation, submission, network }) => [
+    "POST",
+    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/submissions/${encodeURIComponent(submission)}/networks/${encodeURIComponent(network)}/derive`,
+  ],
+
+  submissionValue: ({ name, activation, submission, network, field }) => [
     "GET",
-    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/${encodeURIComponent(field)}`,
+    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/submissions/${encodeURIComponent(submission)}/networks/${encodeURIComponent(network)}/${encodeURIComponent(field)}`,
   ],
 };
 
@@ -305,9 +220,9 @@ function parseApiResponse(raw) {
 async function apiRequest(path, options = {}) {
   const method = options.method || "GET";
   const url = `${API_BASE}${path}`;
-  const startedAt = performance.now();
+
   let response;
-  console.info(`[QTM API] START ${method} ${path}`);
+
   try {
     response = await fetch(url, {
       method,
@@ -324,30 +239,18 @@ async function apiRequest(path, options = {}) {
       cache: "no-store",
       ...(options.signal ? { signal: options.signal } : {}),
     });
-    console.info(
-      `[QTM API] HEADERS ${method} ${path} ` +
-        `status=${response.status} ` +
-        `elapsed=${Math.round(performance.now() - startedAt)}ms`
-    );
   } catch (cause) {
-    if (cause?.name === "AbortError") throw cause;
-    console.error(`[QTM API] FETCH FAILED ${method} ${path}`, cause);
     throw new RuntimeError(
       `Could not reach the QTM API at ${API_BASE} while calling ${method} ${path}: ${directMessage(cause)}`,
       { status: 0, url }
     );
   }
+
   let raw;
+
   try {
     raw = await response.text();
-    console.info(
-      `[QTM API] BODY COMPLETE ${method} ${path} ` +
-        `bytes=${raw.length} ` +
-        `elapsed=${Math.round(performance.now() - startedAt)}ms`
-    );
   } catch (cause) {
-    if (cause?.name === "AbortError") throw cause;
-    console.error(`[QTM API] BODY FAILED ${method} ${path}`, cause);
     throw new RuntimeError(
       `The QTM API connection closed before the response was read (${method} ${path}): ${directMessage(cause)}`,
       {
@@ -357,9 +260,12 @@ async function apiRequest(path, options = {}) {
       }
     );
   }
+
   const data = parseApiResponse(raw);
+
   if (!response.ok) {
     const message = valueAt(data, ["error", "message", "detail"]);
+
     throw new RuntimeError(
       typeof message === "string" && message.trim()
         ? message.trim()
@@ -372,50 +278,56 @@ async function apiRequest(path, options = {}) {
       }
     );
   }
-  console.info(
-    `[QTM API] SUCCESS ${method} ${path} ` +
-      `elapsed=${Math.round(performance.now() - startedAt)}ms`
-  );
+
   return data;
 }
 
-async function callRuntime(operation, args = {}, options = {}) {
-  const native = nativeInvoke();
+async function callRuntime(operation, args = {}) {
+  const payload = args || {};
+  const invoke = nativeInvoke();
+  const nativeCommand = NATIVE_COMMANDS[operation];
 
-  if (native) {
-    const command = NATIVE_COMMANDS[operation];
-
-    if (!command) {
-      throw new RuntimeError(
-        `Native command is not registered: ${operation}`
-      );
-    }
-
+  // Native runtime: invoke directly. Never retry a failed mutation over HTTP.
+  if (invoke && nativeCommand) {
     try {
-      return await native(command, args || {});
+      return await invoke(nativeCommand, payload);
     } catch (cause) {
       throw new RuntimeError(directMessage(cause));
     }
   }
 
+  // Browser runtime: call qtm-api directly.
   const route = API_ROUTES[operation];
 
-  if (!route) {
+  if (typeof route !== "function") {
     throw new RuntimeError(
-      `Browser API route is not registered: ${operation}`
+      `Unsupported QP runtime operation: ${String(operation)}`
     );
   }
 
-  const [method, path] = route(args || {});
-  const body =
-    ["createSubstrate", "receive", "transit"].includes(operation)
-      ? args?.request
-      : undefined;
+  let method;
+  let path;
+
+  try {
+    [method, path] = route(payload);
+  } catch (cause) {
+    throw new RuntimeError(
+      `Invalid arguments for ${operation}: ${directMessage(cause)}`
+    );
+  }
+
+  if (
+    !["GET", "POST"].includes(method) ||
+    typeof path !== "string" ||
+    !path.startsWith("/") ||
+    path.startsWith("//")
+  ) {
+    throw new RuntimeError(`Invalid API route for ${operation}.`);
+  }
 
   return apiRequest(path, {
     method,
-    ...(body !== undefined ? { body } : {}),
-    ...(options.signal ? { signal: options.signal } : {}),
+    body: method === "POST" ? payload.request : undefined,
   });
 }
 
@@ -424,7 +336,11 @@ function eventMapOf(source) {
   if (direct) return direct;
 
   const frame = objectAt(source, ["frame"]);
-  const frameEvent = objectAt(frame, ["event", "event_map", "eventMap"]);
+  const frameEvent = objectAt(frame, [
+    "event",
+    "event_map",
+    "eventMap",
+  ]);
 
   if (frameEvent) return frameEvent;
 
@@ -450,12 +366,17 @@ function ResultHeading({ eyebrow, title }) {
   );
 }
 
-function KeyValueList({ value, emptyText = "No details were returned." }) {
+function KeyValueList({
+  value,
+  emptyText = "No details were returned.",
+}) {
   const rows = flatten(value);
 
   if (!rows.length) {
     return (
-      <p className="text-xs text-zinc-500 dark:text-zinc-400">{emptyText}</p>
+      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+        {emptyText}
+      </p>
     );
   }
 
@@ -476,7 +397,12 @@ function KeyValueList({ value, emptyText = "No details were returned." }) {
   );
 }
 
-function ResultSection({ title, description, value, defaultOpen = false }) {
+function ResultSection({
+  title,
+  description,
+  value,
+  defaultOpen = false,
+}) {
   const [open, setOpen] = useState(defaultOpen);
 
   return (
@@ -569,9 +495,13 @@ function NumberField({ label, value, onChange, min = 0 }) {
   );
 }
 
+// Controlled ordinal selector. Amount (N) defines the coordinate range 1…N;
+// every unit is its own button and button n means ordinal coordinate n.
+// The grid is windowed (only visible rows are mounted) inside a scroll
+// container, so there is no display cutoff and every ordinal stays reachable.
 const ORDINAL_COLUMNS = 8;
-const ORDINAL_ROW_HEIGHT = 38;
-const ORDINAL_VIEWPORT_HEIGHT = 190;
+const ORDINAL_ROW_HEIGHT = 52;
+const ORDINAL_VIEWPORT_HEIGHT = 208;
 const ORDINAL_OVERSCAN = 2;
 
 function ReceiveOrdinalSelector({
@@ -621,11 +551,11 @@ function ReceiveOrdinalSelector({
 
       const cellClass = isPersisted
         ? isSelected
-          ? "border-emerald-600 bg-emerald-200 text-emerald-950 dark:border-emerald-400 dark:bg-emerald-900/70 dark:text-emerald-100"
-          : "border-emerald-300 bg-emerald-100 text-emerald-950 hover:bg-emerald-200 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200 dark:hover:bg-emerald-900/70"
+          ? "border-blue-600 bg-blue-200 text-blue-950 ring-2 ring-blue-500 dark:border-blue-400 dark:bg-blue-950/70 dark:text-blue-100"
+          : "border-blue-300 bg-blue-100 text-blue-950 hover:bg-blue-200 dark:border-blue-800 dark:bg-blue-950/50 dark:text-blue-200 dark:hover:bg-blue-900/70"
         : isSelected
           ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-950"
-          : "border-zinc-200 bg-zinc-50 text-zinc-800 hover:border-zinc-400 hover:bg-white dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200 dark:hover:border-zinc-500 dark:hover:bg-zinc-900";
+          : "border-zinc-200 bg-zinc-50 hover:border-zinc-400 hover:bg-white dark:border-zinc-700 dark:bg-zinc-950 dark:hover:border-zinc-500 dark:hover:bg-zinc-900";
 
       cells.push(
         <button
@@ -634,11 +564,12 @@ function ReceiveOrdinalSelector({
           aria-pressed={isSelected}
           aria-label={`Ordinal ${id}${isPersisted ? ", persisted transit" : ""}`}
           onClick={() => onChange(id)}
-          className={`flex h-8 min-w-0 items-center justify-center rounded-md border px-0.5 text-center transition-colors ${cellClass}`}
+          className={`flex h-[46px] flex-col items-center justify-center rounded-lg border px-1 text-center transition-colors ${cellClass}`}
         >
-          <span className="font-mono text-xs font-semibold leading-none">
-            {id}
+          <span className="text-[10px] opacity-70">
+            {isPersisted ? "Persisted" : "Unit"}
           </span>
+          <span className="font-mono text-sm font-semibold">{id}</span>
         </button>
       );
     }
@@ -646,7 +577,7 @@ function ReceiveOrdinalSelector({
     rows.push(
       <div
         key={row}
-        className="grid gap-1 pb-1"
+        className="grid gap-1.5 pb-1.5"
         style={{
           height: ORDINAL_ROW_HEIGHT,
           gridTemplateColumns: `repeat(${ORDINAL_COLUMNS}, minmax(0, 1fr))`,
@@ -658,19 +589,19 @@ function ReceiveOrdinalSelector({
   }
 
   return (
-    <section className="space-y-1.5">
+    <section className="space-y-2">
       <div>
         <h4 className="text-xs font-semibold">
-          Ordinal units · Range 0–{count}
+          Ordinal persistence · Range 0–{count}
         </h4>
-        <p className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
           {persisted.size} persisted transit(s) · {count} available coordinates
           · Selected {Number.isSafeInteger(selected) ? selected : "none"}
         </p>
       </div>
 
       {persistedLoading && (
-        <p className="text-xs text-emerald-600 dark:text-emerald-400">
+        <p className="text-xs text-blue-600 dark:text-blue-400">
           Loading persisted events…
         </p>
       )}
@@ -683,7 +614,7 @@ function ReceiveOrdinalSelector({
 
       <div
         onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
-        className="overflow-y-auto rounded-lg border border-zinc-200 p-1 dark:border-zinc-800"
+        className="overflow-y-auto rounded-lg border border-zinc-200 p-1.5 dark:border-zinc-800"
         style={{ height: ORDINAL_VIEWPORT_HEIGHT }}
       >
         <div
@@ -699,10 +630,10 @@ function ReceiveOrdinalSelector({
         </div>
       </div>
 
-      <div className="flex items-center gap-2 text-[10px] text-zinc-500 dark:text-zinc-400">
-        <span className="size-2.5 rounded-sm border border-emerald-300 bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/50" />
+      <div className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+        <span className="size-3 rounded border border-blue-300 bg-blue-100 dark:border-blue-800 dark:bg-blue-950/50" />
         Persisted transit
-        <span className="ml-2 size-2.5 rounded-sm border border-zinc-300 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900" />
+        <span className="ml-3 size-3 rounded border border-zinc-300 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900" />
         No persisted transit
       </div>
     </section>
@@ -757,6 +688,8 @@ function recordNameOf(record) {
   return "";
 }
 
+// Same 6:3 (2:1) ratio for every frame; stacks and relaxes the ratio on
+// narrow screens, scrolling inside the frame when content is taller.
 function Frame({ eyebrow, title, tone = "default", actions, children }) {
   const toneClass =
     tone === "sensitive"
@@ -803,78 +736,7 @@ function FrameButton({ onClick, disabled, children }) {
   );
 }
 
-async function copyValue(value) {
-  if (value === null || value === undefined) return;
-
-  try {
-    await navigator.clipboard.writeText(String(value));
-  } catch {
-    // Clipboard access can be denied by the browser; nothing else to do.
-  }
-}
-
-function CopyButton({ value, label }) {
-  const [copied, setCopied] = useState(false);
-  const empty = value === null || value === undefined || value === "";
-
-  useEffect(() => {
-    if (!copied) return undefined;
-
-    const timer = setTimeout(() => setCopied(false), 1500);
-
-    return () => clearTimeout(timer);
-  }, [copied]);
-
-  async function handleCopy() {
-    if (empty) return;
-
-    await copyValue(value);
-    setCopied(true);
-  }
-
-  return (
-    <button
-      type="button"
-      onClick={handleCopy}
-      disabled={empty}
-      aria-label={label}
-      title={copied ? "Copied" : label}
-      className="inline-flex size-6 shrink-0 items-center justify-center rounded-md border border-emerald-200 bg-white text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-emerald-900 dark:bg-zinc-900 dark:text-emerald-400 dark:hover:bg-emerald-950/50"
-    >
-      {copied ? (
-        <svg
-          aria-hidden="true"
-          viewBox="0 0 24 24"
-          width="13"
-          height="13"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <polyline points="20 6 9 17 4 12" />
-        </svg>
-      ) : (
-        <svg
-          aria-hidden="true"
-          viewBox="0 0 24 24"
-          width="13"
-          height="13"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-        </svg>
-      )}
-    </button>
-  );
-}
-
+// Display safeguard only; it is not access control.
 function Blurred({ revealed, children }) {
   return (
     <div
@@ -890,33 +752,263 @@ function Blurred({ revealed, children }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Operation 1: Recovery-Only Open Results
+// ---------------------------------------------------------------------------
+function OpenRecoveryResults({ result }) {
+  const substrate = objectAt(result?.opened, ["substrate"]);
+  const event = objectAt(result?.opened, ["event"]);
+  const heritage = objectAt(event, ["heritage"]);
+  const depth = objectAt(event, ["depth"]);
+
+  return (
+    <div className="space-y-3">
+      <section className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+        <h3 className="text-xs font-semibold">Recovered ordinal event</h3>
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          Read-only recovery of persisted activation state without derivation or Receive execution.
+        </p>
+        <div className="mt-3">
+          <KeyValueList
+            value={{
+              substrate: result?.substrate,
+              activation: result?.activation,
+              record: valueAt(event, ["record"]),
+              scale: valueAt(event, ["scale"]),
+            }}
+          />
+        </div>
+      </section>
+
+      <ResultSection
+        title="Substrate state"
+        value={substrate}
+        defaultOpen
+      />
+
+      {event && (
+        <>
+          {heritage && (
+            <ResultSection
+              title="Recovered heritage"
+              value={heritage}
+              defaultOpen
+            />
+          )}
+          {depth && (
+            <ResultSection
+              title="Recovered depth"
+              value={depth}
+              defaultOpen
+            />
+          )}
+          <ResultSection title="Complete event payload" value={event} />
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Operation 2: Independent Submission Derivation Results
+// ---------------------------------------------------------------------------
+function DeriveResults({ result }) {
+  const [revealSensitive, setRevealSensitive] = useState(false);
+  const [privateKey, setPrivateKey] = useState("");
+  const [privateKeyLoading, setPrivateKeyLoading] = useState(false);
+  const [privateKeyError, setPrivateKeyError] = useState("");
+
+  async function revealPrivateKey() {
+    if (privateKey) {
+      setPrivateKey("");
+      return;
+    }
+
+    setPrivateKeyLoading(true);
+    setPrivateKeyError("");
+
+    try {
+      const value = await callRuntime("submissionValue", {
+        name: result.substrate,
+        activation: result.activation,
+        submission: result.submission,
+        network: result.network,
+        field: "xpriv",
+      });
+
+      setPrivateKey(
+        typeof value === "string"
+          ? value
+          : value?.response_text ?? JSON.stringify(value)
+      );
+    } catch (error) {
+      setPrivateKeyError(
+        error instanceof Error
+          ? error.message
+          : "Unable to retrieve the private extended key."
+      );
+    } finally {
+      setPrivateKeyLoading(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <section className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+        <h3 className="text-xs font-semibold">Submission derivation identity</h3>
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          Persisted independently under activation {result?.activation}, submission {result?.submission}, network {result?.network}.
+        </p>
+        <div className="mt-3">
+          <KeyValueList
+            value={{
+              substrate: result?.substrate,
+              activation: result?.activation,
+              submission: result?.submission,
+              network: result?.network,
+              derivation_path: result?.derivation?.derivation_path,
+              directory: result?.derivation?.directory,
+              authorization_state: result?.derivation?.authorization_state,
+              settlement_state: result?.derivation?.settlement_state,
+            }}
+          />
+        </div>
+      </section>
+
+      <Frame
+        eyebrow="Derived Values · Sensitive"
+        title="Network Key Material & Address"
+        tone="sensitive"
+        actions={
+          <FrameButton
+            onClick={() => setRevealSensitive((current) => !current)}
+          >
+            {revealSensitive ? "Hide values" : "Reveal values"}
+          </FrameButton>
+        }
+      >
+        <div className="space-y-3">
+          <KeyValueList
+            value={{
+              master_fingerprint: result?.derivations?.fingerprint,
+              address: result?.derivations?.address,
+            }}
+          />
+
+          {revealSensitive ? (
+            <div className="space-y-3 border-t border-amber-200 pt-3 dark:border-amber-900">
+              <ResultSection
+                title="Address"
+                value={result?.derivations?.address}
+                defaultOpen
+              />
+
+              <ResultSection
+                title="ScriptPubKey"
+                value={result?.derivations?.scriptpubkey}
+                defaultOpen
+              />
+
+              <ResultSection
+                title="Master fingerprint"
+                value={result?.derivations?.fingerprint}
+              />
+
+              <ResultSection
+                title="Xpub"
+                value={result?.derivations?.xpub}
+              />
+
+              <ResultSection
+                title="Zpub"
+                value={result?.derivations?.zpub}
+              />
+
+              <div className="space-y-2 rounded-lg border border-amber-300 p-3 dark:border-amber-800">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-semibold">
+                    Private extended key · Xpriv
+                  </p>
+
+                  <FrameButton
+                    onClick={revealPrivateKey}
+                    disabled={privateKeyLoading}
+                  >
+                    {privateKeyLoading
+                      ? "Loading…"
+                      : privateKey
+                        ? "Clear"
+                        : "Reveal Xpriv"}
+                  </FrameButton>
+                </div>
+
+                {privateKeyError && (
+                  <p role="alert" className="text-xs text-red-600">
+                    {privateKeyError}
+                  </p>
+                )}
+
+                {privateKey && (
+                  <p className="break-all rounded-lg bg-amber-100 p-2 font-mono text-xs text-amber-950 dark:bg-amber-950 dark:text-amber-100">
+                    {privateKey}
+                  </p>
+                )}
+
+                {!privateKey && !privateKeyError && (
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    Xpriv is fetched on demand only when explicitly revealed.
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Full scriptPubKey and extended keys are hidden. Reveal to inspect all derived values for this submission.
+            </p>
+          )}
+        </div>
+      </Frame>
+
+      <ResultSection
+        title="Complete derivation response"
+        value={result?.derivation}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Operation 3: Activation-Scoped Receive Results
+// ---------------------------------------------------------------------------
 function ReceiveResults({ result }) {
   const [revealReceive, setRevealReceive] = useState(false);
 
-  const receive = result?.receive;
-  const frame = objectAt(receive, ["frame"]);
+  const frame = objectAt(result?.receive, ["frame"]);
   const transaction = objectAt(frame, ["quantum_transaction"]);
   const event = objectAt(frame, ["event"]);
 
   const openedQtm = objectAt(transaction, ["qtm"]);
+  const qtmValues = objectAt(openedQtm, ["qtm"]);
+
   const heritage = objectAt(event, ["heritage"]);
   const depth = objectAt(event, ["depth"]);
   const runtime = objectAt(event, ["runtime"]);
 
-  const networks = Array.isArray(receive?.networks) ? receive.networks : [];
+  const activation = result?.ordinal ?? valueAt(transaction, ["amount"]);
+  const commitment = valueAt(qtmValues, ["commitment"]);
 
   const identity = {
-    substrate: receive?.substrate ?? result?.substrate,
-    post_activation: receive?.post_activation,
+    substrate: result?.substrate,
+    network: result?.network,
     ordinal: result?.ordinal,
     flow: result?.flow,
-    networks,
+    commitment,
   };
 
   const receiveValues = transaction
     ? {
         receive_amount: result?.requested_amount,
-        ordinal: result?.ordinal,
+        activation,
         flow: result?.flow,
         constant: valueAt(transaction, ["constant"]),
         constant_delta: valueAt(transaction, ["constant_delta"]),
@@ -927,48 +1019,47 @@ function ReceiveResults({ result }) {
     <div className="space-y-3">
       <section className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
         <h3 className="text-xs font-semibold">Receive event identity</h3>
-
         <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-          Networks are taken from the observation pipelines associated with the
-          received post-state activation.
+          Executed independently via POST /wallets/:name/receive without implicit derivation.
         </p>
-
         <div className="mt-3">
           <KeyValueList value={identity} />
         </div>
       </section>
 
-      <Frame eyebrow="Frame 1" title="Transaction QTM">
-        {hasContent(openedQtm) ? (
-          <KeyValueList value={openedQtm} />
-        ) : (
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            Transaction QTM was not returned.
-          </p>
-        )}
-      </Frame>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Frame eyebrow="Frame 1" title="Transaction QTM">
+          {hasContent(openedQtm) ? (
+            <KeyValueList value={openedQtm} />
+          ) : (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              The receive response did not include frame.quantum_transaction.qtm.
+            </p>
+          )}
+        </Frame>
 
-      <Frame
-        eyebrow="Frame 2"
-        title="Receive values"
-        actions={
-          <FrameButton
-            onClick={() => setRevealReceive((current) => !current)}
-          >
-            {revealReceive ? "Clear" : "Reveal"}
-          </FrameButton>
-        }
-      >
-        {receiveValues ? (
-          <Blurred revealed={revealReceive}>
-            <KeyValueList value={receiveValues} />
-          </Blurred>
-        ) : (
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            The response did not contain the expected transaction.
-          </p>
-        )}
-      </Frame>
+        <Frame
+          eyebrow="Frame 2"
+          title="Receive values"
+          actions={
+            <FrameButton
+              onClick={() => setRevealReceive((current) => !current)}
+            >
+              {revealReceive ? "Clear" : "Reveal"}
+            </FrameButton>
+          }
+        >
+          {receiveValues ? (
+            <Blurred revealed={revealReceive}>
+              <KeyValueList value={receiveValues} />
+            </Blurred>
+          ) : (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              The response did not contain the expected QuantumTransaction.
+            </p>
+          )}
+        </Frame>
+      </div>
 
       <Frame eyebrow="Frame 3" title="Immediate heritage">
         <div className="space-y-3">
@@ -981,38 +1072,31 @@ function ReceiveResults({ result }) {
             }}
           />
 
-          {hasContent(heritage) && (
-            <div className="border-t border-zinc-200 pt-3 dark:border-zinc-800">
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+          {hasContent(heritage) ? (
+            <div className="space-y-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                 Heritage
               </p>
+
               <KeyValueList value={heritage} />
             </div>
+          ) : (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              The receive event did not include heritage.
+            </p>
           )}
 
           {hasContent(depth) && (
-            <div className="border-t border-zinc-200 pt-3 dark:border-zinc-800">
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+            <div className="space-y-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                 Depth
               </p>
+
               <KeyValueList value={depth} />
             </div>
           )}
         </div>
       </Frame>
-
-      <Frame eyebrow="Frame 4" title="Receive networks">
-        {networks.length > 0 ? (
-          <KeyValueList value={networks} />
-        ) : (
-          <p className="text-xs text-amber-700 dark:text-amber-400">
-            No running observation pipeline networks were returned for
-            post-activation {receive?.post_activation ?? "not provided"}.
-          </p>
-        )}
-      </Frame>
-
-      <ResultSection title="Complete Receive API response" value={receive} />
     </div>
   );
 }
@@ -1102,7 +1186,11 @@ function ExileResults({ result, substrate }) {
 
   return (
     <div className="space-y-3">
-      <ResultSection title="Substrate" value={{ substrate }} defaultOpen />
+      <ResultSection
+        title="Substrate"
+        value={{ substrate }}
+        defaultOpen
+      />
 
       <ResultSection
         title="Stored QTM"
@@ -1147,6 +1235,10 @@ function ResultCard({ result, tab, network, path, substrate }) {
 
   return (
     <div className="mt-4 space-y-3">
+      {tab === "open" && <OpenRecoveryResults result={result} />}
+
+      {tab === "derive" && <DeriveResults result={result} />}
+
       {tab === "receive" && <ReceiveResults result={result} />}
 
       {tab === "transit" && (
@@ -1164,9 +1256,16 @@ function ResultCard({ result, tab, network, path, substrate }) {
 
       {tab === "create" && (
         <section className="space-y-3">
-          <ResultHeading eyebrow="Create result" title="Substrate created" />
+          <ResultHeading
+            eyebrow="Create result"
+            title="Substrate created"
+          />
 
-          <ResultSection title="Created substrate" value={result} defaultOpen />
+          <ResultSection
+            title="Created substrate"
+            value={result}
+            defaultOpen
+          />
         </section>
       )}
     </div>
@@ -1202,10 +1301,20 @@ export default function Home() {
   const [external, setExternal] = useState("0");
   const [activation, setActivation] = useState("1");
 
+  // Recovery-only Open state
+  const [openActivation, setOpenActivation] = useState("1");
+
+  // Independent Derivation state
+  const [deriveActivation, setDeriveActivation] = useState("1");
+  const [deriveSubmission, setDeriveSubmission] = useState("1");
+  const [deriveNetwork, setDeriveNetwork] = useState("");
+
+  // Activation-scoped Receive state
   const [receiveAmount, setReceiveAmount] = useState("1");
   const [receiveOrdinal, setReceiveOrdinal] = useState("1");
   const [receiveFlow, setReceiveFlow] = useState("receive");
 
+  // Receive persistence tracking state
   const [receiveEvents, setReceiveEvents] = useState([]);
   const [receiveEventsLoading, setReceiveEventsLoading] = useState(false);
   const [receiveEventsError, setReceiveEventsError] = useState("");
@@ -1214,14 +1323,6 @@ export default function Home() {
   const [exileRecords, setExileRecords] = useState([]);
   const [exileRecordsLoading, setExileRecordsLoading] = useState(false);
   const [exileRecordsError, setExileRecordsError] = useState("");
-
-  const [authoritativeEventState, setAuthoritativeEventState] = useState({
-    substrate: "",
-    activation: null,
-    event: null,
-    status: "idle",
-    error: "",
-  });
 
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
@@ -1241,7 +1342,6 @@ export default function Home() {
   const requestedSubstrateRef = useRef(null);
   const listRequestRef = useRef(0);
   const exileRequestRef = useRef(0);
-  const authoritativeEventRequestRef = useRef(0);
   const selectedRef = useRef("");
   const [selectionReady, setSelectionReady] = useState(false);
 
@@ -1266,125 +1366,6 @@ export default function Home() {
       `${url.pathname}${url.search}${url.hash}`
     );
   }, [selectedSubstrate, selectionReady]);
-
-  const activeClip = useMemo(() => {
-    const sub =
-      typeof selectedSubstrate === "string" ? selectedSubstrate.trim() : "";
-    const act = parsePositiveActivation(activation);
-    if (!sub || act === null) return null;
-    return Object.freeze({
-      substrate: sub,
-      activation: act,
-    });
-  }, [selectedSubstrate, activation]);
-
-  useEffect(() => {
-    const requestId = ++authoritativeEventRequestRef.current;
-    const controller = new AbortController();
-
-    if (!activeClip) {
-      setAuthoritativeEventState({
-        substrate: "",
-        activation: null,
-        event: null,
-        status: "idle",
-        error: "",
-      });
-      return () => controller.abort();
-    }
-
-    const targetClip = activeClip;
-
-    setAuthoritativeEventState({
-      substrate: targetClip.substrate,
-      activation: targetClip.activation,
-      event: null,
-      status: "loading",
-      error: "",
-    });
-    persistAuthoritativeEventBinding({
-      substrate: targetClip.substrate,
-      activation: targetClip.activation,
-      event: null,
-      status: "loading",
-      error: "",
-    });
-
-    void (async () => {
-      try {
-        const payload = await callRuntime(
-          "getActivationEvent",
-          {
-            substrate: targetClip.substrate,
-            activation: targetClip.activation,
-            clip: targetClip,
-          },
-          { signal: controller.signal }
-        );
-
-        if (requestId !== authoritativeEventRequestRef.current) return;
-
-        const resolvedEvent = unwrapAuthoritativeEventResponse(
-          payload,
-          targetClip
-        );
-
-        if (!resolvedEvent) {
-          throw new Error(
-            `No authoritative persisted event returned for ${targetClip.substrate} activation ${targetClip.activation}.`
-          );
-        }
-
-        const nextBinding = {
-          substrate: targetClip.substrate,
-          activation: targetClip.activation,
-          event: resolvedEvent,
-          status: "ready",
-          error: "",
-        };
-
-        setAuthoritativeEventState(nextBinding);
-        persistAuthoritativeEventBinding(nextBinding);
-      } catch (err) {
-        if (
-          err?.name === "AbortError" ||
-          requestId !== authoritativeEventRequestRef.current
-        ) {
-          return;
-        }
-        const message =
-          err instanceof Error && err.message
-            ? err.message
-            : "Unable to load authoritative persisted event.";
-        const nextBinding = {
-          substrate: targetClip.substrate,
-          activation: targetClip.activation,
-          event: null,
-          status: "error",
-          error: message,
-        };
-        setAuthoritativeEventState(nextBinding);
-        persistAuthoritativeEventBinding(nextBinding);
-      }
-    })();
-
-    return () => {
-      controller.abort();
-    };
-  }, [activeClip]);
-
-  const acceptedAuthoritativeEvent =
-    activeClip &&
-    authoritativeEventState.substrate === activeClip.substrate &&
-    authoritativeEventState.activation === activeClip.activation
-      ? authoritativeEventState
-      : {
-          substrate: activeClip?.substrate ?? "",
-          activation: activeClip?.activation ?? null,
-          event: null,
-          status: activeClip ? "loading" : "idle",
-          error: "",
-        };
 
   const loadSubstrates = useCallback(async (preferred = "") => {
     const requestId = ++listRequestRef.current;
@@ -1431,7 +1412,9 @@ export default function Home() {
       if (requestId !== listRequestRef.current) return;
 
       setListError(
-        err instanceof Error ? err.message : "Unable to load substrates."
+        err instanceof Error
+          ? err.message
+          : "Unable to load substrates."
       );
     } finally {
       if (requestId === listRequestRef.current) {
@@ -1468,6 +1451,12 @@ export default function Home() {
           : valid[0]?.id || ""
       );
 
+      setDeriveNetwork((current) =>
+        valid.some((network) => network.id === current)
+          ? current
+          : valid[0]?.id || ""
+      );
+
       const first = valid[0];
 
       if (first) {
@@ -1489,7 +1478,9 @@ export default function Home() {
       }
     } catch (err) {
       setNetworkError(
-        err instanceof Error ? err.message : "Unable to load networks."
+        err instanceof Error
+          ? err.message
+          : "Unable to load networks."
       );
     } finally {
       setNetworkLoading(false);
@@ -1567,7 +1558,11 @@ export default function Home() {
       requestId === receiveEventsRequestRef.current &&
       selectedRef.current === substrate;
 
-    if (!substrate || !Number.isSafeInteger(amount) || amount <= 0) {
+    if (
+      !substrate ||
+      !Number.isSafeInteger(amount) ||
+      amount <= 0
+    ) {
       setReceiveEvents([]);
       setReceiveEventsLoading(false);
       setReceiveEventsError("");
@@ -1603,13 +1598,13 @@ export default function Home() {
 
       setReceiveEvents(
         records.filter((record) => {
-          const recActivation = Number(record.activation);
+          const activation = Number(record.activation);
 
           return (
             record.kind === "transit" &&
-            Number.isSafeInteger(recActivation) &&
-            recActivation >= 1 &&
-            recActivation <= amount
+            Number.isSafeInteger(activation) &&
+            activation >= 1 &&
+            activation <= amount
           );
         })
       );
@@ -1653,7 +1648,8 @@ export default function Home() {
   }, [tab, selectedSubstrate, receiveAmount, loadReceiveEvents]);
 
   const currentNetwork = useMemo(
-    () => networks.find((network) => network.id === selectedNetwork) ?? null,
+    () =>
+      networks.find((network) => network.id === selectedNetwork) ?? null,
     [networks, selectedNetwork]
   );
 
@@ -1708,11 +1704,118 @@ export default function Home() {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // 1. Recovery-Only Open Handler (GET /wallets/:name/activations/:activation/open)
+  // -------------------------------------------------------------------------
+  async function handleOpenRecovery() {
+    const activationNumber = Number(openActivation);
+
+    if (!Number.isSafeInteger(activationNumber) || activationNumber < 1) {
+      throw new Error(
+        "Activation ordinal must be a positive safe integer."
+      );
+    }
+
+    const opened = await callRuntime("openSubstrate", {
+      name: selectedSubstrate,
+      activation: activationNumber,
+    });
+
+    if (!opened || !opened.event) {
+      throw new Error(
+        `Open did not return a persisted event at activation ${activationNumber}.`
+      );
+    }
+
+    setResult({
+      opened,
+      substrate: selectedSubstrate,
+      activation: activationNumber,
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 2. Independent Submission Derivation Handler
+  //    POST /wallets/:name/activations/:activation/submissions/:submission/networks/:network/derive
+  //    with body { "network": deriveNetwork }
+  // -------------------------------------------------------------------------
+  async function handleIndependentDerivation() {
+    const activationNumber = Number(deriveActivation);
+    const submissionNumber = Number(deriveSubmission);
+
+    if (!Number.isSafeInteger(activationNumber) || activationNumber < 1) {
+      throw new Error("Activation must be a positive safe integer.");
+    }
+
+    if (!Number.isSafeInteger(submissionNumber) || submissionNumber < 1) {
+      throw new Error("Submission must be a positive safe integer.");
+    }
+
+    if (!deriveNetwork) {
+      throw new Error("Select a network identity for submission derivation.");
+    }
+
+    const derivation = await callRuntime("deriveSubmission", {
+      name: selectedSubstrate,
+      activation: activationNumber,
+      submission: submissionNumber,
+      network: deriveNetwork,
+      request: {
+        network: deriveNetwork,
+      },
+    });
+
+    const readValue = (field) =>
+      callRuntime("submissionValue", {
+        name: selectedSubstrate,
+        activation: activationNumber,
+        submission: submissionNumber,
+        network: deriveNetwork,
+        field,
+      });
+
+    const [
+      fingerprint,
+      scriptpubkey,
+      xpub,
+      zpub,
+      address,
+    ] = await Promise.all([
+      readValue("fingerprint"),
+      readValue("scriptpubkey"),
+      readValue("xpub"),
+      readValue("zpub"),
+      readValue("address"),
+    ]);
+
+    setResult({
+      derivation,
+      derivations: {
+        fingerprint,
+        scriptpubkey,
+        xpub,
+        zpub,
+        address,
+      },
+      substrate: selectedSubstrate,
+      activation: activationNumber,
+      submission: submissionNumber,
+      network: deriveNetwork,
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 3. Activation-Scoped Receive Handler (POST /wallets/:name/receive)
+  // -------------------------------------------------------------------------
   async function handleReceiveExecution() {
     const amount = Number(receiveAmount);
 
     if (!Number.isSafeInteger(amount) || amount <= 0) {
       throw new Error("Receive amount must be a positive safe integer.");
+    }
+
+    if (!selectedNetwork) {
+      throw new Error("Select a coordination network before receiving.");
     }
 
     if (!["receive", "change"].includes(receiveFlow)) {
@@ -1733,6 +1836,7 @@ export default function Home() {
       name: selectedSubstrate,
       request: {
         amount,
+        network: selectedNetwork,
         flow: receiveFlow,
         ordinal,
       },
@@ -1752,10 +1856,15 @@ export default function Home() {
     setResult({
       receive,
       requested_amount: amount,
+      network: selectedNetwork,
+      network_option: currentNetwork,
       ordinal,
       flow: receiveFlow,
       substrate: selectedSubstrate,
     });
+
+    // Reload persisted events after successful execution
+    void loadReceiveEvents();
   }
 
   async function handleSubmit(event) {
@@ -1787,9 +1896,7 @@ export default function Home() {
         let payload;
 
         if (seedSource === "bip39") {
-          const mnemonic = phrase.trim();
-
-          if (!mnemonic) {
+          if (!phrase.trim()) {
             throw new Error("Enter a BIP39 mnemonic phrase.");
           }
 
@@ -1800,11 +1907,11 @@ export default function Home() {
           payload = {
             name: substrateName,
             seed_source: "bip39",
-            phrase: mnemonic,
+            phrase: phrase.trim(),
             language,
             passphrase,
           };
-        } else if (seedSource === "persistent") {
+        } else {
           const parsed = indices.split(",").map((item) => item.trim());
 
           if (
@@ -1829,21 +1936,6 @@ export default function Home() {
             indices: parsed.map(Number).join(","),
             entropy: entropy.trim() || substrateName,
           };
-        } else {
-          throw new Error("Select a valid substrate seed source.");
-        }
-
-        if (!nativeInvoke()) {
-          const confirmed = window.confirm(
-            `You are creating "${substrateName}" in browser mode.\n\n` +
-              "The seed material will be sent to the configured QTM API:\n" +
-              `${API_BASE}\n\n` +
-              "Continue only if you trust this server."
-          );
-
-          if (!confirmed) {
-            return;
-          }
         }
 
         const data = await callRuntime("createSubstrate", {
@@ -1857,6 +1949,16 @@ export default function Home() {
         setPassphrase("");
 
         void loadSubstrates(substrateName);
+        return;
+      }
+
+      if (tab === "open") {
+        await handleOpenRecovery();
+        return;
+      }
+
+      if (tab === "derive") {
+        await handleIndependentDerivation();
         return;
       }
 
@@ -1881,7 +1983,9 @@ export default function Home() {
 
         for (const [key, value] of Object.entries(numeric)) {
           if (!Number.isSafeInteger(value) || value < 0) {
-            throw new Error(`${key} must be a non-negative safe integer.`);
+            throw new Error(
+              `${key} must be a non-negative safe integer.`
+            );
           }
         }
 
@@ -1893,8 +1997,8 @@ export default function Home() {
             ...numeric,
           },
         });
-
         setResult(data);
+
         return;
       }
 
@@ -1902,13 +2006,14 @@ export default function Home() {
         const data = await callRuntime("exile", {
           name: selectedSubstrate,
         });
-
         setResult(data);
 
         await loadExileRecords();
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong.");
+      setError(
+        err instanceof Error ? err.message : "Something went wrong."
+      );
     } finally {
       setLoading(false);
     }
@@ -1925,12 +2030,6 @@ export default function Home() {
       selectedSubstrate
     )}`;
   };
-
-  const eventStoreHref = activeClip
-    ? `/eventstore?substrate=${encodeURIComponent(
-        activeClip.substrate
-      )}&activation=${encodeURIComponent(String(activeClip.activation))}`
-    : "";
 
   return (
     <div
@@ -2000,13 +2099,17 @@ export default function Home() {
           <select
             id="substrate"
             value={selectedSubstrate}
-            onChange={(event) => handleSubstrateChange(event.target.value)}
+            onChange={(event) =>
+              handleSubstrateChange(event.target.value)
+            }
             disabled={listLoading || loading || !substrates.length}
             className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-3 text-xs outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-950 dark:focus:ring-zinc-800"
           >
             {!substrates.length && (
               <option value="">
-                {listLoading ? "Loading substrates…" : "No substrates available"}
+                {listLoading
+                  ? "Loading substrates…"
+                  : "No substrates available"}
               </option>
             )}
 
@@ -2031,9 +2134,8 @@ export default function Home() {
                 </p>
 
                 <p className="mt-1 text-xs leading-4 text-zinc-500 dark:text-zinc-400">
-                  Open, Receive, Transit, and Exile operate against this
-                  substrate independently. Derivation is available inside Receive
-                  and runs as a separate operation.
+                  Open, Derive, Receive, Transit, and Exile operate against
+                  this substrate independently without implicit cross-triggering.
                 </p>
               </div>
 
@@ -2041,8 +2143,9 @@ export default function Home() {
                 title="Selected substrate details"
                 description="Fields returned by the API for this substrate."
                 value={
-                  substrates.find((item) => item.name === selectedSubstrate) ??
-                  {}
+                  substrates.find(
+                    (item) => item.name === selectedSubstrate
+                  ) ?? {}
                 }
               />
             </div>
@@ -2069,47 +2172,30 @@ export default function Home() {
           aria-label="Substrate tools"
           className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-2"
         >
-          <button
-            type="button"
-            disabled={!activeClip}
-            onClick={() => {
-              if (!activeClip) return;
-              persistAuthoritativeEventBinding(acceptedAuthoritativeEvent);
-              window.location.href = eventStoreHref;
-            }}
-            className="block w-full rounded-lg border border-zinc-200 bg-white px-3 py-2.5 text-left shadow-sm transition-colors hover:border-zinc-400 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-600 dark:hover:bg-zinc-800/60"
+          <a
+            href={linkWithSubstrate("/eventstore")}
+            className="block rounded-lg border border-zinc-200 bg-white px-3 py-2.5 shadow-sm transition-colors hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-600 dark:hover:bg-zinc-800/60"
           >
             <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0">
+              <div>
                 <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                   Persisted state
                 </p>
 
-                <h2 className="mt-0.5 text-xs font-semibold">Event Store</h2>
+                <h2 className="mt-0.5 text-xs font-semibold">
+                  Event Store
+                </h2>
 
                 <p className="mt-0.5 text-xs text-zinc-600 dark:text-zinc-400">
-                  Inspect persisted records for the active clip
+                  Inspect records for the selected substrate
                 </p>
-
-                {activeClip && (
-                  <p className="mt-1 break-all font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
-                    {activeClip.substrate} · Activation {activeClip.activation}
-                    {acceptedAuthoritativeEvent.status === "loading"
-                      ? " · Loading event…"
-                      : acceptedAuthoritativeEvent.status === "ready"
-                        ? " · Event ready"
-                        : acceptedAuthoritativeEvent.status === "error"
-                          ? " · Event unavailable"
-                          : ""}
-                  </p>
-                )}
               </div>
 
-              <span className="shrink-0 rounded-lg border border-zinc-300 px-2 py-1 text-[11px] font-medium dark:border-zinc-700">
+              <span className="rounded-lg border border-zinc-300 px-2 py-1 text-[11px] font-medium dark:border-zinc-700">
                 Open
               </span>
             </div>
-          </button>
+          </a>
 
           <a
             href={linkWithSubstrate("/network")}
@@ -2121,7 +2207,9 @@ export default function Home() {
                   Derivation context
                 </p>
 
-                <h2 className="mt-0.5 text-xs font-semibold">Network</h2>
+                <h2 className="mt-0.5 text-xs font-semibold">
+                  Network
+                </h2>
 
                 <p className="mt-0.5 text-xs text-zinc-600 dark:text-zinc-400">
                   Inspect network paths in this substrate context
@@ -2137,7 +2225,7 @@ export default function Home() {
 
         <nav
           aria-label="Substrate operations"
-          className="mb-3 grid grid-cols-2 gap-1 rounded-lg border border-zinc-200 bg-zinc-100/80 p-1 sm:grid-cols-4 dark:border-zinc-800 dark:bg-zinc-900"
+          className="mb-3 grid grid-cols-3 gap-1 rounded-lg border border-zinc-200 bg-zinc-100/80 p-1 sm:grid-cols-6 dark:border-zinc-800 dark:bg-zinc-900"
         >
           {TABS.map((item) => (
             <button
@@ -2170,8 +2258,14 @@ export default function Home() {
               {tab === "create" &&
                 "Initialize a persistent substrate using PERM indices or a BIP39 mnemonic."}
 
+              {tab === "open" &&
+                "Recovery-only operation: inspect and recover the persisted event at a specific activation ordinal without deriving keys or executing Receive."}
+
+              {tab === "derive" &&
+                "Independent submission derivation: establish the submission directory and derive network-scoped keys and address for an explicit activation, submission, and network."}
+
               {tab === "receive" &&
-                "Derive all available network keys for a persisted submission, then execute Receive or Change at a chosen ordinal. Derivation and Receive are separate operations."}
+                "Activation-scoped Receive: execute Receive or Change at a chosen ordinal independently of submission derivation."}
 
               {tab === "transit" &&
                 "Apply a network derivation request in the selected substrate's state context."}
@@ -2249,7 +2343,9 @@ export default function Home() {
 
                       <select
                         value={language}
-                        onChange={(event) => setLanguage(event.target.value)}
+                        onChange={(event) =>
+                          setLanguage(event.target.value)
+                        }
                         required
                         className="h-9 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
                       >
@@ -2278,7 +2374,9 @@ export default function Home() {
 
                       <textarea
                         value={phrase}
-                        onChange={(event) => setPhrase(event.target.value)}
+                        onChange={(event) =>
+                          setPhrase(event.target.value)
+                        }
                         required
                         rows={3}
                         autoCapitalize="none"
@@ -2306,73 +2404,246 @@ export default function Home() {
               </>
             )}
 
-            {tab === "receive" && (
-              <div className="space-y-3">
-                <section className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
-                  <div>
-                    <h3 className="text-xs font-semibold">
-                      Receive submission
-                    </h3>
+            {tab === "open" && (
+              <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+                <div>
+                  <h3 className="text-xs font-semibold">
+                    Recover persisted ordinal event
+                  </h3>
 
-                    <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                      Execute the selected persisted submission. Receive derives
-                      the available networks from the received event and
-                      retrieves their persisted input and key values
-                      automatically.
-                    </p>
-                  </div>
+                  <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                    Calls GET /wallets/:name/activations/:activation/open to
+                    load the persisted transit or exile record for the given
+                    ordinal without deriving keys or modifying state.
+                  </p>
+                </div>
 
-                  <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-                    <p className="text-xs font-medium">Selected substrate</p>
-                    <p className="mt-1 break-all font-mono text-xs">
-                      {selectedSubstrate || "No substrate selected"}
-                    </p>
-                  </div>
+                <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                  <p className="text-xs font-medium">Selected substrate</p>
+                  <p className="mt-1 break-all font-mono text-xs">
+                    {selectedSubstrate || "No substrate selected"}
+                  </p>
+                </div>
 
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <NumberField
-                      label="Transaction amount (N)"
-                      value={receiveAmount}
-                      onChange={handleReceiveAmountChange}
-                      min={1}
-                    />
+                <NumberField
+                  label="Activation ordinal"
+                  value={openActivation}
+                  onChange={(val) => {
+                    setOpenActivation(val);
+                    setResult(null);
+                    setError("");
+                  }}
+                  min={1}
+                />
+              </div>
+            )}
 
-                    <label className="flex flex-col gap-1">
-                      <span className="text-xs font-medium">
-                        Receive flow
-                      </span>
+            {tab === "derive" && (
+              <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+                <div>
+                  <h3 className="text-xs font-semibold">
+                    Submission key & address derivation
+                  </h3>
 
-                      <select
-                        value={receiveFlow}
-                        onChange={(event) =>
-                          setReceiveFlow(event.target.value)
-                        }
-                        className="h-9 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
-                      >
-                        <option value="receive">Receive</option>
-                        <option value="change">Change</option>
-                      </select>
-                    </label>
-                  </div>
+                  <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                    Posts to /wallets/:name/activations/:activation/submissions/:submission/networks/:network/derive
+                    with explicit activation, submission, and network identity,
+                    then retrieves the derived values from the network-scoped endpoints.
+                  </p>
+                </div>
 
-                  {Number.isSafeInteger(Number(receiveAmount)) &&
-                    Number(receiveAmount) > 0 && (
-                      <ReceiveOrdinalSelector
-                        amount={receiveAmount}
-                        ordinal={receiveOrdinal}
-                        persistedOrdinals={receiveEvents.map((record) =>
-                          Number(record.activation)
-                        )}
-                        persistedLoading={receiveEventsLoading}
-                        persistedError={receiveEventsError}
-                        onChange={(n) => {
-                          setReceiveOrdinal(String(n));
-                          setResult(null);
-                          setError("");
-                        }}
-                      />
+                <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                  <p className="text-xs font-medium">Selected substrate</p>
+                  <p className="mt-1 break-all font-mono text-xs">
+                    {selectedSubstrate || "No substrate selected"}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <NumberField
+                    label="Activation"
+                    value={deriveActivation}
+                    onChange={(val) => {
+                      setDeriveActivation(val);
+                      setResult(null);
+                      setError("");
+                    }}
+                    min={1}
+                  />
+
+                  <NumberField
+                    label="Submission"
+                    value={deriveSubmission}
+                    onChange={(val) => {
+                      setDeriveSubmission(val);
+                      setResult(null);
+                      setError("");
+                    }}
+                    min={1}
+                  />
+                </div>
+
+                <label className="flex min-w-0 flex-col gap-1">
+                  <span className="text-xs font-medium">
+                    Network identity
+                  </span>
+
+                  <select
+                    value={deriveNetwork}
+                    onChange={(event) => {
+                      setDeriveNetwork(event.target.value);
+                      setResult(null);
+                      setError("");
+                    }}
+                    disabled={networkLoading || !networks.length}
+                    className="h-9 min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                  >
+                    {!networks.length && (
+                      <option value="">
+                        {networkLoading ? "Loading…" : "No networks"}
+                      </option>
                     )}
-                </section>
+
+                    {networks.map((network) => (
+                      <option key={network.id} value={network.id}>
+                        {network.name} — {network.id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                {networkError && (
+                  <p
+                    role="alert"
+                    className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
+                  >
+                    Networks could not be loaded: {networkError}{" "}
+                    <button
+                      type="button"
+                      onClick={loadNetworks}
+                      className="font-semibold underline"
+                    >
+                      Retry
+                    </button>
+                  </p>
+                )}
+              </div>
+            )}
+
+            {tab === "receive" && (
+              <div className="space-y-3 rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+                <div>
+                  <h3 className="text-xs font-semibold">
+                    Activation-scoped Receive
+                  </h3>
+
+                  <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                    Executes POST /wallets/:name/receive at a chosen ordinal
+                    coordinate. Independent of submission derivation.
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                  <p className="text-xs font-medium">Selected substrate</p>
+                  <p className="mt-1 break-all font-mono text-xs">
+                    {selectedSubstrate || "No substrate selected"}
+                  </p>
+                </div>
+
+                <label className="flex min-w-0 flex-col gap-1">
+                  <span className="text-xs font-medium">
+                    Coordination network
+                  </span>
+
+                  <select
+                    value={selectedNetwork}
+                    onChange={(event) =>
+                      handleNetworkChange(event.target.value)
+                    }
+                    disabled={networkLoading || !networks.length}
+                    className="h-9 min-w-0 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                  >
+                    {!networks.length && (
+                      <option value="">
+                        {networkLoading ? "Loading…" : "No networks"}
+                      </option>
+                    )}
+
+                    {networks.map((network) => (
+                      <option key={network.id} value={network.id}>
+                        {network.name} — {network.id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                {networkError && (
+                  <p
+                    role="alert"
+                    className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300"
+                  >
+                    Networks could not be loaded: {networkError}{" "}
+                    <button
+                      type="button"
+                      onClick={loadNetworks}
+                      className="font-semibold underline"
+                    >
+                      Retry
+                    </button>
+                  </p>
+                )}
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <NumberField
+                    label="Transaction amount (N)"
+                    value={receiveAmount}
+                    onChange={handleReceiveAmountChange}
+                    min={1}
+                  />
+
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs font-medium">
+                      Receive flow
+                    </span>
+
+                    <select
+                      value={receiveFlow}
+                      onChange={(event) =>
+                        setReceiveFlow(event.target.value)
+                      }
+                      className="h-9 rounded-lg border border-zinc-300 bg-white px-3 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                    >
+                      <option value="receive">Receive</option>
+                      <option value="change">Change</option>
+                    </select>
+                  </label>
+                </div>
+
+                {Number.isSafeInteger(Number(receiveAmount)) &&
+                  Number(receiveAmount) > 0 && (
+                    <ReceiveOrdinalSelector
+                      amount={receiveAmount}
+                      ordinal={receiveOrdinal}
+                      persistedOrdinals={receiveEvents.map((record) =>
+                        Number(record.activation)
+                      )}
+                      persistedLoading={receiveEventsLoading}
+                      persistedError={receiveEventsError}
+                      onChange={(n) => {
+                        setReceiveOrdinal(String(n));
+                        setResult(null);
+                        setError("");
+                      }}
+                    />
+                  )}
+
+                {currentNetwork && (
+                  <ResultSection
+                    title="Selected coordination network"
+                    description="Network parameter passed in the receive request."
+                    value={currentNetwork}
+                  />
+                )}
               </div>
             )}
 
@@ -2388,8 +2659,9 @@ export default function Home() {
                   </p>
 
                   <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                    Transit is sent to this substrate's API route. Network and
-                    path specify derivation; they are not a separate state host.
+                    Transit is sent to this substrate's API route. Network
+                    and path specify derivation; they are not a separate
+                    state host.
                   </p>
                 </div>
 
@@ -2502,10 +2774,10 @@ export default function Home() {
                   </p>
 
                   <p className="mt-1 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                    Exile reads the selected substrate's persisted event history.
-                    The Rust API decides eligibility and derives the exile depth;
-                    the browser neither gates the request nor submits an
-                    in-memory depth snapshot.
+                    Exile reads the selected substrate's persisted event
+                    history. The Rust API decides eligibility and derives
+                    the exile depth; the browser neither gates the request
+                    nor submits an in-memory depth snapshot.
                   </p>
                 </div>
 
@@ -2520,11 +2792,15 @@ export default function Home() {
                     type="button"
                     onClick={loadExileRecords}
                     disabled={
-                      exileRecordsLoading || !selectedSubstrate || loading
+                      exileRecordsLoading ||
+                      !selectedSubstrate ||
+                      loading
                     }
                     className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-medium hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
                   >
-                    {exileRecordsLoading ? "Refreshing…" : "Refresh events"}
+                    {exileRecordsLoading
+                      ? "Refreshing…"
+                      : "Refresh events"}
                   </button>
                 </div>
 
@@ -2538,12 +2814,14 @@ export default function Home() {
                 )}
 
                 <div className="space-y-2">
-                  <p className="text-xs font-medium">Persisted event records</p>
+                  <p className="text-xs font-medium">
+                    Persisted event records
+                  </p>
 
                   {!exileRecords.length ? (
                     <p className="rounded-lg border border-zinc-200 bg-white p-3 text-xs text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
-                      No event records were returned. Record a transit event,
-                      then refresh this list.
+                      No event records were returned. Record a transit
+                      event, then refresh this list.
                     </p>
                   ) : (
                     exileRecords.map((record, index) => {
@@ -2582,7 +2860,9 @@ export default function Home() {
               disabled={
                 loading ||
                 (substrateRequired && (listLoading || !selectedSubstrate)) ||
-                (tab === "transit" && (networkLoading || !selectedNetwork))
+                ((tab === "transit" || tab === "receive") &&
+                  (networkLoading || !selectedNetwork)) ||
+                (tab === "derive" && (networkLoading || !deriveNetwork))
               }
               className="mt-1 inline-flex min-h-10 items-center justify-center rounded-lg bg-zinc-950 px-5 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
             >
@@ -2590,13 +2870,15 @@ export default function Home() {
                 ? "Processing…"
                 : tab === "open"
                   ? "Recover Persisted Ordinal"
-                  : tab === "receive"
-                    ? "Execute Receive"
-                    : tab === "transit"
-                      ? "Transit Selected Substrate"
-                      : tab === "exile"
-                        ? "Exile Selected Substrate"
-                        : "Create Substrate"}
+                  : tab === "derive"
+                    ? "Derive Submission"
+                    : tab === "receive"
+                      ? "Execute Receive"
+                      : tab === "transit"
+                        ? "Transit Selected Substrate"
+                        : tab === "exile"
+                          ? "Exile Selected Substrate"
+                          : "Create Substrate"}
             </button>
           </form>
         </section>
