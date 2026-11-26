@@ -1,5 +1,3 @@
-src/app/eventstore/page.js
-
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 const API_BASE = (
