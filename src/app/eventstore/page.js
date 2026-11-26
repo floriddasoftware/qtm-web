@@ -16,8 +16,8 @@ const API_BASE = (
 // 02 Networks
 // 03 Persistent Activations
 // 04 Open Activation
-// 05 Event Value
-// 06 Network Route
+// 05 Activation Networks (canonical derivation)
+// 06 Event Value
 // 07 Budget
 // 08 Save Budget
 // 09 Bitminer Start
@@ -46,16 +46,16 @@ const API_ROUTES = {
     `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/open`,
   ],
 
-  // 05 — Event value
+  // 05 — Canonical activation network derivation
+  activationNetworks: ({ name, activation }) => [
+    "GET",
+    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks`,
+  ],
+
+  // 06 — Event value
   eventValue: ({ name, activation, network, field }) => [
     "GET",
     `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/${encodeURIComponent(field)}`,
-  ],
-
-  // 06 — Network derivation / NetworkRoute
-  networkRoute: ({ name, activation }) => [
-    "GET",
-    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/network`,
   ],
 
   // 07 — Budget
@@ -120,6 +120,7 @@ async function apiRequest(route, body, signal) {
   const text = await response.text();
 
   let data = null;
+
   if (text) {
     try {
       data = JSON.parse(text);
@@ -140,10 +141,39 @@ async function apiRequest(route, body, signal) {
 }
 
 // ============================================================
+// ACTIVATION NETWORK DERIVATION
+// ============================================================
+
+async function loadActivationNetworks(substrateName, activation, signal) {
+  const data = await apiRequest(
+    API_ROUTES.activationNetworks({
+      name: substrateName,
+      activation,
+    }),
+    undefined,
+    signal
+  );
+
+  if (
+    !data ||
+    !Array.isArray(data.networks)
+  ) {
+    throw new Error(
+      "Invalid activation network derivation response."
+    );
+  }
+
+  return data.networks.filter(
+    (network) =>
+      typeof network === "string" && network.length > 0
+  );
+}
+
+// ============================================================
 // ACTIVE CLIP
 // ============================================================
 
-function createActiveClip(substrate, activation) {
+function createActiveClip(substrate, activation, networks = []) {
   if (!substrate || activation == null) return null;
 
   return {
@@ -153,7 +183,7 @@ function createActiveClip(substrate, activation) {
     activation: {
       id: activation,
     },
-    network: null,
+    network: networks,
   };
 }
 
@@ -179,6 +209,7 @@ export default function Home() {
 
   const [loadingSubstrates, setLoadingSubstrates] = useState(true);
   const [loadingEvents, setLoadingEvents] = useState(false);
+  const [loadingNetworks, setLoadingNetworks] = useState(false);
 
   const [error, setError] = useState("");
 
@@ -198,9 +229,16 @@ export default function Home() {
       .map(String);
   }, [events]);
 
-  const activeActivation = activeClip?.activation?.id != null
-    ? String(activeClip.activation.id)
-    : "";
+  const activeActivation =
+    activeClip?.activation?.id != null
+      ? String(activeClip.activation.id)
+      : "";
+
+  const activeNetworks = useMemo(() => {
+    return Array.isArray(activeClip?.network)
+      ? activeClip.network
+      : [];
+  }, [activeClip]);
 
   // ----------------------------------------------------------
   // Initial substrate loading — primary execution point
@@ -262,6 +300,7 @@ export default function Home() {
       : data?.events || data?.activations || [];
 
     setEvents(list);
+
     return list;
   }, []);
 
@@ -281,6 +320,7 @@ export default function Home() {
       setEvents([]);
       setActiveClip(null);
       setLoadingEvents(true);
+      setLoadingNetworks(false);
 
       const controller = new AbortController();
 
@@ -302,13 +342,32 @@ export default function Home() {
 
         const id = activationId(latestEvent);
 
-        // Commit the entire activation context in one update.
-        setActiveClip(createActiveClip(substrate, id));
+        // Load the network context directly from the
+        // persisted activation's canonical API route.
+        setLoadingNetworks(true);
+
+        const networks = await loadActivationNetworks(
+          substrate.name,
+          id,
+          controller.signal
+        );
+
+        // Commit the entire activation context together.
+        setActiveClip(
+          createActiveClip(substrate, id, networks)
+        );
       } catch (err) {
-        setError(err.message || "Failed to load activations.");
-        setActiveClip(null);
+        if (!controller.signal.aborted) {
+          setError(
+            err.message || "Failed to load activation context."
+          );
+          setActiveClip(null);
+        }
       } finally {
-        setLoadingEvents(false);
+        if (!controller.signal.aborted) {
+          setLoadingEvents(false);
+          setLoadingNetworks(false);
+        }
       }
     },
     [substrates, loadEvents]
@@ -319,23 +378,52 @@ export default function Home() {
   // ----------------------------------------------------------
 
   const selectActivation = useCallback(
-    (activation) => {
+    async (activation) => {
       if (!selectedSubstrate || activation === "") return;
 
       const selectedEvent = events.find(
-        (event) => String(activationId(event)) === String(activation)
+        (event) =>
+          String(activationId(event)) === String(activation)
       );
 
       if (!selectedEvent) return;
 
       const id = activationId(selectedEvent);
-
-      // Construct a complete new context. Do not update activation
-      // independently from its substrate.
-      const nextClip = createActiveClip(selectedSubstrate, id);
+      const controller = new AbortController();
 
       setError("");
-      setActiveClip(nextClip);
+      setLoadingNetworks(true);
+
+      // Clear the previous activation's network context.
+      setActiveClip(
+        createActiveClip(selectedSubstrate, id, [])
+      );
+
+      try {
+        const networks = await loadActivationNetworks(
+          selectedSubstrate.name,
+          id,
+          controller.signal
+        );
+
+        setActiveClip(
+          createActiveClip(selectedSubstrate, id, networks)
+        );
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          setError(
+            err.message || "Failed to derive activation networks."
+          );
+
+          // Keep substrate and activation selected, but do not
+          // fabricate network values after a failed derivation.
+          setActiveClip(
+            createActiveClip(selectedSubstrate, id, [])
+          );
+        }
+      } finally {
+        setLoadingNetworks(false);
+      }
     },
     [selectedSubstrate, events]
   );
@@ -407,6 +495,7 @@ export default function Home() {
                 value={activeActivation}
                 disabled={
                   loadingEvents ||
+                  loadingNetworks ||
                   !selectedSubstrate ||
                   activations.length === 0
                 }
@@ -443,6 +532,12 @@ export default function Home() {
             </p>
           )}
 
+          {loadingNetworks && (
+            <p className="mt-4 text-sm text-zinc-500">
+              Deriving activation networks...
+            </p>
+          )}
+
           {error && (
             <p className="mt-4 text-sm text-red-500">
               {error}
@@ -462,9 +557,42 @@ export default function Home() {
               Select a substrate and persistent activation.
             </p>
           ) : (
-            <pre className="mt-3 overflow-auto rounded-lg bg-zinc-100 p-3 text-xs dark:bg-zinc-800">
-              {JSON.stringify(activeClip, null, 2)}
-            </pre>
+            <>
+              {/* Network overview */}
+
+              <div className="mt-4">
+                <h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                  Network overview
+                </h3>
+
+                {loadingNetworks ? (
+                  <p className="mt-2 text-sm text-zinc-500">
+                    Deriving networks from persisted activation...
+                  </p>
+                ) : activeNetworks.length > 0 ? (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {activeNetworks.map((network) => (
+                      <span
+                        key={network}
+                        className="rounded-full border border-emerald-300 bg-emerald-50 px-3 py-1 text-sm font-medium text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300"
+                      >
+                        {network}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-sm text-zinc-500">
+                    No registered networks derived for this activation.
+                  </p>
+                )}
+              </div>
+
+              {/* ActiveClip serialized context */}
+
+              <pre className="mt-4 overflow-auto rounded-lg bg-zinc-100 p-3 text-xs dark:bg-zinc-800">
+                {JSON.stringify(activeClip, null, 2)}
+              </pre>
+            </>
           )}
         </section>
 
@@ -477,10 +605,24 @@ export default function Home() {
             </h2>
 
             <p className="mt-1 text-sm text-zinc-500">
-              Activation is selected. Event value, NetworkRoute,
-              Budget, Bitminer, Submissions, WirePackets, and PSBT
-              will load downstream from this ActiveClip.
+              Activation and registered network context have been
+              loaded from the persisted event. Event value, Budget,
+              Bitminer, Submissions, WirePackets, and PSBT will load
+              downstream from this ActiveClip.
             </p>
+
+            {!loadingNetworks && activeNetworks.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {activeNetworks.map((network) => (
+                  <span
+                    key={network}
+                    className="rounded-md bg-zinc-100 px-2 py-1 text-xs dark:bg-zinc-800"
+                  >
+                    {network}
+                  </span>
+                ))}
+              </div>
+            )}
           </section>
         )}
       </div>
