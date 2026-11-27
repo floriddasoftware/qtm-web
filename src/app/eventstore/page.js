@@ -1,17 +1,11 @@
- "use client";
+"use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
+
 const API_BASE = (
   process.env.NEXT_PUBLIC_QTM_API_BASE ||
   "https://qtm-api.onrender.com"
 ).replace(/\/+$/, "");
-// ============================================================
-// API ROUTES
-//
-// One activation network response.
-// One ActiveClip.
-// Multi-network overview.
-// Network contexts consume the shared ActiveClip.
-// ============================================================
+
 const API_ROUTES = {
   listSubstrates: () => ["GET", "/wallets"],
   listNetworks: () => ["GET", "/networks"],
@@ -60,9 +54,7 @@ const API_ROUTES = {
     `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/submissions/${encodeURIComponent(submission)}/psbt`,
   ],
 };
-// ============================================================
-// API REQUEST
-// ============================================================
+
 async function apiRequest(route, body, signal) {
   const [method, path] = route;
   const response = await fetch(`${API_BASE}${path}`, {
@@ -74,8 +66,10 @@ async function apiRequest(route, body, signal) {
     body: body !== undefined ? JSON.stringify(body) : undefined,
     signal,
   });
+
   const text = await response.text();
   let data = null;
+
   if (text) {
     try {
       data = JSON.parse(text);
@@ -83,6 +77,7 @@ async function apiRequest(route, body, signal) {
       data = text;
     }
   }
+
   if (!response.ok) {
     throw new Error(
       data?.error ||
@@ -90,16 +85,12 @@ async function apiRequest(route, body, signal) {
         `Request failed (${response.status})`
     );
   }
+
   return data;
 }
-// ============================================================
-// ACTIVATION NETWORKS
-//
-// The API response is the only network derivation.
-//
-// Event Store does not derive networks from purpose, coin,
-// payload, event value, or local registry state.
-// ============================================================
+
+// The activation networks and event values are returned together by the API.
+// Event Store does not derive either locally.
 async function loadActivationNetworks(
   substrateName,
   activation,
@@ -113,37 +104,44 @@ async function loadActivationNetworks(
     undefined,
     signal
   );
-  if (!data || !Array.isArray(data.networks)) {
+
+  if (
+    !data ||
+    !Array.isArray(data.networks) ||
+    !data.event ||
+    data.event.dimension == null ||
+    data.event.retained_mass == null ||
+    data.event.delta == null
+  ) {
     throw new Error(
-      "Invalid activation network derivation response."
+      "Invalid activation network/event response."
     );
   }
-  return data.networks.filter(
-    (network) =>
-      typeof network === "string" &&
-      network.length > 0
-  );
+
+  return {
+    networks: data.networks.filter(
+      (network) =>
+        typeof network === "string" &&
+        network.length > 0
+    ),
+    event: {
+      dimension: data.event.dimension,
+      retained_mass: data.event.retained_mass,
+      delta: data.event.delta,
+    },
+  };
 }
-// ============================================================
-// ACTIVE CLIP
-//
-// Canonical state:
-//
-// ActiveClip
-//   substrate
-//   activation
-//   network[]
-//
-// This state is committed after activation network response.
-// ============================================================
+
 function createActiveClip(
   substrate,
   activation,
-  networks = []
+  networks = [],
+  event = null
 ) {
   if (!substrate || activation == null) {
     return null;
   }
+
   return {
     substrate: {
       name: substrate.name,
@@ -152,8 +150,10 @@ function createActiveClip(
       id: activation,
     },
     network: networks,
+    event,
   };
 }
+
 function activationId(event) {
   return (
     event?.activation ??
@@ -163,24 +163,17 @@ function activationId(event) {
     null
   );
 }
-// ============================================================
-// NETWORK CONTEXT
-//
-// Every context is a projection of the same ActiveClip.
-//
-// No network derivation.
-// No duplicate activation API requests.
-// ============================================================
+
 function NetworkContext({ network, activeClip }) {
   const substrate = activeClip?.substrate?.name;
   const activation = activeClip?.activation?.id;
+  const event = activeClip?.event;
+
   return (
     <article className="rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="font-semibold">
-            {network}
-          </h3>
+          <h3 className="font-semibold">{network}</h3>
           <p className="mt-1 text-xs text-zinc-500">
             Activation {activation} · {substrate}
           </p>
@@ -189,20 +182,43 @@ function NetworkContext({ network, activeClip }) {
           Context Ready
         </span>
       </div>
-      {/* Event Context */}
+
       <div className="mt-4 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-        <h4 className="text-sm font-medium">
-          Event Context Ready
-        </h4>
+        <h4 className="text-sm font-medium">Event Context Ready</h4>
         <p className="mt-1 text-sm text-zinc-500">
-          Activation and registered network context have been
-          loaded from the persisted event.
+          Activation and registered network context have been loaded
+          from the persisted event.
         </p>
         <p className="mt-2 text-xs text-zinc-500">
           This context is scoped to {network}.
         </p>
       </div>
-      {/* Downstream */}
+
+      {/* Shared activation-level event values */}
+      <div className="mt-4 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+        <h4 className="text-sm font-medium">Persisted Event Values</h4>
+        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="rounded-lg bg-zinc-100 p-3 dark:bg-zinc-800">
+            <div className="text-xs text-zinc-500">Dimension</div>
+            <div className="mt-1 text-lg font-semibold tabular-nums">
+              {event?.dimension ?? "—"}
+            </div>
+          </div>
+          <div className="rounded-lg bg-zinc-100 p-3 dark:bg-zinc-800">
+            <div className="text-xs text-zinc-500">Retained Mass</div>
+            <div className="mt-1 break-all text-lg font-semibold tabular-nums">
+              {event?.retained_mass ?? "—"}
+            </div>
+          </div>
+          <div className="rounded-lg bg-zinc-100 p-3 dark:bg-zinc-800">
+            <div className="text-xs text-zinc-500">Transition Delta</div>
+            <div className="mt-1 text-lg font-semibold tabular-nums">
+              {event?.delta ?? "—"}
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div className="mt-4">
         <h4 className="text-xs font-medium uppercase tracking-wide text-zinc-500">
           Downstream context
@@ -220,9 +236,7 @@ function NetworkContext({ network, activeClip }) {
               key={name}
               className="rounded-lg border border-zinc-200 px-3 py-3 dark:border-zinc-800"
             >
-              <div className="text-sm font-medium">
-                {name}
-              </div>
+              <div className="text-sm font-medium">{name}</div>
               <div className="mt-1 text-xs text-zinc-500">
                 Awaiting downstream loading
               </div>
@@ -230,7 +244,7 @@ function NetworkContext({ network, activeClip }) {
           ))}
         </div>
       </div>
-      {/* Network identity */}
+
       <div className="mt-4 rounded-lg bg-zinc-100 p-3 dark:bg-zinc-800">
         <div className="text-xs font-medium text-zinc-500">
           Network context
@@ -241,6 +255,7 @@ function NetworkContext({ network, activeClip }) {
               substrate,
               activation,
               network,
+              event,
             },
             null,
             2
@@ -250,68 +265,54 @@ function NetworkContext({ network, activeClip }) {
     </article>
   );
 }
-// ============================================================
-// EVENT STORE
-// ============================================================
+
 export default function Home() {
   const [substrates, setSubstrates] = useState([]);
   const [events, setEvents] = useState([]);
-  // One shared activation context.
   const [activeClip, setActiveClip] = useState(null);
-  const [loadingSubstrates, setLoadingSubstrates] =
-    useState(true);
-  const [loadingEvents, setLoadingEvents] =
-    useState(false);
-  const [loadingNetworks, setLoadingNetworks] =
-    useState(false);
+  const [loadingSubstrates, setLoadingSubstrates] = useState(true);
+  const [loadingEvents, setLoadingEvents] = useState(false);
+  const [loadingNetworks, setLoadingNetworks] = useState(false);
   const [error, setError] = useState("");
-  // ==========================================================
-  // SELECTED SUBSTRATE
-  // ==========================================================
+
   const selectedSubstrate = useMemo(() => {
     if (!activeClip) return null;
     return (
       substrates.find(
-        (substrate) =>
-          substrate.name === activeClip.substrate.name
+        (substrate) => substrate.name === activeClip.substrate.name
       ) || null
     );
   }, [activeClip, substrates]);
-  // ==========================================================
-  // ACTIVATIONS
-  // ==========================================================
-  const activations = useMemo(() => {
-    return events
-      .map(activationId)
-      .filter(
-        (id) =>
-          id !== null &&
-          id !== undefined
-      )
-      .map(String);
-  }, [events]);
+
+  const activations = useMemo(
+    () =>
+      events
+        .map(activationId)
+        .filter((id) => id !== null && id !== undefined)
+        .map(String),
+    [events]
+  );
+
   const activeActivation =
     activeClip?.activation?.id != null
       ? String(activeClip.activation.id)
       : "";
-  // ==========================================================
-  // NETWORKS
-  //
-  // Network overview reads ActiveClip directly.
-  // ==========================================================
-  const activeNetworks = useMemo(() => {
-    return Array.isArray(activeClip?.network)
-      ? activeClip.network
-      : [];
-  }, [activeClip]);
-  // ==========================================================
-  // INITIAL SUBSTRATE LOADING
-  // ==========================================================
+
+  const activeNetworks = useMemo(
+    () =>
+      Array.isArray(activeClip?.network)
+        ? activeClip.network
+        : [],
+    [activeClip]
+  );
+
   useEffect(() => {
     const controller = new AbortController();
+
     async function boot() {
       setLoadingSubstrates(true);
       setError("");
+
       try {
         const data = await apiRequest(
           API_ROUTES.listSubstrates(),
@@ -320,16 +321,11 @@ export default function Home() {
         );
         const list = Array.isArray(data)
           ? data
-          : data?.substrates ||
-              data?.wallets ||
-              [];
+          : data?.substrates || data?.wallets || [];
         setSubstrates(list);
       } catch (err) {
         if (!controller.signal.aborted) {
-          setError(
-            err.message ||
-              "Failed to load substrates."
-          );
+          setError(err.message || "Failed to load substrates.");
         }
       } finally {
         if (!controller.signal.aborted) {
@@ -337,55 +333,42 @@ export default function Home() {
         }
       }
     }
+
     boot();
     return () => controller.abort();
   }, []);
-  // ==========================================================
-  // PERSISTENT ACTIVATION LOADING
-  // ==========================================================
-  const loadEvents = useCallback(
-    async (substrateName, signal) => {
-      if (!substrateName) {
-        setEvents([]);
-        return [];
-      }
-      const data = await apiRequest(
-        API_ROUTES.listEvents({
-          name: substrateName,
-        }),
-        undefined,
-        signal
-      );
-      const list = Array.isArray(data)
-        ? data
-        : data?.events ||
-            data?.activations ||
-            [];
-      setEvents(list);
-      return list;
-    },
-    []
-  );
-  // ==========================================================
-  // SUBSTRATE SELECTION
-  //
-  // Load the persistent activation list, select the latest
-  // persisted activation, and retrieve its network response.
-  //
-  // ActiveClip is committed atomically after the response.
-  // ==========================================================
+
+  const loadEvents = useCallback(async (substrateName, signal) => {
+    if (!substrateName) {
+      setEvents([]);
+      return [];
+    }
+
+    const data = await apiRequest(
+      API_ROUTES.listEvents({ name: substrateName }),
+      undefined,
+      signal
+    );
+    const list = Array.isArray(data)
+      ? data
+      : data?.events || data?.activations || [];
+    setEvents(list);
+    return list;
+  }, []);
+
   const selectSubstrate = useCallback(
     async (name) => {
-      const substrate = substrates.find(
-        (item) => item.name === name
-      );
+      const substrate = substrates.find((item) => item.name === name);
       if (!substrate) return;
+
       setError("");
       setEvents([]);
       setActiveClip(null);
       setLoadingEvents(true);
-      setLoadingNetworks(false);
+      setLoadingNetworks(true);
+
       const controller = new AbortController();
+
       try {
         const persistentEvents = await loadEvents(
           substrate.name,
@@ -394,35 +377,32 @@ export default function Home() {
         const latestEvent = persistentEvents
           .slice()
           .reverse()
-          .find(
-            (event) =>
-              activationId(event) != null
-          );
+          .find((event) => activationId(event) != null);
+
         if (!latestEvent) {
           setActiveClip(null);
           return;
         }
+
         const id = activationId(latestEvent);
-        // One canonical activation network request.
-        const networks = await loadActivationNetworks(
+        const activationContext = await loadActivationNetworks(
           substrate.name,
           id,
           controller.signal
         );
-        // Commit one shared ActiveClip.
+
+        // Commit substrate, activation, networks, and event values together.
         setActiveClip(
           createActiveClip(
             substrate,
             id,
-            networks
+            activationContext.networks,
+            activationContext.event
           )
         );
       } catch (err) {
         if (!controller.signal.aborted) {
-          setError(
-            err.message ||
-              "Failed to load activation context."
-          );
+          setError(err.message || "Failed to load activation context.");
           setActiveClip(null);
         }
       } finally {
@@ -434,64 +414,48 @@ export default function Home() {
     },
     [substrates, loadEvents]
   );
-  // ==========================================================
-  // ACTIVATION SELECTION
-  //
-  // One network API response per selected activation.
-  // ==========================================================
+
   const selectActivation = useCallback(
     async (activation) => {
-      if (
-        !selectedSubstrate ||
-        activation === ""
-      ) {
-        return;
-      }
+      if (!selectedSubstrate || activation === "") return;
+
       const selectedEvent = events.find(
-        (event) =>
-          String(activationId(event)) ===
-          String(activation)
+        (event) => String(activationId(event)) === String(activation)
       );
       if (!selectedEvent) return;
+
       const id = activationId(selectedEvent);
       const controller = new AbortController();
+
       setError("");
       setLoadingNetworks(true);
-      // Remove the previous activation's context.
+
+      // Keep the selected identity, but clear the old event/network data.
       setActiveClip(
-        createActiveClip(
-          selectedSubstrate,
-          id,
-          []
-        )
+        createActiveClip(selectedSubstrate, id, [], null)
       );
+
       try {
-        // Retrieve the authoritative network array once.
-        const networks = await loadActivationNetworks(
+        const activationContext = await loadActivationNetworks(
           selectedSubstrate.name,
           id,
           controller.signal
         );
-        // Commit the response into the canonical state.
+
+        // Commit the full response atomically.
         setActiveClip(
           createActiveClip(
             selectedSubstrate,
             id,
-            networks
+            activationContext.networks,
+            activationContext.event
           )
         );
       } catch (err) {
         if (!controller.signal.aborted) {
-          setError(
-            err.message ||
-              "Failed to load activation networks."
-          );
+          setError(err.message || "Failed to load activation networks.");
           setActiveClip(
-            createActiveClip(
-              selectedSubstrate,
-              id,
-              []
-            )
+            createActiveClip(selectedSubstrate, id, [], null)
           );
         }
       } finally {
@@ -502,60 +466,40 @@ export default function Home() {
     },
     [selectedSubstrate, events]
   );
-  // ==========================================================
-  // UI
-  // ==========================================================
+
   return (
     <main className="min-h-screen bg-zinc-50 px-4 py-6 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
       <div className="mx-auto flex max-w-5xl flex-col gap-6">
-        {/* Header */}
         <header>
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Event Store
-          </h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Event Store</h1>
           <p className="mt-1 text-sm text-zinc-500">
             Persistent activation and network contexts
           </p>
         </header>
-        {/* Substrate / Activation selectors */}
+
         <section className="rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="grid gap-4 sm:grid-cols-2">
-            {/* Substrate */}
             <div className="flex flex-col gap-2">
-              <label className="text-sm font-medium">
-                Substrate
-              </label>
+              <label className="text-sm font-medium">Substrate</label>
               <select
                 className="rounded-lg border border-zinc-300 bg-transparent px-3 py-2 dark:border-zinc-700"
-                value={
-                  activeClip?.substrate?.name ||
-                  ""
-                }
+                value={activeClip?.substrate?.name || ""}
                 disabled={loadingSubstrates}
-                onChange={(event) =>
-                  selectSubstrate(event.target.value)
-                }
+                onChange={(event) => selectSubstrate(event.target.value)}
               >
                 <option value="">
-                  {loadingSubstrates
-                    ? "Loading substrates..."
-                    : "Select substrate"}
+                  {loadingSubstrates ? "Loading substrates..." : "Select substrate"}
                 </option>
                 {substrates.map((substrate) => (
-                  <option
-                    key={substrate.name}
-                    value={substrate.name}
-                  >
+                  <option key={substrate.name} value={substrate.name}>
                     {substrate.name}
                   </option>
                 ))}
               </select>
             </div>
-            {/* Activation */}
+
             <div className="flex flex-col gap-2">
-              <label className="text-sm font-medium">
-                Activation
-              </label>
+              <label className="text-sm font-medium">Activation</label>
               <select
                 className="rounded-lg border border-zinc-300 bg-transparent px-3 py-2 dark:border-zinc-700"
                 value={activeActivation}
@@ -565,9 +509,7 @@ export default function Home() {
                   !selectedSubstrate ||
                   activations.length === 0
                 }
-                onChange={(event) =>
-                  selectActivation(event.target.value)
-                }
+                onChange={(event) => selectActivation(event.target.value)}
               >
                 <option value="">
                   {loadingEvents
@@ -577,21 +519,16 @@ export default function Home() {
                       : "Select activation"}
                 </option>
                 {activations.map((activation) => (
-                  <option
-                    key={activation}
-                    value={activation}
-                  >
+                  <option key={activation} value={activation}>
                     Activation {activation}
                   </option>
                 ))}
               </select>
             </div>
           </div>
-          {/* Loading */}
+
           {loadingSubstrates && (
-            <p className="mt-4 text-sm text-zinc-500">
-              Loading substrates...
-            </p>
+            <p className="mt-4 text-sm text-zinc-500">Loading substrates...</p>
           )}
           {loadingEvents && (
             <p className="mt-4 text-sm text-zinc-500">
@@ -600,37 +537,27 @@ export default function Home() {
           )}
           {loadingNetworks && (
             <p className="mt-4 text-sm text-zinc-500">
-              Loading activation network response...
+              Loading activation network/event response...
             </p>
           )}
-          {/* Error */}
-          {error && (
-            <p className="mt-4 text-sm text-red-500">
-              {error}
-            </p>
-          )}
+          {error && <p className="mt-4 text-sm text-red-500">{error}</p>}
         </section>
-        {/* ====================================================
-             ACTIVE CLIP
-        ==================================================== */}
+
         <section className="rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <h2 className="text-sm font-semibold">
-            ActiveClip
-          </h2>
+          <h2 className="text-sm font-semibold">ActiveClip</h2>
           {!activeClip ? (
             <p className="mt-2 text-sm text-zinc-500">
               Select a substrate and persistent activation.
             </p>
           ) : (
             <>
-              {/* Network Overview */}
               <div className="mt-4">
                 <h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">
                   Network overview
                 </h3>
                 {loadingNetworks ? (
                   <p className="mt-2 text-sm text-zinc-500">
-                    Loading network response...
+                    Loading network/event response...
                   </p>
                 ) : activeNetworks.length > 0 ? (
                   <div className="mt-2 flex flex-wrap gap-2">
@@ -649,32 +576,47 @@ export default function Home() {
                   </p>
                 )}
               </div>
-              {/* Canonical ActiveClip */}
+
+              <div className="mt-4 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+                <h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                  Activation event values
+                </h3>
+                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <div className="rounded-lg bg-zinc-100 p-3 dark:bg-zinc-800">
+                    <div className="text-xs text-zinc-500">Dimension</div>
+                    <div className="mt-1 text-lg font-semibold tabular-nums">
+                      {activeClip.event?.dimension ?? "—"}
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-zinc-100 p-3 dark:bg-zinc-800">
+                    <div className="text-xs text-zinc-500">Retained Mass</div>
+                    <div className="mt-1 break-all text-lg font-semibold tabular-nums">
+                      {activeClip.event?.retained_mass ?? "—"}
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-zinc-100 p-3 dark:bg-zinc-800">
+                    <div className="text-xs text-zinc-500">Delta</div>
+                    <div className="mt-1 text-lg font-semibold tabular-nums">
+                      {activeClip.event?.delta ?? "—"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <pre className="mt-4 overflow-auto rounded-lg bg-zinc-100 p-3 text-xs dark:bg-zinc-800">
-                {JSON.stringify(
-                  activeClip,
-                  null,
-                  2
-                )}
+                {JSON.stringify(activeClip, null, 2)}
               </pre>
             </>
           )}
         </section>
-        {/* ====================================================
-             NETWORK-SCOPED EVENT CONTEXTS
-             Every network comes directly from ActiveClip.network.
-             No secondary derivation.
-             No duplicate network API requests.
-        ==================================================== */}
+
         {activeClip && !loadingNetworks && (
           <section className="flex flex-col gap-4">
             <header>
-              <h2 className="text-lg font-semibold">
-                Event Contexts
-              </h2>
+              <h2 className="text-lg font-semibold">Event Contexts</h2>
               <p className="mt-1 text-sm text-zinc-500">
-                Each context is scoped to a registered network
-                returned by the activation network response.
+                Each context is scoped to a registered network returned by the
+                activation network response.
               </p>
             </header>
             {activeNetworks.length === 0 ? (
