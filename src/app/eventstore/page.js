@@ -12,31 +12,25 @@ const ROUTES = {
   minerStart: ({ name, activation, network }) => ["POST", `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/observation`],
   minerStop: ({ name, activation, network }) => ["DELETE", `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/observation`],
   log: ({ name, activation, network }) => ["GET", `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/observation/log`],
-  wirepackets: ({ name, activation, network, submission }) => [
-    "GET",
-    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/wirepackets${submission != null ? `?submission=${encodeURIComponent(submission)}` : ""}`,
-  ],
-  wirepacketsFile: ({ name, activation, network, submission }) => [
-    "GET",
-    `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/wirepackets/file${submission != null ? `?submission=${encodeURIComponent(submission)}` : ""}`,
-  ],
+  wirepackets: ({ name, activation, network }) => ["GET", `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/wirepackets`],
+  wirepacketsFile: ({ name, activation, network }) => ["GET", `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/wirepackets/file`],
   signing: ({ name, activation, network, commitment }) => ["GET", `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/wirepacket/${encodeURIComponent(commitment)}/signing`],
   networkBoard: ({ name, activation, network }) => ["GET", `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/networks/${encodeURIComponent(network)}/payload-board`],
   activationBoard: ({ name, activation }) => ["GET", `/wallets/${encodeURIComponent(name)}/activations/${encodeURIComponent(activation)}/payload-board`],
 };
 
-const btnBase =
-  "inline-flex items-center justify-center rounded-lg border px-3 py-1.5 text-xs font-medium transition focus:outline-none focus:ring-2 focus:ring-zinc-400/50 disabled:pointer-events-none disabled:opacity-40";
-const btnNeutral = `${btnBase} border-zinc-200 bg-white text-zinc-800 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800`;
-const btnPrimary = `${btnBase} border-zinc-900 bg-zinc-900 text-white hover:bg-zinc-800 dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200`;
-const btnSuccess = `${btnBase} border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-900/70 dark:bg-emerald-950/60 dark:text-emerald-300`;
-const btnError = `${btnBase} border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 dark:border-rose-900/70 dark:bg-rose-950/60 dark:text-rose-300`;
+const btn =
+  "inline-flex items-center justify-center rounded-lg border px-3 py-1.5 text-xs font-medium transition focus:outline-none focus:ring-2 focus:ring-zinc-400/40 disabled:pointer-events-none disabled:opacity-40";
+const btnNeutral = `${btn} border-zinc-200 bg-white text-zinc-800 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800`;
+const btnPrimary = `${btn} border-zinc-900 bg-zinc-900 text-white hover:bg-zinc-800 dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200`;
+const btnSuccess = `${btn} border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-900/70 dark:bg-emerald-950/60 dark:text-emerald-300`;
+const btnError = `${btn} border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 dark:border-rose-900/70 dark:bg-rose-950/60 dark:text-rose-300`;
 
-const cardClass = "rounded-xl border border-zinc-200/90 bg-white p-4 dark:border-zinc-800/90 dark:bg-zinc-900/90";
-const subCardClass = "rounded-lg border border-zinc-200/80 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/60";
-const metricBoxClass = "rounded-lg border border-zinc-200/80 bg-zinc-50 px-3 py-2.5 dark:border-zinc-800 dark:bg-zinc-950/70";
-const errorTextClass = "text-xs font-medium text-rose-700 dark:text-rose-300";
-const successTextClass = "text-xs font-medium text-emerald-700 dark:text-emerald-300";
+const card = "rounded-xl border border-zinc-200/90 bg-white p-4 dark:border-zinc-800/90 dark:bg-zinc-900/90";
+const subCard = "rounded-lg border border-zinc-200/80 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-950/60";
+const metricBox = "rounded-lg border border-zinc-200/80 bg-zinc-50 px-3 py-2.5 dark:border-zinc-800 dark:bg-zinc-950/70";
+const errText = "text-xs font-medium text-rose-600 dark:text-rose-300";
+const okText = "text-xs font-medium text-emerald-600 dark:text-emerald-300";
 
 async function req(route, body, signal) {
   const [method, path] = route;
@@ -47,13 +41,13 @@ async function req(route, body, signal) {
     signal,
     cache: "no-store",
   });
-  const raw = await res.text();
+  const text = await res.text();
   let data = null;
-  if (raw) {
+  if (text) {
     try {
-      data = JSON.parse(raw);
+      data = JSON.parse(text);
     } catch {
-      data = raw;
+      data = text;
     }
   }
   if (!res.ok) throw new Error(data?.error || data?.message || (typeof data === "string" ? data : `HTTP ${res.status}`));
@@ -69,34 +63,14 @@ function parseMaxEvents(budget) {
   return Number.isInteger(n) && n > 0 ? n : 1;
 }
 
-function normalizeSubmissionEntry(payload, index) {
-  const base = Array.isArray(payload?.packets) ? payload.packets[0] || payload : payload || {};
-  const packets = Array.isArray(base?.packets) ? base.packets : Array.isArray(payload?.packets) ? payload.packets : [];
-  const subNum = base?.submission ?? payload?.submission ?? index;
-  const bytes =
-    typeof base?.bytes === "number"
-      ? base.bytes
-      : typeof payload?.bytes === "number"
-        ? payload.bytes
-        : packets.reduce((acc, p) => acc + (Number(p?.bytes) || 0), 0);
-  return {
-    submission: subNum,
-    name: base?.name ?? `submission-${subNum}`,
-    path: base?.path ?? "",
-    bytes,
-    packet_count: base?.packet_count ?? packets.length,
-    packets,
-  };
-}
-
 function JsonNode({ k, v, depth = 0 }) {
-  const pad = { paddingLeft: `${Math.min(depth, 5) * 12}px` };
+  const indent = { paddingLeft: `${Math.min(depth, 5) * 12}px` };
   if (v === null || typeof v !== "object") {
-    const isHash = typeof v === "string" && (v.length >= 24 || /^[0-9a-fA-F]+$/.test(v));
+    const isHex = typeof v === "string" && (v.length >= 24 || /^[0-9a-fA-F]{16,}$/.test(v));
     return (
-      <div style={pad} className="flex flex-wrap items-baseline justify-between gap-2 border-b border-zinc-200/60 py-1.5 last:border-0 dark:border-zinc-800/70">
+      <div style={indent} className="flex flex-wrap items-baseline justify-between gap-2 border-b border-zinc-200/60 py-1.5 last:border-0 dark:border-zinc-800/70">
         {k !== undefined && <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">{k}</span>}
-        <span className={`text-xs break-all ${isHash ? "font-mono text-zinc-900 dark:text-zinc-100" : "text-zinc-800 dark:text-zinc-200"}`}>
+        <span className={`text-xs break-all ${isHex ? "font-mono text-zinc-900 dark:text-zinc-100" : "text-zinc-800 dark:text-zinc-200"}`}>
           {v === null ? "null" : String(v)}
         </span>
       </div>
@@ -105,18 +79,18 @@ function JsonNode({ k, v, depth = 0 }) {
   const entries = Array.isArray(v) ? v.map((item, i) => [String(i), item]) : Object.entries(v);
   if (!entries.length) {
     return (
-      <div style={pad} className="flex items-center justify-between py-1.5 text-xs text-zinc-400">
+      <div style={indent} className="flex items-center justify-between py-1.5 text-xs text-zinc-400">
         <span>{k ?? "root"}</span>
         <span>{Array.isArray(v) ? "[]" : "{}"}</span>
       </div>
     );
   }
   return (
-    <div style={pad} className="py-1">
+    <div style={indent} className="py-1">
       {k !== undefined && <div className="mb-1 text-xs font-semibold text-zinc-600 dark:text-zinc-300">{k}</div>}
       <div className="rounded-lg border border-zinc-200/70 bg-white/80 px-2.5 dark:border-zinc-800 dark:bg-zinc-900/70">
-        {entries.map(([childKey, childVal], idx) => (
-          <JsonNode key={`${childKey}-${idx}`} k={childKey} v={childVal} depth={depth + 1} />
+        {entries.map(([ck, cv], i) => (
+          <JsonNode key={`${ck}-${i}`} k={ck} v={cv} depth={depth + 1} />
         ))}
       </div>
     </div>
@@ -126,32 +100,31 @@ function JsonNode({ k, v, depth = 0 }) {
 function JsonPanel({ title, value, error }) {
   const [copied, setCopied] = useState(false);
   if (!value && !error) return null;
-
   const formatted = typeof value === "string" ? value : JSON.stringify(value, null, 2);
 
-  async function onCopy() {
+  async function copy() {
     try {
       await navigator.clipboard.writeText(formatted);
       setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      setTimeout(() => setCopied(false), 1400);
     } catch {
       setCopied(false);
     }
   }
 
   return (
-    <div className={`mt-3 ${subCardClass}`}>
+    <div className={`mt-3 ${subCard}`}>
       <div className="mb-2 flex items-center justify-between gap-2">
         <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200">{title}</span>
         {!error && (
-          <button type="button" onClick={onCopy} className="rounded px-2 py-0.5 text-[11px] font-medium text-zinc-500 hover:bg-zinc-200/70 dark:hover:bg-zinc-800">
+          <button type="button" onClick={copy} className="rounded px-2 py-0.5 text-[11px] font-medium text-zinc-500 hover:bg-zinc-200/70 dark:hover:bg-zinc-800">
             {copied ? "Copied" : "Copy"}
           </button>
         )}
       </div>
 
       {error ? (
-        <p className={`whitespace-pre-wrap ${errorTextClass}`}>{error}</p>
+        <p className={`whitespace-pre-wrap ${errText}`}>{error}</p>
       ) : typeof value === "string" ? (
         <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all font-mono text-xs leading-relaxed text-zinc-800 dark:text-zinc-200">
           {value}
@@ -175,40 +148,137 @@ function JsonPanel({ title, value, error }) {
   );
 }
 
-function WirePacketsPanel({ data, error }) {
+function WirePacketsPanel({ data, error, maxEvents }) {
   if (!data && !error) return null;
   if (error) return <JsonPanel title="WirePackets" error={error} />;
 
-  const submissions = Array.isArray(data?.submissions) ? data.submissions : Array.isArray(data?.packets) ? data.packets : [];
+  const submissions = Array.isArray(data?.packets) ? data.packets : [];
+
+  const discoveredIds = submissions
+    .map((entry) => Number(entry?.submission))
+    .filter((id) => Number.isInteger(id) && id > 0);
+
+  const persistedSet = new Set(discoveredIds);
+  const uniquePersistedIds = Array.from(persistedSet).sort((a, b) => a - b);
+
+  const persistedInBudget = uniquePersistedIds.filter((id) => id >= 1 && id <= maxEvents);
+  const persistedOutsideBudget = uniquePersistedIds.filter((id) => id < 1 || id > maxEvents);
+
+  const missingInBudget = [];
+  for (let id = 1; id <= maxEvents; id += 1) {
+    if (!persistedSet.has(id)) missingInBudget.push(id);
+  }
+
+  const coveragePercent = Math.min(100, Math.max(0, (persistedInBudget.length / maxEvents) * 100));
+
   const totalBytes =
-    typeof data?.bytes === "number" ? data.bytes : submissions.reduce((s, e) => s + (Number(e?.bytes) || 0), 0);
-  const totalPackets = submissions.reduce((s, e) => s + (Number(e?.packet_count) || e?.packets?.length || 0), 0);
+    typeof data?.bytes === "number"
+      ? data.bytes
+      : submissions.reduce((sum, entry) => sum + (Number(entry?.bytes) || 0), 0);
+
+  const totalPackets = submissions.reduce(
+    (sum, entry) => sum + (Number(entry?.packet_count) || entry?.packets?.length || 0),
+    0
+  );
 
   return (
-    <div className={`mt-3 space-y-3 ${subCardClass}`}>
+    <div className={`mt-3 space-y-3 ${subCard}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200">
-          WirePackets · Submissions 1..{data?.max_events ?? Math.max(1, submissions.length)}
+          Persisted WirePackets · Budget 1..{maxEvents}
         </span>
+
         <div className="flex flex-wrap gap-1.5 text-[11px] tabular-nums text-zinc-600 dark:text-zinc-400">
-          <span className="rounded-md border border-zinc-200 bg-white px-2 py-0.5 dark:border-zinc-800 dark:bg-zinc-900">{submissions.length} sub</span>
-          <span className="rounded-md border border-zinc-200 bg-white px-2 py-0.5 dark:border-zinc-800 dark:bg-zinc-900">{totalPackets} pkt</span>
-          <span className="rounded-md border border-zinc-200 bg-white px-2 py-0.5 dark:border-zinc-800 dark:bg-zinc-900">{totalBytes.toLocaleString()} B</span>
+          <span className="rounded-md border border-zinc-200 bg-white px-2 py-0.5 dark:border-zinc-800 dark:bg-zinc-900">
+            {uniquePersistedIds.length} persisted
+          </span>
+
+          <span className="rounded-md border border-zinc-200 bg-white px-2 py-0.5 dark:border-zinc-800 dark:bg-zinc-900">
+            {persistedInBudget.length}/{maxEvents} covered
+          </span>
+
+          {persistedOutsideBudget.length > 0 && (
+            <span className="rounded-md border border-zinc-200 bg-white px-2 py-0.5 text-amber-700 dark:border-zinc-800 dark:text-amber-300">
+              {persistedOutsideBudget.length} outside budget
+            </span>
+          )}
+
+          <span className="rounded-md border border-zinc-200 bg-white px-2 py-0.5 dark:border-zinc-800 dark:bg-zinc-900">
+            {totalPackets} pkt
+          </span>
+
+          <span className="rounded-md border border-zinc-200 bg-white px-2 py-0.5 dark:border-zinc-800 dark:bg-zinc-900">
+            {totalBytes.toLocaleString()} B
+          </span>
         </div>
       </div>
 
-      {!submissions.length ? (
-        <p className="text-xs text-zinc-500">No persisted WirePackets submissions in budget range.</p>
+      <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="flex items-center justify-between gap-2 text-xs">
+          <span className="font-semibold text-zinc-700 dark:text-zinc-200">Budget Coverage (1..{maxEvents})</span>
+          <span className="font-mono text-[11px] tabular-nums text-zinc-600 dark:text-zinc-400">
+            {persistedInBudget.length}/{maxEvents} · {coveragePercent.toFixed(coveragePercent % 1 === 0 ? 0 : 1)}%
+          </span>
+        </div>
+
+        <div
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(coveragePercent)}
+          aria-label="Persisted submission budget coverage"
+          className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-zinc-200/80 dark:bg-zinc-800"
+        >
+          <div
+            style={{ width: `${coveragePercent}%` }}
+            className="h-full rounded-full bg-blue-600 transition-all duration-300 dark:bg-blue-500"
+          />
+        </div>
+
+        <div className="mt-2 space-y-1 text-[11px] text-zinc-500">
+          <div>
+            <span className="font-medium text-zinc-700 dark:text-zinc-300">Persisted IDs:</span>{" "}
+            <span className="font-mono">{uniquePersistedIds.length ? uniquePersistedIds.join(", ") : "none"}</span>
+          </div>
+          <div>
+            <span className="font-medium text-zinc-700 dark:text-zinc-300">Missing in 1..{maxEvents}:</span>{" "}
+            <span className="font-mono">{missingInBudget.length ? missingInBudget.join(", ") : "none"}</span>
+          </div>
+          {persistedOutsideBudget.length > 0 && (
+            <div className="text-amber-700 dark:text-amber-300">
+              <span className="font-medium">Outside budget:</span>{" "}
+              <span className="font-mono">{persistedOutsideBudget.join(", ")}</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {data?.exists === false || !submissions.length ? (
+        <p className="text-xs text-zinc-500">No persisted WirePackets submissions found in storage.</p>
       ) : (
         <div className="space-y-2.5">
-          {submissions.map((entry, sIdx) => {
+          {submissions.map((entry, idx) => {
             const pkts = Array.isArray(entry?.packets) ? entry.packets : [];
+            const subId = entry.submission ?? entry.name ?? idx + 1;
+            const numId = Number(subId);
+            const inBudget = Number.isInteger(numId) && numId >= 1 && numId <= maxEvents;
             return (
-              <div key={`sub-${entry.submission ?? sIdx}`} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+              <div key={`sub-${subId}-${idx}`} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                   <div className="min-w-0">
-                    <div className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">Submission #{entry.submission ?? sIdx + 1}</div>
-                    {entry.path && <div className="truncate font-mono text-[11px] text-zinc-500">{entry.path}</div>}
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">Submission #{subId}</span>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                          inBudget
+                            ? "bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300"
+                            : "bg-amber-50 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300"
+                        }`}
+                      >
+                        {inBudget ? "In budget" : "Outside budget"}
+                      </span>
+                    </div>
+                    {entry.path && <div className="mt-0.5 truncate font-mono text-[11px] text-zinc-500">{entry.path}</div>}
                   </div>
                   <div className="flex gap-1.5 text-[11px] tabular-nums text-zinc-500">
                     <span>{Number(entry.bytes || 0).toLocaleString()} B</span>
@@ -218,7 +288,7 @@ function WirePacketsPanel({ data, error }) {
                 </div>
 
                 {!pkts.length ? (
-                  <p className="text-xs text-zinc-500">Empty submission.</p>
+                  <p className="text-xs text-zinc-500">No packets decoded in this submission.</p>
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full min-w-[620px] border-collapse text-left text-xs">
@@ -228,14 +298,14 @@ function WirePacketsPanel({ data, error }) {
                           <th className="py-1.5 px-2 font-medium">Txid</th>
                           <th className="py-1.5 px-2 font-medium">Vout</th>
                           <th className="py-1.5 px-2 font-medium">Value (sat)</th>
-                          <th className="py-1.5 px-2 font-medium">Script</th>
+                          <th className="py-1.5 px-2 font-medium">Script Pubkey</th>
                           <th className="py-1.5 pl-2 font-medium">Commitment</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {pkts.map((p, idx) => (
-                          <tr key={`${entry.submission}-${idx}`} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/60">
-                            <td className="py-1.5 pr-2 tabular-nums text-zinc-400">{idx + 1}</td>
+                        {pkts.map((p, pIdx) => (
+                          <tr key={`${subId}-${p.txid}-${p.vout}-${pIdx}`} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/60">
+                            <td className="py-1.5 pr-2 tabular-nums text-zinc-400">{pIdx + 1}</td>
                             <td className="max-w-[11rem] truncate py-1.5 px-2 font-mono text-[11px]" title={p.txid}>{p.txid || "—"}</td>
                             <td className="py-1.5 px-2 tabular-nums">{p.vout ?? "—"}</td>
                             <td className="py-1.5 px-2 tabular-nums">{p.value_sat != null ? Number(p.value_sat).toLocaleString() : "—"}</td>
@@ -265,33 +335,19 @@ function WirePacketsPanel({ data, error }) {
 
 function WirePacketsFilePanel({ data, error }) {
   if (!data && !error) return null;
-  if (error) return <JsonPanel title="WirePackets File" error={error} />;
+  if (error) return <JsonPanel title="WirePackets Binary" error={error} />;
 
   const byteLength = Number(data?.byteLength || 0);
   const hex = typeof data?.hex === "string" ? data.hex : "";
-  const items = Array.isArray(data?.items) ? data.items : [];
 
   return (
-    <div className={`mt-3 space-y-3 ${subCardClass}`}>
+    <div className={`mt-3 space-y-3 ${subCard}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200">
-          WirePackets Binary · Submissions 1..{data?.max_events ?? Math.max(1, items.length)}
-        </span>
+        <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200">WirePackets Concatenated Binary</span>
         <span className="rounded-md border border-zinc-200 bg-white px-2 py-0.5 text-[11px] tabular-nums text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900">
           {byteLength.toLocaleString()} bytes
         </span>
       </div>
-
-      {items.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {items.map((it) => (
-            <span key={it.submission} className="rounded-md border border-zinc-200 bg-white px-2 py-1 font-mono text-[11px] dark:border-zinc-800 dark:bg-zinc-900">
-              #{it.submission}: {it.bytes}B
-            </span>
-          ))}
-        </div>
-      )}
-
       {byteLength === 0 ? (
         <p className="text-xs text-zinc-500">No binary bytes returned.</p>
       ) : (
@@ -306,15 +362,15 @@ function WirePacketsFilePanel({ data, error }) {
 function EventMetrics({ event }) {
   return (
     <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
-      <div className={metricBoxClass}>
+      <div className={metricBox}>
         <div className="text-[11px] text-zinc-500">Dimension</div>
         <div className="mt-0.5 text-base font-semibold tabular-nums">{event?.dimension ?? "—"}</div>
       </div>
-      <div className={metricBoxClass}>
+      <div className={metricBox}>
         <div className="text-[11px] text-zinc-500">Retained Mass</div>
         <div className="mt-0.5 break-all text-base font-semibold tabular-nums">{event?.retained_mass ?? "—"}</div>
       </div>
-      <div className={metricBoxClass}>
+      <div className={metricBox}>
         <div className="text-[11px] text-zinc-500">Delta</div>
         <div className="mt-0.5 text-base font-semibold tabular-nums">{event?.delta ?? "—"}</div>
       </div>
@@ -355,7 +411,7 @@ function NetworkCard({
   const [panelBusy, setPanelBusy] = useState("");
 
   const commitments = useMemo(() => {
-    const subs = packetData?.submissions || packetData?.packets || [];
+    const subs = packetData?.packets || [];
     return [
       ...new Set(
         subs
@@ -383,7 +439,7 @@ function NetworkCard({
   const maxEvents = parseMaxEvents(budget);
 
   return (
-    <article className={cardClass}>
+    <article className={card}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="min-w-0">
           <h3 className="truncate text-sm font-semibold">{network}</h3>
@@ -402,7 +458,7 @@ function NetworkCard({
         </span>
       </div>
 
-      <div className={`mt-3 ${subCardClass}`}>
+      <div className={`mt-3 ${subCard}`}>
         <div className="flex items-center justify-between gap-2">
           <span className="text-xs font-semibold">Event Budget</span>
           <span className={`text-[11px] ${budget?.configured ? "text-emerald-700 dark:text-emerald-300" : "text-zinc-500"}`}>
@@ -436,19 +492,19 @@ function NetworkCard({
           </label>
         </div>
         <div className="mt-2.5 flex items-center justify-between gap-2">
-          <span className="text-[11px] text-zinc-500">Submissions queried: 1..{maxEvents}</span>
+          <span className="text-[11px] text-zinc-500">Target range: 1..{maxEvents}</span>
           <button type="button" className={btnPrimary} disabled={saving} onClick={() => onSaveBudget(network)}>
             {saving ? "Saving…" : "Save budget"}
           </button>
         </div>
         {budgetMessage && (
-          <p role="status" className={`mt-2 ${budgetMessage.type === "success" ? successTextClass : errorTextClass}`}>
+          <p role="status" className={`mt-2 ${budgetMessage.type === "success" ? okText : errText}`}>
             {budgetMessage.text}
           </p>
         )}
       </div>
 
-      <div className={`mt-3 ${subCardClass}`}>
+      <div className={`mt-3 ${subCard}`}>
         <div className="flex items-center justify-between gap-2">
           <span className="text-xs font-semibold">BitMiner</span>
           {minerStatus?.pid != null && <span className="font-mono text-[11px] text-zinc-500">PID {minerStatus.pid}</span>}
@@ -465,11 +521,11 @@ function NetworkCard({
           </button>
         </div>
         {minerMessage && (
-          <p role="status" className={`mt-2 ${/fail|error|reject/i.test(minerMessage) ? errorTextClass : successTextClass}`}>
+          <p role="status" className={`mt-2 ${/fail|error|unable|invalid/i.test(minerMessage) ? errText : okText}`}>
             {minerMessage}
           </p>
         )}
-        {minerStatus?.error && !running && <p className={`mt-1.5 whitespace-pre-wrap ${errorTextClass}`}>{minerStatus.error}</p>}
+        {minerStatus?.error && !running && <p className={`mt-1.5 whitespace-pre-wrap ${errText}`}>{minerStatus.error}</p>}
         {minerStatus && (
           <div className="mt-2 space-y-0.5 text-[11px] text-zinc-500">
             <div>State: {running ? "running" : "stopped"} · Activation: {minerStatus.activation ?? activeClip?.activation?.id}</div>
@@ -478,7 +534,7 @@ function NetworkCard({
         )}
       </div>
 
-      <div className={`mt-3 ${subCardClass}`}>
+      <div className={`mt-3 ${subCard}`}>
         <div className="flex items-center justify-between gap-2">
           <span className="text-xs font-semibold">Observation & Payloads</span>
           {panelBusy && <span className="text-[11px] text-zinc-500">Loading {panelBusy}…</span>}
@@ -487,11 +543,11 @@ function NetworkCard({
           <button type="button" className={btnNeutral} disabled={!!panelBusy} onClick={() => runPanel("log", onLog, setLogData, setLogError, "log")}>
             Log
           </button>
-          <button type="button" className={btnNeutral} disabled={!!panelBusy} onClick={() => runPanel("packets", () => onPackets(maxEvents), setPacketData, setPacketError, "WirePackets")}>
+          <button type="button" className={btnNeutral} disabled={!!panelBusy} onClick={() => runPanel("packets", onPackets, setPacketData, setPacketError, "WirePackets")}>
             WirePackets (1..{maxEvents})
           </button>
-          <button type="button" className={btnNeutral} disabled={!!panelBusy} onClick={() => runPanel("file", () => onPacketFile(maxEvents), setFileData, setFileError, "WirePackets file")}>
-            Binary (1..{maxEvents})
+          <button type="button" className={btnNeutral} disabled={!!panelBusy} onClick={() => runPanel("file", onPacketFile, setFileData, setFileError, "WirePackets file")}>
+            Binary File
           </button>
           <button type="button" className={btnNeutral} disabled={!!panelBusy} onClick={() => runPanel("board", onNetworkBoard, setBoardData, setBoardError, "network board")}>
             Payload Board
@@ -510,7 +566,7 @@ function NetworkCard({
         </div>
 
         <JsonPanel title="Observation Log" value={logData} error={logError} />
-        <WirePacketsPanel data={packetData} error={packetError} />
+        <WirePacketsPanel data={packetData} error={packetError} maxEvents={maxEvents} />
         <WirePacketsFilePanel data={fileData} error={fileError} />
         <JsonPanel title="Signing Data" value={signingData} error={signingError} />
         <JsonPanel title="Network Payload Board" value={boardData} error={boardError} />
@@ -691,7 +747,7 @@ export default function Home() {
             configured: true,
           },
         }));
-        setBudgetMessages((prev) => ({ ...prev, [network]: { type: "success", text: "Saved" } }));
+        setBudgetMessages((prev) => ({ ...prev, [network]: { type: "success", text: "Budget saved" } }));
       } catch (e) {
         setBudgetMessages((prev) => ({ ...prev, [network]: { type: "error", text: e.message || "Save failed." } }));
       } finally {
@@ -726,78 +782,36 @@ export default function Home() {
     [activeClip, refreshStatus]
   );
 
-  const fetchAllSubmissions = useCallback(
-    async (network, maxEvents) => {
+  const fetchPanel = useCallback(
+    async (network, kind, commitment) => {
+      if (!activeClip) return null;
       const args = { name: activeClip.substrate.name, activation: activeClip.activation.id, network };
-      const submissions = [];
-      let lastError = null;
-      for (let sub = 1; sub <= maxEvents; sub += 1) {
-        try {
-          const data = await req(ROUTES.wirepackets({ ...args, submission: sub }));
-          if (data?.exists === false) continue;
-          if (Array.isArray(data?.packets) && data.packets.length > 0 && data.packets[0]?.packets) {
-            data.packets.forEach((p, i) => submissions.push(normalizeSubmissionEntry(p, p?.submission ?? i + 1)));
-          } else {
-            submissions.push(normalizeSubmissionEntry(data, sub));
-          }
-        } catch (e) {
-          lastError = e;
-        }
-      }
-      if (!submissions.length && lastError) throw lastError;
-      return { max_events: maxEvents, submissions };
-    },
-    [activeClip]
-  );
-
-  const fetchAllBinarySubmissions = useCallback(
-    async (network, maxEvents) => {
-      const args = { name: activeClip.substrate.name, activation: activeClip.activation.id, network };
-      const items = [];
-      const chunks = [];
-      let lastError = null;
-      for (let sub = 1; sub <= maxEvents; sub += 1) {
-        const [, path] = ROUTES.wirepacketsFile({ ...args, submission: sub });
+      if (kind === "log") return req(ROUTES.log(args));
+      if (kind === "packets") return req(ROUTES.wirepackets(args));
+      if (kind === "signing") return req(ROUTES.signing({ ...args, commitment }));
+      if (kind === "board") return req(ROUTES.networkBoard(args));
+      if (kind === "file") {
+        const [, path] = ROUTES.wirepacketsFile(args);
         const res = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
         if (!res.ok) {
           const body = await res.text();
-          lastError = new Error(body || `HTTP ${res.status}`);
-          continue;
+          let parsed;
+          try {
+            parsed = JSON.parse(body);
+          } catch {
+            /* plain text */
+          }
+          throw new Error(parsed?.error || body || `HTTP ${res.status}`);
         }
-        const buf = new Uint8Array(await res.arrayBuffer());
-        items.push({ submission: sub, bytes: buf.length });
-        chunks.push(buf);
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        return {
+          byteLength: bytes.length,
+          hex: Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join(" "),
+        };
       }
-      if (!items.length && lastError) throw lastError;
-      const total = chunks.reduce((s, b) => s + b.length, 0);
-      const merged = new Uint8Array(total);
-      let offset = 0;
-      chunks.forEach((b) => {
-        merged.set(b, offset);
-        offset += b.length;
-      });
-      return {
-        max_events: maxEvents,
-        byteLength: total,
-        items,
-        hex: Array.from(merged, (b) => b.toString(16).padStart(2, "0")).join(" "),
-      };
-    },
-    [activeClip]
-  );
-
-  const fetchPanel = useCallback(
-    async (network, kind, arg) => {
-      if (!activeClip) return null;
-      const base = { name: activeClip.substrate.name, activation: activeClip.activation.id, network };
-      if (kind === "log") return req(ROUTES.log(base));
-      if (kind === "packets") return fetchAllSubmissions(network, arg);
-      if (kind === "file") return fetchAllBinarySubmissions(network, arg);
-      if (kind === "signing") return req(ROUTES.signing({ ...base, commitment: arg }));
-      if (kind === "board") return req(ROUTES.networkBoard(base));
       return null;
     },
-    [activeClip, fetchAllSubmissions, fetchAllBinarySubmissions]
+    [activeClip]
   );
 
   const loadActivationBoard = useCallback(async () => {
@@ -831,7 +845,7 @@ export default function Home() {
           )}
         </header>
 
-        <section className={cardClass}>
+        <section className={card}>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="flex flex-col gap-1 text-xs font-medium text-zinc-600 dark:text-zinc-400">
               Substrate
@@ -869,11 +883,11 @@ export default function Home() {
           {(loadingSubstrates || loadingEvents || loadingNetworks) && (
             <p className="mt-2.5 text-xs text-zinc-500">Syncing state from API…</p>
           )}
-          {error && <p className={`mt-2.5 ${errorTextClass}`}>{error}</p>}
+          {error && <p className={`mt-2.5 ${errText}`}>{error}</p>}
         </section>
 
         {activeClip && (
-          <section className={cardClass}>
+          <section className={card}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h2 className="text-sm font-semibold">Activation Context</h2>
@@ -892,7 +906,7 @@ export default function Home() {
           <section className="space-y-3">
             <div>
               <h2 className="text-sm font-semibold">Network Contexts</h2>
-              <p className="text-xs text-zinc-500">Scoped budgets, BitMiner controls, and decoded submissions.</p>
+              <p className="text-xs text-zinc-500">Scoped budgets, BitMiner controls, and persisted submissions.</p>
             </div>
 
             {activeNetworks.length ? (
@@ -920,8 +934,8 @@ export default function Home() {
                         )
                       }
                       onLog={() => fetchPanel(network, "log")}
-                      onPackets={(max) => fetchPanel(network, "packets", max)}
-                      onPacketFile={(max) => fetchPanel(network, "file", max)}
+                      onPackets={() => fetchPanel(network, "packets")}
+                      onPacketFile={() => fetchPanel(network, "file")}
                       onSigning={(c) => fetchPanel(network, "signing", c)}
                       onNetworkBoard={() => fetchPanel(network, "board")}
                     />
